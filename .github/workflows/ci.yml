@@ -77,3 +77,4 @@ jobs:
           python scripts/test_verify.py
           python scripts/test_verify_frame.py
           python scripts/test_install.py
+          python scripts/test_make_icon.py
