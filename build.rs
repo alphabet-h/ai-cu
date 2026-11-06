@@ -18,12 +18,21 @@
 //! (消した) パスも出す。cargo はそのパスが無い間は毎回再実行するので、固定の一覧に無い場所の dirty を
 //! git を介さずに消した次の build で印が clean に戻る) を出す。`git` は `GIT_OPTIONAL_LOCKS=0` で呼び、
 //! `status` が index を書き直して自分の引き金を引かないようにする。
+//!
+//! もう 1 つの仕事として、exe にアイコンを埋め込む (D-127)。`embed_resource::compile` で
+//! `assets/icon/ai-cu.rc` (`assets/icon/ai-cu.ico` を指す) をリソースにしてバイナリにリンクする。
+//! `Failed` (rc の誤りや、MSVC で rc.exe が無いとき) はビルドを止め、`NotAttempted` (gnu で windres や
+//! llvm-rc が無いとき) は `cargo::warning` を 1 行出して続ける。アイコンを作り直したら exe に入り直すよう、
+//! 固定の引き金に `assets` を入れる。
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// アイコンのリソースの台本 (クレートの根からの相対パス。build script は根で走る)
+const ICON_RC: &str = "assets/icon/ai-cu.rc";
+
 /// 固定の引き金 (クレートの根からの相対パス)。ディレクトリは cargo が中を走査する
-const FIXED_TRIGGERS: [&str; 9] = [
+const FIXED_TRIGGERS: [&str; 10] = [
     "build.rs",
     "Cargo.toml",
     "Cargo.lock",
@@ -33,6 +42,7 @@ const FIXED_TRIGGERS: [&str; 9] = [
     "docs",
     "README.md",
     "CLAUDE.md",
+    "assets",
 ];
 
 fn main() {
@@ -64,6 +74,21 @@ fn main() {
     println!("cargo::rustc-env=AI_CU_GIT_COMMIT={commit}");
     println!("cargo::rustc-env=AI_CU_GIT_DIRTY={dirty}");
     println!("cargo::rustc-env=AI_CU_BUILD_META={meta}");
+
+    embed_icon();
+}
+
+/// exe にアイコンを埋め込む (D-127)。`Failed` は止め、`NotAttempted` は warning で続ける
+fn embed_icon() {
+    match embed_resource::compile(ICON_RC, embed_resource::NONE) {
+        embed_resource::CompilationResult::Ok | embed_resource::CompilationResult::NotWindows => {}
+        r @ embed_resource::CompilationResult::NotAttempted(_) => {
+            println!("cargo::warning=ai-cu: アイコンを埋め込まずに続ける ({r}) (D-127)");
+        }
+        r @ embed_resource::CompilationResult::Failed(_) => {
+            panic!("ai-cu: アイコンのリソース ({ICON_RC}) を作れない: {r} (D-127)");
+        }
+    }
 }
 
 fn rerun_if_changed(p: &Path) {

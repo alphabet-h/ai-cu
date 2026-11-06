@@ -58,3 +58,7 @@ undocumented_unsafe_blocks = "deny"
 
 [dev-dependencies]
 proptest = "1.12.0"
+
+# exe にアイコン (assets/icon/ai-cu.rc) を埋め込む (D-127)
+[build-dependencies]
+embed-resource = "3"
