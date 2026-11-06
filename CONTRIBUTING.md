@@ -45,7 +45,8 @@ cargo build --release
 ## Pull Request
 
 - 1 つの PR には 1 つのまとまった変更を入れます
-- 振る舞いを変えたら、テストと README (使い方、書式、終了コード、安全機能) を合わせて直します
+- 振る舞いを変えたら、テストと README (使い方、書式、終了コード、安全機能) と、その細部を置いた [docs/reference/](docs/reference/) の文書を合わせて直します
+- 終了コード (`ErrorKind`) を変えたら、README の表に加えて [docs/reference/exit-codes.md](docs/reference/exit-codes.md) の名前の節も直します (テストは README の表を見ますが、このファイルは見ません)
 - 設定の書式、操作列 JSON の書式、終了コードを変えるときは、互換性への影響を PR に書きます
 - コミットメッセージとファイルに、外の人が辿れない私的な参照 (個人の課題管理の番号、手元の絶対パスなど) を書かないでください
 

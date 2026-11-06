@@ -31,7 +31,7 @@ ai-cu は、AI に本物のマウスとキーボードを動かさせ、画面�
 
 ## 脆弱性として扱うもの
 
-ai-cu の守り ([README の「安全機能」](README.md#安全機能)) を、設定や想定に反して越えられるもの。たとえば:
+ai-cu の守り ([README の「安全機能」](README.md#安全機能)。限界を含む細部は [安全機能の詳細](docs/reference/safety.md)) を、設定や想定に反して越えられるもの。たとえば:
 
 - 設定ファイルが無い、または `general.input_enabled` / `general.capture_enabled` / `capture.full_screen` が false なのに、入力や撮影ができる (既定で拒否する作りを越えられる)
 - 設定の `deny` や、`allow` に無い対象 (操作の種類、プロセス、ウィンドウのクラス、画面の領域、キー) に、入力が届く・撮影できる・読める
@@ -44,9 +44,9 @@ ai-cu の守り ([README の「安全機能」](README.md#安全機能)) を、�
 
 ## 範囲の外 (既知の限界)
 
-次は README に限界として書いてあるもので、脆弱性としては扱いません (改善の提案は Issue で歓迎します)。
+次は README の「注意」と [安全機能の詳細](docs/reference/safety.md) (設定の規則の限界は [設定ファイルの詳細](docs/reference/config.md)) に限界として書いてあるもので、脆弱性としては扱いません (改善の提案は Issue で歓迎します)。
 
 - シェルを持つ AI が、ai-cu を使わずに設定ファイルを書き換える、または別の手段で入力を送る (ai-cu の守りは ai-cu を通る操作に対するもの)
 - 管理者権限のウィンドウ (UIPI) には入力が届かない前提の動き
-- README の「安全機能」に限界として書いてあるもの (たとえば `capture.save_dirs` がジャンクションやシンボリックリンクをたどらないこと)
+- [安全機能の詳細](docs/reference/safety.md) と [設定ファイルの詳細](docs/reference/config.md) に限界として書いてあるもの (たとえば `capture.save_dirs` がジャンクションやシンボリックリンクをたどらないこと)
 - 利用者が自分で広げた設定 (`allow` を空にする、`full_screen = true` にするなど) のとおりに動くこと

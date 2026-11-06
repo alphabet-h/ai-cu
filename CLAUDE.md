@@ -3,7 +3,7 @@
 AI が Windows のデスクトップを操作するための CLI (Rust)。
 クリック、ドラッグ、キー入力、スクロール、待機、スクリーンショットといった一連の操作を JSON で受け取り、順に実行する。
 「画面を見て次を決める」ループは呼び出し側の AI が担い、このツールは「手」(操作の実行) と「目」(画面の取得) だけを担当する。
-概要は README.md。このマシン固有の事実は CLAUDE.local.md。調べて分かった落とし穴は docs/design-notes.md、判断の記録は docs/decisions.md。
+概要は README.md。その細部 (CLI、MCP、操作列、設定、終了コード、安全機能、開発) は docs/reference/ (D-124)。このマシン固有の事実は CLAUDE.local.md。調べて分かった落とし穴は docs/design-notes.md、判断の記録は docs/decisions.md。
 git で管理しない調査結果やメモは .dev/ (gitignore 済み) に、フォルダを分けて置く。分け方は .dev の README に書いてある。作業領域 (scratchpad) はセッションが終わると消えるので、残す価値のあるものは .dev に移す。設計の spec と実装の plan も .dev に書く (D-120)。
 
 ## 公開リポジトリとしての約束 (D-116、D-120)
@@ -93,7 +93,7 @@ verify.py ごと外から止められた (メモリ不足などで、まとめ�
 
 - fmt、clippy (警告なし)、test が通る。`test result:` の行を省略せずに出し、実際に走った件数が 0 の成功は成功と見なさない
 - `cargo build --release` が通る
-- README に、使い方、操作列 JSON の書式、設定ファイルの書式、終了コード、安全機能が書かれている。`grep -n "^## " README.md` で見出しを出す
+- README に、使い方、操作列 JSON の書式、設定ファイルの書式、終了コード、安全機能が書かれている (README の要約と docs/reference/ へのリンクの組で満たす。D-124)。`grep -n "^## " README.md` で見出しを出す
 - 安全機能 (緊急停止、`--dry-run`、`validate`、フォアグラウンドガード、設定の allow / deny、実行時ガード) が実装され、モックのテストで検証されている。テスト名を `cargo test -- --list` から出して、要件との対応を示す
 - 設定ファイルの読み書きと allow / deny の判定にテストがある (deny が allow に勝つ、空の設定、大文字小文字、未知のキーや版は拒否)。TUI の描画と操作に `TestBackend` のテストがあり、端末なしの起動がハングしないことを子プロセスで確かめるテストがある
 - 実行時ガードが、許可 (opt-in) なしで実バックエンドを拒否することのテストがある
