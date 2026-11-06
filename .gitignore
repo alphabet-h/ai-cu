@@ -10,6 +10,11 @@ CLAUDE.local.md
 .claude/worktrees/
 .claude/scheduled_tasks.lock
 .claude/autopilot.md
+# 手元で `npx skills add` で入れた第三者のスキル (本体は .agents/、Claude Code へは .claude/skills/ のリンク)。
+# 再配布しないので追跡しない。プロジェクトのスキル (.claude/skills/verify) は追跡する
+/.agents/
+/skills-lock.json
+/.claude/skills/tui-design
 
 # --- 開発用の作業領域 (調査結果、メモなど。git で管理しない。中身の分け方は .dev/README.md) ---
 /.dev/
