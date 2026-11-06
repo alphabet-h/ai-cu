@@ -98,7 +98,7 @@
 - 判断: ローカルコミットまで (○)。push、履歴の書き換え、`reset --hard` は禁止。ブランチ名はユーザーが `git init` した結果の master を変えない
 - 根拠: 長い作業で区切りごとの退避点があると、問題が出たときに戻れる。push は外部への公開なので、ユーザーの明示がない限りしない。ブランチ名はユーザーの操作の結果で、変える理由がない
 - 覆る条件: ユーザーが「コミットはしないで」「push してよい」と言ったとき
-- 状態: 採用。一部置換 (D-116: GitHub への公開の作業に限り、利用者の許可で、`.git` のバックアップを取った後の履歴の書き換えと、公開の push を行う)。一部置換 (D-121: .claude/settings.json の git push の deny を外した)。一部置換 (D-122: 手元のブランチは main)
+- 状態: 採用。一部置換 (D-116: GitHub への公開の作業に限り、利用者の許可で、`.git` のバックアップを取った後の履歴の書き換えと、公開の push を行う)。一部置換 (D-121: .claude/settings.json の git push の deny を外した)。一部置換 (D-122: 手元のブランチは main)。一部置換 (D-123: push と PR は利用者に頼まれたときだけ。main は PR と CI が必須)
 
 ### D-008 言語規約: ドキュメントとコメントは日本語、識別子は英語
 - 日付: 2026-10-06
@@ -1605,4 +1605,14 @@
 - 場面: 公開 (D-116) の既定のブランチは main で、手元の master を master:main で push していた。利用者が手元のブランチも main にするよう指示した
 - 判断: 利用者の決定。`git branch -m master main`。追跡先は origin/main のまま。手元の git の設定に push.default = upstream を入れてある (名前がそろったので、無くても git push は通る)。公開しない旧履歴のブランチ pre-publish-history はそのまま
 - 覆る条件: 利用者が名前を変えたくなったとき
+- 状態: 採用 (2026-11-06)
+
+### D-123 公開リポジトリの運用: 脆弱性は GitHub の非公開の報告で受け、CI を置き、main は PR と CI の通過を必須にする
+- 日付: 2026-11-06
+- 場面: 公開 (D-116) の後、利用者がセキュリティの報告の窓口と運用まわりの整備を頼んだ
+- 選択肢と判断 (利用者の決定): 報告の窓口は GitHub の private vulnerability reporting だけ (メールは出さない)。CI は GitHub Actions の windows-latest で fmt、clippy、`cargo test` (実デスクトップに触れない既定のテストだけ)、release のビルド、hook と検査のスクリプトのテスト。main は PR と CI の通過を必須にする (force push と削除も拒む)
+- 置いたもの: SECURITY.md (報告のしかた、対象の版、脆弱性として扱うものと範囲の外)、CONTRIBUTING.md (安全の約束、環境、検査、PR)、Issue の書式 (不具合、要望。空の Issue は止め、脆弱性は非公開の報告へ誘導)、PR の書式、`.github/workflows/ci.yml` (actions は SHA で固定、`permissions: contents: read`、`persist-credentials: false`)、`.github/dependabot.yml` (cargo と actions を週 1 回)。GitHub の設定で、非公開の報告、Dependabot の通知と修正の PR、秘密の検出と push の保護を有効にする
+- 根拠: 実入力のテスト (`--ignored`) は CI のランナーで走らせない (実デスクトップと人の不在を前提にできない。フィクスチャ限定でも、ランナーの画面の状態に依存する)。一人の開発でも PR と CI を必須にすれば、AI の変更が検査を通らずに main に入ることを GitHub の側で止められる
+- 運用: AI は main から切ったブランチで作業し、push と PR は利用者に頼まれたときだけ (CLAUDE.md)。必須の承認の人数は 0 (一人の開発で自分の PR を承認できないため)
+- 覆る条件: 他の人が開発に加わったとき (承認の人数を 1 にする)。CI のランナーで既定のテストが環境の違いで不安定になったとき
 - 状態: 採用 (2026-11-06)

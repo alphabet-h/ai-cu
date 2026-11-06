@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 脆弱性の報告 (Report a vulnerability)
+    url: https://github.com/alphabet-h/ai-cu/security/advisories/new
+    about: 守り (allow / deny、ガード、緊急停止など) を越えられる不具合は、公開の Issue ではなくこちらから非公開で報告してください。 Please report security issues privately here.

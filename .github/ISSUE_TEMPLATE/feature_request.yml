@@ -1,0 +1,21 @@
+name: 要望 (Feature request)
+description: 足してほしい操作、読み取り、設定、使い勝手の改善
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: 困っていること
+      description: 何をしようとして、何ができないか (回り道をしているなら、その方法も)
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 案
+      description: 欲しい動きや書式の案。無ければ空でよい
+  - type: textarea
+    id: safety
+    attributes:
+      label: 安全への影響
+      description: AI に許す範囲が広がるか。設定の allow / deny でどう絞れるとよいか

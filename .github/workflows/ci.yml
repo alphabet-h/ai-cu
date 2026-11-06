@@ -1,0 +1,79 @@
+# 実デスクトップに触れない検査だけを走らせる (実入力のテスト `cargo test -- --ignored` は走らせない。D-123)
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  # 取り消すのは PR の古い実行だけ (main の各コミットには CI の結果を残す)
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: never
+  RUST_BACKTRACE: "1"
+  PYTHONDONTWRITEBYTECODE: "1"
+  PYTHONIOENCODING: utf-8
+
+jobs:
+  check:
+    name: check (windows)
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+
+      - name: Rust のツールチェーン
+        id: rust
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy
+          rustup default stable
+          rustc -vV
+          echo "version=$(rustc -V | tr -c 'A-Za-z0-9.' '-')" >> "$GITHUB_OUTPUT"
+
+      # 依存の取得と依存のビルドだけをキャッシュする (target/debug/incremental は外す)。鍵に rustc の版を入れ、
+      # ツールチェーンが上がったら作り直す
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target/debug/deps
+            target/debug/build
+            target/release/deps
+            target/release/build
+          key: cargo-${{ runner.os }}-${{ steps.rust.outputs.version }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-${{ steps.rust.outputs.version }}-
+
+      - name: fmt
+        run: cargo fmt --all -- --check
+      - name: clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+      - name: test (実デスクトップに触れないものだけ)
+        run: cargo test --locked
+      - name: release のビルド
+        run: cargo build --release --locked
+
+      - name: ガード hook のテスト
+        run: python .claude/hooks/test_guard_real_input.py
+      - name: 検査のスクリプトのテスト
+        # bash は -eo pipefail で走るので、途中の失敗で止まる (pwsh はネイティブの exe の失敗で止まらない)
+        shell: bash
+        run: |
+          python scripts/test_verify.py
+          python scripts/test_verify_frame.py
+          python scripts/test_install.py

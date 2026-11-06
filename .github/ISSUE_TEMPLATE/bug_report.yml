@@ -1,0 +1,61 @@
+name: 不具合の報告 (Bug report)
+description: 期待どおりに動かない、拒否の理由が分からない、など
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        守り (allow / deny、ガード、緊急停止など) を越えられる不具合は、この Issue ではなく [非公開の報告](https://github.com/alphabet-h/ai-cu/security/advisories/new) を使ってください。
+        スクリーンショットや出力を貼るときは、個人の情報 (窓の題名、画面の文字、ユーザー名の入ったパス) が写っていないか確かめてください。
+  - type: textarea
+    id: what
+    attributes:
+      label: 何が起きたか
+      description: 実際の動き。終了コードと、出力の JSON の `error` (`code`、`reason`、`message`、`hint`、`rule`、`fix`) があれば貼る
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期待した動き
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: 再現の手順
+      description: 打ったコマンドか MCP の呼び出し、操作列 JSON、関係する設定 (`ai-cu config show` の該当部分)
+      render: text
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: ai-cu の版
+      description: "`ai-cu --version` の出力"
+    validations:
+      required: true
+  - type: input
+    id: windows
+    attributes:
+      label: Windows の版と表示の倍率
+      description: "例: Windows 11 24H2、125%。複数のモニターならその構成も"
+    validations:
+      required: true
+  - type: dropdown
+    id: surface
+    attributes:
+      label: 使い方
+      options:
+        - CLI
+        - MCP (Claude Code)
+        - MCP (Codex)
+        - MCP (その他)
+        - TUI
+    validations:
+      required: true
+  - type: textarea
+    id: extra
+    attributes:
+      label: その他
+      description: 対象のアプリ、ログ (`mcp --log` の行など)

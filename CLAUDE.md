@@ -38,7 +38,7 @@ git で管理しない調査結果やメモは .dev/ (gitignore 済み) に、�
 - 実入力のサブコマンドをシェルから起動してよいのは、`/verify` の全手順を通した release ビルドを `target/release/ai-cu.exe` のパスで呼ぶときだけ。それも、利用者が Claude Code を起動したシェルに `AI_CU_MANUAL_CHECK=1` を付けたセッションに限る (hook が自分の環境変数で見る。settings.json には書かない)。`cargo run` とデバッグビルドからの実入力は `.claude/hooks/guard_real_input.py` が止める (D-013、D-024、D-051)。実機に触れる一連の確認 (docs/manual-check/CHECKLIST.md) の前に、利用者の GO を 1 回もらい、その間は利用者がマウスとキーボードから手を離す。先に実入力の検証を `cargo test` のモックとフィクスチャ限定の実機テストで済ませてから行う
 - 次はユーザーに確認してから行う: アプリやツールのインストール (`cargo install`、`rustup`、`winget` など)、プロジェクト外のファイル変更 (グローバル設定を含む)、ファイルの削除、サービスの契約や課金。依存クレートの取得は許可済み (D-004、D-005)
 - 確認が要る作業は後回しにして、他を先に進める。進められる作業が尽きたら、質問を 1 回だけまとめて明記して止まる。確認の画面が出る操作を途中で試して、全体を止めない
-- git はローカルコミットまで。push、履歴の書き換え、`reset --hard` は禁止 (D-007)。コミットメッセージは `target/commit-msg.txt` に書き、`git add` してから `git -C <絶対パス> commit -F target/commit-msg.txt` で渡す
+- git はローカルコミットまで。履歴の書き換えと `reset --hard` は禁止 (D-007)。push と PR は利用者に頼まれたときだけ。GitHub の `main` は保護していて、PR と CI の通過が要る (D-123)。作業は `main` から切ったブランチで行い、頼まれたらそのブランチを push して `gh pr create` で PR にする。コミットメッセージは `target/commit-msg.txt` に書き、`git add` してから `git -C <絶対パス> commit -F target/commit-msg.txt` で渡す
 - スクリーンショットには個人情報が写りうる。リポジトリにコミットしない。生成先は `target/` か作業領域。全画面のキャプチャを `Read` で開かない
 - `.claude/`、`.git/`、`.cargo/` は編集しない (保護パスで、確認が出る)。`.cargo/` は作らない。worktree 分離は使わない (D-025)
 - `cargo new`、`cargo init`、`cargo vendor` はプロジェクト内のパスにだけ使う。ファイルの削除は避け、不要なビルド成果物は `cargo clean` で消す

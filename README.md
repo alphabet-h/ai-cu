@@ -351,7 +351,8 @@ TUI (引数なしで起動): 標準入力と標準出力の両方が端末のと
 
 ## 開発者向け
 
-- 作業ルールと安全ルール: CLAUDE.md
+- 参加のしかた (安全の約束、検査、PR): CONTRIBUTING.md。脆弱性の報告: SECURITY.md
+- 作業ルールと安全ルール (AI のエージェント向け): CLAUDE.md
 - 設計判断の記録: docs/decisions.md
 - 調べて分かった落とし穴 (Windows の入力、端末、設定のパス): docs/design-notes.md
 - 構成: ライブラリ `ai_cu` (純粋な論理は trait 越しにモックでテストする) とバイナリ `ai-cu`。`unsafe` は `src/win32/` だけに置く (FFI の例外: 重い検査の枠を出す `scripts/verify_frame.py` は Python の ctypes で Win32 を呼ぶ。win32-reviewer のレビューの対象に入れる。D-111)
@@ -364,4 +365,4 @@ TUI (引数なしで起動): 標準入力と標準出力の両方が端末のと
 
 ## ライセンス
 
-MIT (LICENSE)。不具合や要望は GitHub の Issues へ。
+MIT (LICENSE)。不具合や要望は GitHub の Issues へ。守り (allow / deny、ガード、緊急停止など) を越えられる不具合は、公開の Issue ではなく SECURITY.md の非公開の報告へ。
