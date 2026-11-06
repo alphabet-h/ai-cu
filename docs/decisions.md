@@ -1617,3 +1617,27 @@
 - 覆る条件: 他の人が開発に加わったとき (承認の人数を 1 にする)。CI のランナーで既定のテストが環境の違いで不安定になったとき
 - 状態: 採用 (2026-11-06)
 - 追記 (2026-11-06、設定の結果): 最初の CI (56416ad) は 3 分 17 秒で通った (`gh run view --log` の `test result:` は 759 + 20 + 9 passed、ignored の 50 は走らせず、Python のテストは 18、53、28、11 件)。レビューの指摘で、スクリプトのテストのステップを bash にした (pwsh はネイティブの exe の失敗で止まらず、最後のコマンドだけで成否が決まるため)。キャッシュの鍵に rustc の版を入れ、依存の成果物だけを対象にした。取り消しは PR の古い実行だけにした。GitHub の設定: private vulnerability reporting、Dependabot の通知と修正の PR、秘密の検出と push の保護を有効にした。ruleset「main」(既定のブランチ。削除と force push の禁止、PR 必須 (承認 0)、必須の検査 `check (windows)`、bypass なし) を置いた。マージ後のブランチの自動削除を有効にし、使わない Wiki と Projects を無効にした
+
+### D-124 README を入口にし、細部を docs/reference/ に移す
+- 日付: 2026-11-06
+- 場面: 公開 (D-116) の後、利用者が README を簡潔で読みやすく、見た目の整った形にするよう頼んだ。README は 1 行が数百字から数千字の段落と表の行が多く、初めて来た人が「何か・なぜ・始め方」を掴みにくい。一方で中身は仕様として正しく、SECURITY.md や他の文書が README の節 (限界の記述など) を参照している
+- 選択肢: A 細部を消して短くする / B 細部を docs/reference/ の話題ごとのファイルへ文言を変えずに移し、README は要約とリンクにする / C README のまま `<details>` で折りたたむ
+- 判断: B (○)
+- 根拠: A は情報が失われ、README を参照する他の文書が指す先を失う。C は README の長さと、1 行が長くて読めない問題が残る (折りたたんでも中身は同じ)。B なら README は入口になり、細部は README の各節から 1 本のリンクで辿れる
+- 置き場: README の節と docs/reference/ のファイルの対応は次のとおり。これより前の判断で「README の <節>」の細部 (限界、規則、出力の形、開発の手順など) とあるものは、この表の移した先を指す
+
+  | README の節 | 移した先 |
+  |---|---|
+  | 使い方 | docs/reference/cli.md |
+  | MCP サーバーモード | docs/reference/mcp.md |
+  | 操作列 JSON | docs/reference/actions.md |
+  | 設定ファイル | docs/reference/config.md (TOML の例は README にだけ置く) |
+  | 終了コード | docs/reference/exit-codes.md |
+  | 安全機能 | docs/reference/safety.md (「注意」は README にだけ置く) |
+  | 開発者向け | docs/reference/development.md |
+
+- 移し方: 各節の本文を文言を変えずに写す。例外は 2 つ: 移した後に別のファイルを指すことになる位置の言い回し (「上の『使い方』」「下の安全機能」など) を Markdown のリンクに置き換えたことと、README の冒頭の「文中の D-xxx は…」の文を各ファイルの頭の文にしたこと。README に残す節 (冒頭、注意、要件、導入、はじめかた、名前の由来、ライセンス) から外した判断の番号 (はじめかたの D-117) は、config.md に行き先として 1 行で残す
+- 完成の定義との関係: CLAUDE.md の完成の定義の「README に使い方、操作列 JSON の書式、設定ファイルの書式、終了コード、安全機能が書かれている」は、README の要約 (コマンドの表、type の表、TOML の例、終了コードの表、安全機能の箇条) と docs/reference/ へのリンクの組で満たす
+- 終了コード: コードと名前の並びの正は README の表 (`cargo test` が `ErrorKind` と突き合わせる。D-076)。exit-codes.md は表を持たず、名前だけの見出しの節で README の表の 3 列目の全文を並べる (番号は README の表だけが持つ)。テストは exit-codes.md を見ないので、`ErrorKind` を変えたら exit-codes.md の名前の節も直す
+- 覆る条件: 利用者が「細部は手引き (src/guide.md) で足りるので消してよい」と言ったとき。移した先が細切れすぎると分かったとき (まとめる)。exit-codes.md が古くなった実例が出たとき (src/error.rs のテストに足す)
+- 状態: 採用 (2026-11-06)
