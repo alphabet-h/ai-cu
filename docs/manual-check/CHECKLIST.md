@@ -831,7 +831,7 @@ AI のセッションの Bash ツールで打つときは、`$cu` の代わり�
 準備:
 - 人が空の新しいメモ帳のウィンドウを開く (`windows` にメモ帳が 1 つも無ければ、AI が `Start-Process notepad` で開いてよい)。題名「タイトルなし」のウィンドウが 1 つだけであることを `windows` で確かめる。メモ帳は前回のタブを復元して起動することがあるので、そのときは人がタブの並びの「＋」で空のタブを作って選ぶ (Ctrl+N では新しいタブにならず、復元したタブの題名に `*` が付いたことがある。2026-10-29)
 - 以下の `focus` は題名を「メモ帳」で探す (メモ帳のウィンドウが 1 つだけなので、これで同じ窓に当たる)。今のメモ帳は「枠」を入れた後に題名が `*枠 - メモ帳` に変わり、`タイトルなし - メモ帳` に戻ることもあるので、「タイトルなし」で探すと 12 になる
-- AI が `target/release/ai-cu.exe config show` を打つ。終了コード `0` で、各層の `indicator` が `{"enabled": true, "lead_ms": 3000, "sound": false}` (基本の層に `[indicator]` を書いてあれば、その値と層の合成 (README の設定ファイルの節) を記録し、以下の 3000 をその `lead_ms` に読み替える)
+- AI が `target/release/ai-cu.exe config show` を打つ。終了コード `0` で、各層の `indicator` が `{"enabled": true, "lead_ms": 3000, "sound": false}` (基本の層に `[indicator]` を書いてあれば、その値と層の合成 ([設定ファイルの詳細](../reference/config.md) の `[indicator]` の行) を記録し、以下の 3000 をその `lead_ms` に読み替える)
 - 操作列 `target/manual-check/s29-a.json` は `{"version": 1, "actions": [{"type": "focus", "process": "notepad.exe", "title": "メモ帳"}, {"type": "type", "text": "枠\n"}]}`
 
 (a) CLI の `run` で、枠と札が出て約 3 秒後に動き、終わるとすぐ消える:
@@ -887,7 +887,7 @@ target/release/ai-cu.exe key end; echo "exit=$?"
 ## 30. 重い検査の枠 (D-111)
 
 `python scripts/verify.py --ignored` が、最初の段 (fmt) の前から最後の段の後まで、画面の縁に別の枠 (`scripts/verify_frame.py` の子プロセス。クラス `ai_cu_verify_frame`) を出すことを人の目で確かめる。
-基本の層のまま行い、設定ファイルを作らない。実入力を送るのは ignored の段のテストだけで、送り先は自前のフィクスチャの上 (README の実機のテストの行)。それでも実機に触れるので、GO を 1 回もらってから行い、人は検査の間マウスとキーに触れない (触れると ignored の段のテストが落ちうる。検査は止まらない)。
+基本の層のまま行い、設定ファイルを作らない。実入力を送るのは ignored の段のテストだけで、送り先は自前のフィクスチャの上 ([開発者向けの詳細](../reference/development.md) の実機のテストの行)。それでも実機に触れるので、GO を 1 回もらってから行い、人は検査の間マウスとキーに触れない (触れると ignored の段のテストが落ちうる。検査は止まらない)。
 枠は撮影に写らない作りなので、枠と札が出たか、いつ消えたかは人が目で見て AI に伝える (AI は画像で確かめられない)。cargo を走らせるので、開発セッション (このリポジトリ) の主エージェントが行う。
 
 AI は GO の後、Bash ツールの `run_in_background` で次を打ち、打ったことを人に伝える:
