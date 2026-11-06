@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "actions": [
+    { "type": "wait", "ms": 5000 },
+    { "type": "type", "text": "緊急停止の確認 1\n" },
+    { "type": "wait", "ms": 2000 },
+    { "type": "type", "text": "緊急停止の確認 2\n" },
+    { "type": "wait", "ms": 2000 },
+    { "type": "type", "text": "緊急停止の確認 3\n" },
+    { "type": "wait", "ms": 2000 },
+    { "type": "type", "text": "緊急停止の確認 4\n" },
+    { "type": "wait", "ms": 2000 },
+    { "type": "type", "text": "ここまで来たら停止できていない\n" }
+  ]
+}

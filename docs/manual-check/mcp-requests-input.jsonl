@@ -1,0 +1,8 @@
+# 手順 19 の実入力の流れ。人の GO の後に走らせる (メモ帳を開いておく。端末が前面のままでよい)
+{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}
+{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"focus","arguments":{"process":"notepad.exe","shot":{"window":"notepad.exe","scale":0.5}},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}
+{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"find","arguments":{"window":"notepad.exe","type":"document"},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}
+{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"type","arguments":{"text":"MCP から\n","shot":{"window":"notepad.exe","scale":0.5}},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}
+{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"text","arguments":{"window":"notepad.exe","type":"document"},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}
+{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"run","arguments":{"actions":[{"type":"wait","ms":8000},{"type":"key","keys":"end"}]},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}
+{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"key","arguments":{"keys":"ctrl+z"},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}

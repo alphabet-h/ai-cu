@@ -1,0 +1,60 @@
+[package]
+name = "ai-cu"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+publish = false
+description = "AI が JSON の操作列で Windows デスクトップを操作するための CLI"
+license = "MIT"
+readme = "README.md"
+
+[lib]
+name = "ai_cu"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ai-cu"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+png = "0.18"
+ratatui = "0.30"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "1"
+toml_edit = "0.25"
+unicode-width = "0.2"
+windows = { version = "0.62", features = ["Win32_UI_Accessibility", "Win32_System_Com", "Win32_Foundation"] }
+
+[dependencies.windows-sys]
+version = "0.61"
+features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Gdi",
+    "Win32_Security",
+    "Win32_System_Com",
+    "Win32_System_Console",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_LibraryLoader",
+    "Win32_System_RemoteDesktop",
+    "Win32_System_StationsAndDesktops",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_Ime",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+]
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"
+
+[dev-dependencies]
+proptest = "1.12.0"

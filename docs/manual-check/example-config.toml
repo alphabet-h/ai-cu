@@ -1,0 +1,29 @@
+# チェックリスト用の設定例。%APPDATA%\ai-cu\config.toml を、この内容に近づけて試す。
+version = 1
+
+[general]
+input_enabled = true
+capture_enabled = true
+
+[allow]
+actions = []
+processes = ["notepad.exe"]
+classes = []
+regions = []
+keys = []
+
+[deny]
+actions = []
+processes = ["WindowsTerminal.exe", "cmd.exe", "powershell.exe", "pwsh.exe", "OpenConsole.exe", "Zed.exe"]
+classes = []
+regions = []
+keys = []
+
+[limits]
+max_actions = 1000
+max_duration_ms = 600000
+max_text_len = 10000
+
+[stop]
+sentinel_file = ""
+mouse_threshold_px = 50

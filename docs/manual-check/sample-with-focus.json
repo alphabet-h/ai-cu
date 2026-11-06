@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "actions": [
+    { "type": "focus", "process": "notepad.exe" },
+    { "type": "wait", "ms": 5000 },
+    { "type": "type", "text": "ai-cu の動作確認です。\nHello, notepad! 日本語と絵文字 😀 も入ります。\n" },
+    { "type": "wait", "ms": 300 },
+    { "type": "key", "keys": "home" },
+    { "type": "type", "text": "(3 行目) " },
+    { "type": "key", "keys": "end" },
+    { "type": "key", "keys": "enter" },
+    { "type": "type", "text": "おわり" }
+  ]
+}

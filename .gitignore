@@ -1,0 +1,45 @@
+# --- Rust ---
+# Cargo.lock はバイナリ crate なのでコミットする (無視しない)
+/target/
+**/*.rs.bk
+*.pdb
+
+# --- Claude Code: 個人用 / ローカル専用 ---
+CLAUDE.local.md
+.claude/settings.local.json
+.claude/worktrees/
+.claude/scheduled_tasks.lock
+.claude/autopilot.md
+
+# --- 開発用の作業領域 (調査結果、メモなど。git で管理しない。中身の分け方は .dev/README.md) ---
+/.dev/
+
+# --- remember プラグインのセッションメモリ ---
+.remember/
+
+# --- 開発・テスト中に生成するスクリーンショット / キャプチャ ---
+# 画面上の個人情報が写り込むので、リポジトリに入れない。画像は例外なく無視する (文書に画像が要るときは、写り込みを確かめてから git add -f で入れる)
+/captures/
+/screenshots/
+/tmp/
+*.png
+*.jpg
+*.jpeg
+*.bmp
+*.gif
+*.webp
+
+# --- Python (hooks のテストなど) ---
+__pycache__/
+*.pyc
+
+# --- tools (dotnet のビルド成果物) ---
+/tools/*/bin/
+/tools/*/obj/
+
+# --- OS / エディタ ---
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+*.swp

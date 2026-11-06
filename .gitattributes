@@ -1,0 +1,8 @@
+# 改行は LF に統一する (このマシンは core.autocrlf=false なので、リポジトリ側で縛る)
+* text=auto eol=lf
+
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+*.png binary
+*.ico binary

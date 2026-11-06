@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "actions": [
+    { "type": "focus", "process": "notepad.exe" },
+    { "type": "type", "text": "focus で前面にした\n" }
+  ]
+}
