@@ -15,6 +15,8 @@ CLAUDE.local.md
 /.agents/
 /skills-lock.json
 /.claude/skills/tui-design
+# Playwright の MCP がブラウザの操作の記録 (ページの写し、コンソールのログ) を作業ディレクトリに書く
+/.playwright-mcp/
 
 # --- 開発用の作業領域 (調査結果、メモなど。git で管理しない。中身の分け方は .dev/README.md) ---
 /.dev/
