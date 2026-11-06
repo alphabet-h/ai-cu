@@ -27,7 +27,9 @@ ai-cu は、AI に本物のマウスとキーボードを動かさせ、画面�
 
 ## 対象の版
 
-修正は `main` の最新版にだけ入れます。古い版への取り込み (backport) はしません。
+修正は `main` の最新版にだけ入れ、Releases のビルド済みの exe は次の版で出します。古い版への取り込み (backport) はしません。
+
+Releases の exe はコード署名していません。代わりに `SHA256SUMS.txt` と GitHub の来歴の証明 (artifact attestation) を付けています (確かめ方は [README の「導入」](README.md#導入))。
 
 ## 脆弱性として扱うもの
 

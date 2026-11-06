@@ -1690,3 +1690,22 @@
 - 追記 (2026-11-07、実装、ステップ 2): exe への埋め込みは build.rs の末尾で `embed_resource::compile("assets/icon/ai-cu.rc", embed_resource::NONE)` を呼ぶ (build-dependency は `embed-resource = "3"`。解決したのは 3.0.12)。rc は `1 ICON "ai-cu.ico"` の 1 行で、ICO のパスは rc と同じフォルダからの相対で通った (docs/design-notes.md の「アイコンの生成」)。結果が `Failed` なら panic でビルドを止める (rc の書き間違いを隠さない。MSVC では rc.exe が見つからないときも `Failed` になる。embed-resource 3.0.12 の windows_msvc.rs は `NotAttempted` を返さない)。`NotAttempted` (gnu で windres や llvm-rc が無いときだけ) は `cargo::warning` を 1 行出して続け、`Ok` と `NotWindows` は何もしない。再実行の引き金の固定の一覧に `assets` を足して D-069 の一覧を広げた (docs/reference/development.md の写しも直した)。確かめたこと: debug と release (`cargo build --release`) の exe のバイト列に ai-cu.ico の 8 つの PNG (256 を含む) がそのまま入っていた。rc の中の ICO の名前をわざと誤ると、rc.exe が `RC2135 : file not found` を出し、build.rs の panic で `cargo build` が 101 で止まった
 - 追記 (2026-11-07、実装、ステップ 3): README の頭 (h1 の直後) に大きい版の SVG を `<img>` の幅 96 で置き、「名前の由来」の末尾にアイコンの由来 (c はカーソルを強調する輪、u はキーを押す指先、青は操作の前に出す枠の色) を書いた。作り直し方 (Edge と Pillow が要る、CI では走らない、MSVC の埋め込みに rc.exe が要る、ソーシャルプレビューの上げ方) は docs/reference/development.md の「アイコンの作り直し」に置き、README の「開発者向け」の案内にその名を足した。CI の「検査のスクリプトのテスト」に `python scripts/test_make_icon.py` を足した (Edge も Pillow も使わないので CI で走る)。CLAUDE.md の「コマンドと検証」に「make_icon.py を変えたら test_make_icon.py も走らせる」を足した (他の scripts/ の道具の test_*.py と同じ扱い)
 - 状態: 採用 (2026-11-07)
+
+### D-128 GitHub の Releases に、CI でビルドした署名なしの exe を zip で添える (Packages は使わない)
+- 日付: 2026-11-07
+- 場面: 公開 (D-116) の後もタグとリリースが無く、導入は `cargo install --git` だけだった。Rust を入れていない人は、Rust と Visual Studio の C++ ビルドツールを入れるところから始めることになる
+- 本人 (利用者) が決めたこと: Releases に exe を添える。コード署名はしない。署名が無いことはどこかに書いておく
+- 選択肢 (自分で決めた細部): 置き場を A Releases / B GitHub Packages (npm、NuGet、コンテナなどのレジストリで、Rust の CLI の置き場にならない)。作り方を A タグの push で CI がビルド / B 手元の release を上げる。出どころの示し方を A SHA256 の一覧と artifact attestation / B SHA256 だけ。リリースを作る道具を A ランナーにある `gh` / B 他者の action
+- 判断: 次のとおり (○)
+  - `.github/workflows/release.yml`: タグ `v*` の push で走る。build のジョブ (windows-latest、権限は `contents: read`、キャッシュなし) が、タグと `Cargo.toml` の版の一致、`cargo test --locked`、`cargo build --release --locked`、`ai-cu.exe --version` の印がそのコミットの clean な木 (`<版>+g<先頭 12 桁>`。D-069) であることを確かめ、`ai-cu-v<版>-x86_64-pc-windows-msvc.zip` (exe、LICENSE、README.md) と `SHA256SUMS.txt` を作る。release のジョブ (タグのときだけ、`contents: write`、`id-token: write`、`attestations: write`) が、zip に actions/attest-build-provenance で来歴の証明を付け、`gh release create --verify-tag --generate-notes` でリリースを作る。リリースの本文の頭に、署名が無いことと確かめ方を書く
+  - 配る exe の作りに関わるファイル (`release.yml`、`build.rs`、`Cargo.toml`、`Cargo.lock`、`src/build_info.rs`、`assets/icon/`) を変えた PR と、手での起動 (workflow_dispatch) では build のジョブだけを走らせ、版の印の確認と梱包までを確かめる (書き込みの権限は持たない。タグを付けてから落ちることを減らす)
+  - Cargo.toml の版は semver の形だけを受け付ける。ジョブの出力 (版、zip の名前) はシェルの本文に `${{ }}` で埋めず、環境変数で渡す
+  - ツールチェーンは ci.yml と同じく stable で、固定しない。使った `rustc -V` をリリースの本文に書く
+  - actions は ci.yml と同じく SHA で固定する (Dependabot が上げる)
+  - 確かめ方として示すコマンドは `gh attestation verify <zip> --repo alphabet-h/ai-cu --signer-workflow alphabet-h/ai-cu/.github/workflows/release.yml --source-ref refs/tags/v<版>` (`--repo` だけでは、同じリポジトリのどのワークフローとどの ref の証明でも通るため、ワークフローとタグも縛る)
+  - 署名が無いことは、README の「導入」(SmartScreen の警告、ブロックの解除、スマート アプリ コントロール、新しい版への置き換え)、リリースの本文、SECURITY.md の「対象の版」に書く。README の MCP の登録の例は `cargo install` の置き場のままにし、ビルド済みの exe なら置いたフォルダのパスを登録すること (`ai-cu guide --setup` が埋める) を添える。リリースの出し方は docs/reference/development.md に書く
+  - 最初のリリースは `v0.1.0` (`Cargo.toml` の版のまま)
+- 根拠: CI でビルドすれば、配る exe が手元の環境 (dirty な木や作業中の変更) に左右されず、来歴の証明で「このリポジトリのこのタグから GitHub Actions でビルドした」ことを利用者が `gh attestation verify` で確かめられる。署名の無い exe の出どころを示す手段として、費用のかからない範囲で最も強い。ビルドを書き込みの権限の無いジョブに分け、キャッシュを使わないのは、配る exe に前の実行や PR の成果物が混ざる経路を減らすため。`gh` はランナーに入っていて、他者の action を 1 つ減らせる
+- 限界: 署名が無いので、SmartScreen の警告は評判が貯まるまで出うる。スマート アプリ コントロールが「オン」の PC では止められる。ブロックの解除でも、手元でソースからビルドした exe (これも署名が無い) でも避けられず、使うにはスマート アプリ コントロールを「オフ」にするしかない (Microsoft Learn の「SmartScreen reputation for Windows app developers」の Tip、「Smart App Control overview」、「Test your app's signature with Smart App Control」(オフへの切り替えは一方向) による。この PC では確かめていない)。タグを付けられるのは書き込みの権限を持つ人 (今は作者だけ) で、タグの保護の ruleset は置いていない
+- 覆る条件: 署名の無いことで導入に困った報告が続いたとき (コード署名か、winget などの配布を考える)。他の人が開発に加わったとき (タグの保護を置く)。GitHub の Immutable releases を有効にしたくなったとき (`gh release create` は下書き、アセットの追加、公開の順に呼ぶので、このままで使える)
+- 状態: 採用 (2026-11-07)

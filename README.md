@@ -34,16 +34,31 @@ Codex の computer use のような「スクリーンショットを見て次の
 
 ## 導入
 
-要件:
+Windows 10 / 11 (x64) で動く。管理者権限は要らない (管理者権限で動くウィンドウには入力を送らない)。
 
-- Windows 10 / 11 (x64)。管理者権限は要らない (管理者権限で動くウィンドウには入力を送らない)
-- ビルドに Rust 1.95 以上 (stable、`x86_64-pc-windows-msvc`) と、Visual Studio の C++ ビルドツール
+### ビルド済みの exe (Rust は要らない)
+
+[Releases](https://github.com/alphabet-h/ai-cu/releases) から `ai-cu-v<版>-x86_64-pc-windows-msvc.zip` を落として展開し、中の `ai-cu.exe` を PATH の通ったフォルダに置く。
+
+- **exe はコード署名していない。** 初めて起動するとき、Windows の SmartScreen の警告 (「Windows によって PC が保護されました」) が出ることがある。展開する前に zip のプロパティで「許可する」(ブロックの解除) に印を付けるか、PowerShell で `Unblock-File <zip>` を打つと出にくい
+- スマート アプリ コントロールが「オン」の PC では、署名の無い exe は止められる。ブロックの解除では避けられず、手元でソースからビルドした exe も同じく署名が無いので止められる。使うにはスマート アプリ コントロールを「オフ」にする必要がある (設定からはオンに戻せない。「評価」のあいだは止められない)
+- 配っている zip が、このリポジトリのそのタグから `release.yml` で (GitHub Actions で) ビルドされたことは、[GitHub CLI](https://cli.github.com/) で確かめられる。リリースに添えた `SHA256SUMS.txt` と `Get-FileHash <zip>` の値を比べることもできる
+
+  ```sh
+  gh attestation verify <zip> --repo alphabet-h/ai-cu --signer-workflow alphabet-h/ai-cu/.github/workflows/release.yml --source-ref refs/tags/v<版>
+  ```
+
+- 新しい版にするときは、同じ場所の `ai-cu.exe` を置き換える。MCP に登録して常駐していると置き換えられないので、先にクライアントの側で MCP を切断する
+
+### ソースからビルドする
+
+Rust 1.95 以上 (stable、`x86_64-pc-windows-msvc`) と、Visual Studio の C++ ビルドツールが要る。
 
 ```sh
 cargo install --git https://github.com/alphabet-h/ai-cu --locked
 ```
 
-`~/.cargo/bin/ai-cu.exe` に入る。手元に clone したなら `cargo install --path . --locked`。
+`~/.cargo/bin/ai-cu.exe` に入る。版を固定するなら `--tag v<版>` を足す。手元に clone したなら `cargo install --path . --locked`。
 
 ## はじめかた
 
@@ -105,7 +120,7 @@ claude mcp add ai-cu -- C:\Users\<名前>\.cargo\bin\ai-cu.exe mcp   # Claude Co
 codex mcp add ai-cu -- C:\Users\<名前>\.cargo\bin\ai-cu.exe mcp    # Codex CLI (~/.codex/config.toml の [mcp_servers.ai-cu])
 ```
 
-- 登録するのは、配置した release の絶対パス (`target/release` を直に登録すると、常駐の間 `cargo build --release` が失敗する)
+- 登録するのは、置いた `ai-cu.exe` の絶対パス (上の例は `cargo install` の置き場。ビルド済みの exe なら置いたフォルダ。`ai-cu guide --setup` が、その実行ファイルのパスを埋めた文例を出す)。`target/release` を直に登録すると、常駐の間 `cargo build --release` が失敗する
 - 道具は 19 個: 読み取りの `guide`、`config`、`windows`、`shot`、`find`、`tree`、`text`、`wait_for`、`status`、一手ずつの操作、操作列の `run`
 - 設定は CLI と同じ解決で、呼び出しごとに読み直す
 - 撮った画像は結果に `image` (png、base64) として入り、既定で長辺を 1568 に縮める
