@@ -1,0 +1,146 @@
+# タグ v<版> を push したら、release の exe を CI でビルドし、zip にして GitHub の Releases に添える (D-128)。
+# exe は署名しない。代わりに SHA256 の一覧と、GitHub の来歴の証明 (artifact attestation) を付ける。
+# PR で配る exe の作りに関わるファイルを変えたときと、手で起動したとき (workflow_dispatch) は、
+# リリースを作らずに build のジョブ (ビルド、版の印の確認、梱包) だけを走らせて確かめる。
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - ".github/workflows/release.yml"
+      - "build.rs"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "src/build_info.rs"
+      - "assets/icon/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: never
+  RUST_BACKTRACE: "1"
+  TARGET: x86_64-pc-windows-msvc
+
+jobs:
+  # 書き込みの権限を持たないジョブでビルドする。キャッシュは使わない (配る exe を、前の実行の成果物から作らない)
+  build:
+    name: build (windows)
+    runs-on: windows-latest
+    timeout-minutes: 45
+    outputs:
+      name: ${{ steps.meta.outputs.name }}
+      rustc: ${{ steps.meta.outputs.rustc }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Rust のツールチェーン
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustc -vV
+
+      # 版は semver の形だけを受け付け、タグの版と Cargo.toml の版が合わなければ止める (タグの push のときだけ照合する)
+      - name: 版と名前
+        id: meta
+        shell: bash
+        run: |
+          version=$(sed -n -E 's/^version = "([^"]+)"$/\1/p' Cargo.toml | head -n 1)
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || { echo "::error::Cargo.toml の版 '$version' を読めない"; exit 1; }
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            test "$GITHUB_REF_NAME" = "v$version" || { echo "::error::タグ $GITHUB_REF_NAME と Cargo.toml の版 $version が合わない"; exit 1; }
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "name=ai-cu-v$version-$TARGET" >> "$GITHUB_OUTPUT"
+          echo "rustc=$(rustc -V)" >> "$GITHUB_OUTPUT"
+
+      - name: test (実デスクトップに触れないものだけ)
+        run: cargo test --locked
+      - name: release のビルド
+        run: cargo build --release --locked
+
+      # 版の印 (D-069) が、このコミットの clean な木を指すこと (dirty や unknown の exe を配らない)
+      - name: 版の印の確認
+        shell: bash
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          actual=$(./target/release/ai-cu.exe --version)
+          expected="ai-cu $VERSION+g${GITHUB_SHA:0:12}"
+          echo "$actual"
+          test "$actual" = "$expected" || { echo "::error::版の印が $expected でない"; exit 1; }
+
+      - name: 梱包
+        shell: bash
+        env:
+          NAME: ${{ steps.meta.outputs.name }}
+        run: |
+          mkdir -p "stage/$NAME" dist
+          cp target/release/ai-cu.exe LICENSE README.md "stage/$NAME/"
+          pwsh -NoProfile -Command 'Compress-Archive -Path "stage/$env:NAME" -DestinationPath "dist/$env:NAME.zip"'
+          (cd dist && sha256sum "$NAME.zip" > SHA256SUMS.txt && cat SHA256SUMS.txt)
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  # タグの push のときだけ、来歴の証明を付けてリリースを作る
+  release:
+    name: release
+    needs: build
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist
+          path: dist
+
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/${{ needs.build.outputs.name }}.zip
+
+      - name: リリースを作る
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NAME: ${{ needs.build.outputs.name }}
+          RUSTC: ${{ needs.build.outputs.rustc }}
+        run: |
+          notes="$RUNNER_TEMP/notes.md"
+          {
+            echo "## ダウンロード"
+            echo
+            echo "Windows 10 / 11 (x64) 用の \`$NAME.zip\` を展開し、中の \`ai-cu.exe\` を PATH の通ったフォルダに置く。手順と注意は [README の「導入」](https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_REF_NAME/README.md#導入)。"
+            echo
+            echo "- **exe はコード署名していない。** 初めて起動するとき、Windows の SmartScreen の警告が出ることがある。スマート アプリ コントロールが「オン」の PC では止められる"
+            echo "- この zip が、このリポジトリのこのタグから \`release.yml\` でビルドされたことは、次で確かめられる"
+            echo
+            echo '```sh'
+            echo "gh attestation verify $NAME.zip --repo $GITHUB_REPOSITORY --signer-workflow $GITHUB_REPOSITORY/.github/workflows/release.yml --source-ref $GITHUB_REF"
+            echo '```'
+            echo
+            echo "- \`SHA256SUMS.txt\` に zip の SHA256 がある (PowerShell なら \`Get-FileHash $NAME.zip\`)"
+            echo "- ビルドに使った Rust: \`$RUSTC\`"
+            echo
+          } > "$notes"
+          gh release create "$GITHUB_REF_NAME" "dist/$NAME.zip" dist/SHA256SUMS.txt \
+            --repo "$GITHUB_REPOSITORY" --verify-tag --title "ai-cu $GITHUB_REF_NAME" \
+            --notes "$(cat "$notes")" --generate-notes
