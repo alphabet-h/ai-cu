@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-label="ai-cu">
+  <!-- 小さい版 (32px 以下)。字だけ: 白い c の中に青い瞳、青い u (D-127) -->
+  <rect x="8" y="8" width="240" height="240" rx="56" fill="#0E1A33"/>
+  <path d="M118 96 A48 48 0 1 0 118 168" fill="none" stroke="#FFFFFF" stroke-width="24" stroke-linecap="round"/>
+  <circle cx="88" cy="132" r="16" fill="#2F7BFF"/>
+  <path d="M152 96 L152 140 A30 30 0 0 0 212 140 L212 96" fill="none" stroke="#2F7BFF" stroke-width="24" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

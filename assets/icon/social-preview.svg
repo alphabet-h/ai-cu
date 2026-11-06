@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-label="ai-cu">
+  <!-- GitHub のソーシャルプレビュー (1280x640)。scripts/make_icon.py が target/icon/social-preview.png に描く。
+       文字は描く手元の字体で PNG に焼く (D-127) -->
+  <rect x="0" y="0" width="1280" height="640" fill="#0E1A33"/>
+  <g transform="translate(80 140) scale(1.40625)">
+    <rect x="8" y="8" width="240" height="240" rx="56" fill="#0E1A33"/>
+    <path d="M120 98 A44 44 0 1 0 120 158" fill="none" stroke="#FFFFFF" stroke-width="20" stroke-linecap="round"/>
+    <path d="M84 104 L84 152 L95 141 L103 158 L112 154 L104 137 L119 137 Z" fill="#2F7BFF" stroke="#FFFFFF" stroke-width="4" stroke-linejoin="round"/>
+    <path d="M156 66 L156 122 A26 26 0 0 0 208 122 L208 66" fill="none" stroke="#2F7BFF" stroke-width="22" stroke-linecap="round"/>
+    <rect x="140" y="170" width="84" height="30" rx="9" fill="none" stroke="#FFFFFF" stroke-width="9"/>
+  </g>
+  <text x="480" y="300" fill="#FFFFFF" font-family="Segoe UI, Yu Gothic UI, Meiryo, sans-serif" font-size="140" font-weight="700">ai-cu</text>
+  <text fill="#C9D4EA" font-family="Yu Gothic UI, Meiryo, Segoe UI, sans-serif" font-size="34">
+    <tspan x="484" y="390">AI がコンピュータ (Windows のデスクトップ) を</tspan>
+    <tspan x="484" y="440">操作するための CLI。</tspan>
+  </text>
+</svg>
