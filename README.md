@@ -1,5 +1,7 @@
 # ai-cu
 
+<img src="assets/icon/ai-cu.svg" width="96" alt="ai-cu のアイコン">
+
 **AI がコンピュータ (Windows のデスクトップ) を操作するための CLI。**
 
 [![CI](https://github.com/alphabet-h/ai-cu/actions/workflows/ci.yml/badge.svg)](https://github.com/alphabet-h/ai-cu/actions/workflows/ci.yml)
@@ -272,7 +274,7 @@ sound = false             # 予告の間に入るときに通知音を 1 回鳴�
 
 偶然、「アイ・シー・ユー」(I see you、あなたを見ている) とも読める。ちょっと怖いが、画面を見て (`shot`) 手を出す (`run`) このツールをよく表している。ICU (集中治療室) にも少しかかる。常に見張っていて、いざとなれば止める (緊急停止とガード) という意味で、そう遠くない。
 
-アイコンなどを作るときの参考に。
+アイコンはこの「cu」の字を描いたもの。c はカーソルを強調する輪 (中にカーソル)、u はキーを押す指先 (下にキー) で、青は操作の前に画面の縁に出す枠の色 (小さい大きさでは、カーソルとキーを省いた字だけの版になる)。
 
 </details>
 
@@ -283,7 +285,7 @@ sound = false             # 予告の間に入るときに通知音を 1 回鳴�
 - 作業ルールと安全ルール (AI のエージェント向け): [CLAUDE.md](CLAUDE.md)
 - 設計判断の記録: [docs/decisions.md](docs/decisions.md)
 - 調べて分かった落とし穴 (Windows の入力、端末、設定のパス): [docs/design-notes.md](docs/design-notes.md)
-- 構成、版の印、検証の手順、実機のテスト、手動確認: [docs/reference/development.md](docs/reference/development.md)
+- 構成、版の印、検証の手順、実機のテスト、手動確認、アイコンの作り直し: [docs/reference/development.md](docs/reference/development.md)
 
 ## ライセンス
 
