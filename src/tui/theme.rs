@@ -2,8 +2,8 @@
 //! 環境の読み取りは `ThemeEnv::detect` だけが行い (呼び出し側の `tui::run` が 1 回呼ぶ)、
 //! `resolve` と `fell_back` は値を受け取るだけにする (テストが環境に依らない)。
 //!
-//! 色の値は設計の「テーマの値」の表のとおり。`calm` と `calm-light` の比は WCAG 2 で、
-//! 暗い背景 (#0C0C0C、#1E2228) と明るい背景 (白、#F5F7FA) に対して `tests` が確かめる。
+//! 色の値と役割は D-129 (docs/decisions.md) のとおり。`calm` と `calm-light` の比は WCAG 2 で、
+//! 暗い背景 (#0C0C0C、#1E2228、選択の面 #2A3442) と明るい背景 (白、#F5F7FA) に対して `tests` が確かめる。
 
 use ratatui::style::Color;
 
@@ -256,10 +256,15 @@ mod tests {
 
     #[test]
     fn calm_text_roles_meet_contrast() {
-        let dark_bgs = [Color::Rgb(0x0C, 0x0C, 0x0C), Color::Rgb(0x1E, 0x22, 0x28)];
+        // 暗い側は、端末の地 2 つと選択の面 (REVERSED でなく面で選ぶ端末の配色を想定)
+        let dark_bgs = [
+            Color::Rgb(0x0C, 0x0C, 0x0C),
+            Color::Rgb(0x1E, 0x22, 0x28),
+            Color::Rgb(0x2A, 0x34, 0x42),
+        ];
         let light_bgs = [Color::Rgb(0xFF, 0xFF, 0xFF), Color::Rgb(0xF5, 0xF7, 0xFA)];
-        for (theme, bgs) in [(&CALM, dark_bgs), (&CALM_LIGHT, light_bgs)] {
-            for bg in bgs {
+        for (theme, bgs) in [(&CALM, &dark_bgs[..]), (&CALM_LIGHT, &light_bgs[..])] {
+            for &bg in bgs {
                 let roles = [
                     ("text", theme.text),
                     ("muted", theme.muted),
@@ -291,7 +296,7 @@ mod tests {
         assert!((same - 1.0).abs() < 1e-9, "{same}");
     }
 
-    /// 設計の表に書いた比 (別の計算で出した値) と、`contrast` が合う
+    /// 配色を選んだときに別の計算で出しておいた比と、`contrast` が合う
     #[test]
     fn contrast_matches_spec_ratios() {
         let near = |a: Color, b: Color, want: f64| {
