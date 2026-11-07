@@ -153,6 +153,8 @@ pub enum Field {
     IndicatorEnabled,
     IndicatorLeadMs,
     IndicatorSound,
+    /// TUI の配色 (D-129)
+    Theme,
 }
 
 pub fn fields() -> Vec<Field> {
@@ -176,6 +178,7 @@ pub fn fields() -> Vec<Field> {
         Field::IndicatorEnabled,
         Field::IndicatorLeadMs,
         Field::IndicatorSound,
+        Field::Theme,
     ]);
     v
 }
@@ -225,6 +228,7 @@ impl Field {
             Field::IndicatorEnabled => "indicator.enabled".into(),
             Field::IndicatorLeadMs => "indicator.lead_ms".into(),
             Field::IndicatorSound => "indicator.sound".into(),
+            Field::Theme => "tui.theme".into(),
         }
     }
 
@@ -246,6 +250,7 @@ impl Field {
             Field::IndicatorEnabled => "操作の前の枠",
             Field::IndicatorLeadMs => "予告の間 (ミリ秒)",
             Field::IndicatorSound => "予告の音",
+            Field::Theme => "テーマ",
         }
     }
 
@@ -262,7 +267,10 @@ impl Field {
                 "撮影の制限"
             }
             Field::McpRequireApproval => "MCP",
-            Field::IndicatorEnabled | Field::IndicatorLeadMs | Field::IndicatorSound => "表示",
+            Field::IndicatorEnabled
+            | Field::IndicatorLeadMs
+            | Field::IndicatorSound
+            | Field::Theme => "表示",
         }
     }
 
@@ -336,6 +344,11 @@ impl Field {
             Field::IndicatorSound => vec![
                 "有効にすると、予告の間に入るとき (待つときだけ) に Windows の通知音を 1 回鳴らす。",
                 "操作の前の枠が無効なら鳴らない。どれかの層で有効なら鳴らす。",
+            ],
+            Field::Theme => vec![
+                "TUI の配色。auto は環境で選ぶ (NO_COLOR なら mono、VT が使えなければ ansi、それ以外は calm)。明るい背景なら calm-light。",
+                "calm と calm-light は VT が使えない端末では ansi で表示する。ansi は端末の 16 色、mono は色を使わない。",
+                "切り替えるとその場で反映される。許可には関わらない。",
             ],
         };
         let mut out: Vec<String> = v.into_iter().map(String::from).collect();
@@ -432,6 +445,26 @@ fn short_value(cfg: &Config, f: Field) -> String {
         Field::IndicatorEnabled => on_off(cfg.indicator.enabled).into(),
         Field::IndicatorLeadMs => cfg.indicator.lead_ms.to_string(),
         Field::IndicatorSound => on_off(cfg.indicator.sound).into(),
+        Field::Theme => cfg.tui.theme.as_str().into(),
+    }
+}
+
+/// 項目の値の表示。`short_value` に、環境で決まる情報を添える。
+/// テーマは、`auto` なら選ばれたテーマを `(auto: calm)` の形で添え、VT が無くて RGB のテーマから落ちたときは落ち先を添える (D-129)
+fn shown_value(app: &App, f: Field) -> String {
+    match f {
+        Field::Theme => {
+            let chosen = app.config.tui.theme;
+            let resolved = app.theme().name;
+            if chosen == config::ThemeName::Auto {
+                format!("(auto: {})", resolved.as_str())
+            } else if chosen == resolved {
+                chosen.as_str().into()
+            } else {
+                format!("{}→{}", chosen.as_str(), resolved.as_str())
+            }
+        }
+        _ => short_value(&app.config, f),
     }
 }
 
@@ -1531,6 +1564,14 @@ impl App {
                 self.mutate(|c| set_toggle(c, f, v));
                 self.set_status(StatusKind::Ok, format!("{}を{}にした", f.name(), on_off(v)));
             }
+            // 配色は許可に関わらないので確認しない。その場で描画に反映する (D-129)
+            Field::Theme => {
+                self.mutate(|c| c.tui.theme = c.tui.theme.next());
+                self.set_status(
+                    StatusKind::Ok,
+                    format!("{}を {} にした", f.name(), self.config.tui.theme.as_str()),
+                );
+            }
             Field::List(..) => {
                 self.focus = Focus::Right;
                 self.row = 0;
@@ -2419,6 +2460,12 @@ fn section_color(th: &Theme, f: Field) -> Color {
     }
 }
 
+/// 本文の基本の書式。色を持たない文字 (項目の名前、説明、帯、ダイアログの本文、入力欄の文字) は
+/// 端末の既定の前景ではなく、テーマの `text` の役割で塗る (D-129)
+fn body_style(th: &Theme) -> Style {
+    Style::new().fg(th.text)
+}
+
 /// 実入力とパスワード入力の「有効」。重さを色だけに任せず ⚠ を添える (D-129)
 const ON_DANGER: &str = "⚠ 有効";
 
@@ -2549,8 +2596,8 @@ pub fn render(app: &App, frame: &mut Frame) {
             Style::new().fg(th.warn).add_modifier(Modifier::BOLD),
         ));
     }
-    frame.render_widget(Paragraph::new(Line::from(t)), title);
-    frame.render_widget(Paragraph::new(summary), banner);
+    frame.render_widget(Paragraph::new(Line::from(t)).style(body_style(th)), title);
+    frame.render_widget(Paragraph::new(summary).style(body_style(th)), banner);
 
     if body.width < NARROW_WIDTH {
         // 1 ペイン: 右に入っているとき (操作列の一覧を含む) は右ペインを全画面で出す
@@ -2697,18 +2744,18 @@ fn render_left(app: &App, frame: &mut Frame, area: TuiRect) {
         }
         let changed = field_changed(&app.config, &app.saved, *f);
         let pad = name_w.saturating_sub(UnicodeWidthStr::width(f.name()));
-        let mut value = short_value(&app.config, *f);
+        let mut value = shown_value(app, *f);
         let value_style = match f {
-            Field::InputEnabled if app.config.general.input_enabled => {
-                value = ON_DANGER.into();
-                Style::new().fg(th.danger).add_modifier(Modifier::BOLD)
+            // 実入力とパスワード入力は安全を緩める側 (D-090)。有効は danger、無効 (安全側) は上部の帯と同じ ok
+            Field::InputEnabled | Field::PasswordInput => {
+                if toggle_value(&app.config, *f) {
+                    value = ON_DANGER.into();
+                    Style::new().fg(th.danger).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::new().fg(th.ok)
+                }
             }
             Field::CaptureEnabled if app.config.general.capture_enabled => Style::new().fg(th.warn),
-            // 安全を緩める側 (input_enabled と同じ色。D-090)
-            Field::PasswordInput if app.config.general.password_input => {
-                value = ON_DANGER.into();
-                Style::new().fg(th.danger).add_modifier(Modifier::BOLD)
-            }
             _ => Style::new().fg(th.accent),
         };
         items.push(ListItem::new(Line::from(vec![
@@ -2716,7 +2763,7 @@ fn render_left(app: &App, frame: &mut Frame, area: TuiRect) {
                 if changed { "● " } else { "  " },
                 Style::new().fg(th.changed),
             ),
-            Span::raw(format!("{}{}  ", f.name(), " ".repeat(pad))),
+            Span::styled(format!("{}{}  ", f.name(), " ".repeat(pad)), body_style(th)),
             Span::styled(value, value_style),
         ])));
     }
@@ -2775,7 +2822,12 @@ fn render_right(app: &App, frame: &mut Frame, area: TuiRect, narrow: bool) {
         .min(inner.height.saturating_sub(6).max(2));
     let [head, rest] =
         Layout::vertical([Constraint::Length(header_h), Constraint::Fill(1)]).areas(inner);
-    frame.render_widget(Paragraph::new(header).wrap(Wrap { trim: false }), head);
+    frame.render_widget(
+        Paragraph::new(header)
+            .style(body_style(th))
+            .wrap(Wrap { trim: false }),
+        head,
+    );
 
     // 追加や編集の最中も、今の値と効果が見えるように、上に 1 行の要約を出す
     let rest = match (&app.overlay, f) {
@@ -2820,7 +2872,7 @@ fn render_right(app: &App, frame: &mut Frame, area: TuiRect, narrow: bool) {
             _ => {
                 let mut lines = vec![Line::from(vec![
                     Span::raw("現在の値: "),
-                    Span::styled(short_value(&app.config, f), Style::new().fg(th.accent)),
+                    Span::styled(shown_value(app, f), Style::new().fg(th.accent)),
                 ])];
                 lines.push(Line::raw(""));
                 lines.push(Line::styled(
@@ -2834,11 +2886,19 @@ fn render_right(app: &App, frame: &mut Frame, area: TuiRect, narrow: bool) {
                         Field::IndicatorEnabled | Field::IndicatorSound => {
                             "左の一覧で Enter: 切り替え"
                         }
+                        Field::Theme => {
+                            "左の一覧で Enter: 切り替え (auto → calm → calm-light → ansi → mono)"
+                        }
                         _ => "左の一覧で Enter: 編集する",
                     },
                     Style::new().fg(th.muted),
                 ));
-                frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), rest);
+                frame.render_widget(
+                    Paragraph::new(lines)
+                        .style(body_style(th))
+                        .wrap(Wrap { trim: false }),
+                    rest,
+                );
             }
         },
     }
@@ -2946,9 +3006,9 @@ fn render_editor(
     let inner = block.inner(input);
     let (shown, cursor) = editor.view(inner.width as usize);
     let text_style = if editor.fresh {
-        Style::new().add_modifier(Modifier::REVERSED)
+        body_style(th).add_modifier(Modifier::REVERSED)
     } else {
-        Style::new()
+        body_style(th)
     };
     frame.render_widget(
         Paragraph::new(Span::styled(shown, text_style)).block(block),
@@ -2972,7 +3032,6 @@ fn render_editor(
         lines.push(Line::styled(format!("⚠ {w}"), Style::new().fg(th.warn)));
     }
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), feedback);
-    let _ = app;
     frame.render_widget(
         Paragraph::new(Line::styled(
             "Enter 確定  Esc 取消  ←→ Home End 移動  Ctrl+U 全消去",
@@ -3015,6 +3074,7 @@ fn render_checklist(
         .title(" 操作を選ぶ ");
     let list = List::new(items)
         .block(block)
+        .style(body_style(th))
         .highlight_symbol("▶")
         .highlight_style(Style::new().add_modifier(Modifier::REVERSED));
     let mut state = ListState::default().with_selected(Some(cursor));
@@ -3063,7 +3123,10 @@ fn render_picker(
         .title(title);
     let inner = block.inner(input);
     let (shown, c) = filter.view(inner.width as usize);
-    frame.render_widget(Paragraph::new(shown).block(block), input);
+    frame.render_widget(
+        Paragraph::new(Span::styled(shown, body_style(th))).block(block),
+        input,
+    );
     if cursor == 0 {
         frame.set_cursor_position((inner.x + c as u16, inner.y));
     }
@@ -3093,7 +3156,7 @@ fn render_picker(
     }
     for r in &rows {
         items.push(ListItem::new(Line::from(vec![
-            Span::raw(r.value.clone()),
+            Span::styled(r.value.clone(), body_style(th)),
             Span::styled(format!("  {}", r.detail), Style::new().fg(th.muted)),
         ])));
     }
@@ -3136,9 +3199,9 @@ fn render_script_picker(
     let inner = block.inner(input);
     let (shown, c) = filter.view(inner.width as usize);
     let text_style = if filter.fresh {
-        Style::new().add_modifier(Modifier::REVERSED)
+        body_style(th).add_modifier(Modifier::REVERSED)
     } else {
-        Style::new()
+        body_style(th)
     };
     frame.render_widget(
         Paragraph::new(Span::styled(shown, text_style)).block(block),
@@ -3171,7 +3234,7 @@ fn render_script_picker(
     }
     for r in &rows {
         items.push(ListItem::new(Line::from(vec![
-            Span::raw(r.name.clone()),
+            Span::styled(r.name.clone(), body_style(th)),
             Span::styled(format!("  {}", r.path.display()), Style::new().fg(th.muted)),
         ])));
     }
@@ -3235,7 +3298,10 @@ fn render_dialog(
     };
     clear_wide_left_of(frame.buffer_mut(), r);
     frame.render_widget(Clear, r);
-    let mut text: Vec<Line> = wrapped.into_iter().map(Line::raw).collect();
+    let mut text: Vec<Line> = wrapped
+        .into_iter()
+        .map(|l| Line::styled(l, body_style(th)))
+        .collect();
     text.push(Line::raw(""));
     text.extend(
         keys_rows
@@ -3562,6 +3628,14 @@ mod tests {
             .unwrap_or_else(|| panic!("{needle} が画面に無い:\n{}", buffer_text(t)))
     }
 
+    /// 左ペイン (幅 120 の画面で 54 桁まで) の中で `needle` が始まる最初のセル。右ペインの枠の題と区別する
+    fn find_left_cell(t: &Terminal<TestBackend>, needle: &str) -> (u16, u16) {
+        *find_cells(t, needle)
+            .iter()
+            .find(|(x, _)| *x < 54)
+            .unwrap_or_else(|| panic!("{needle} が左ペインに無い:\n{}", buffer_text(t)))
+    }
+
     #[test]
     fn allow_heading_uses_accent_not_green() {
         let t = draw_term(&app(), 120, 40);
@@ -3580,6 +3654,51 @@ mod tests {
         assert_eq!(cell_fg(&t, x, y), theme::CALM.warn);
         let (x, y) = find_cell(&t, "●");
         assert_eq!(cell_fg(&t, x, y), theme::CALM.changed);
+    }
+
+    /// 本文 (項目の名前、説明、帯、ダイアログ、入力欄の文字) は、端末の既定の前景ではなく `text` の役割で塗る
+    #[test]
+    fn body_text_uses_text_role() {
+        let mut a = app();
+        let t = draw_term(&a, 120, 40);
+        // 左ペインの項目の名前 (帯の「実入力:」とは別。空白を除くと「実入力(マウスとキー)」)
+        let (x, y) = find_left_cell(&t, "実入力 (マウスとキー)");
+        assert_eq!(cell_fg(&t, x, y), theme::CALM.text);
+        // 上部の帯の本文
+        let (x, y) = find_cell(&t, "撮影:");
+        assert_eq!(cell_fg(&t, x, y), theme::CALM.text);
+        // 右ペインの説明
+        let (x, y) = find_cell(&t, "有効にすると、ai-cu が本物の");
+        assert_eq!(cell_fg(&t, x, y), theme::CALM.text);
+        // ダイアログの本文
+        a.overlay = Overlay::Help;
+        let t = draw_term(&a, 120, 40);
+        let (x, y) = find_cell(&t, "項目の一覧:");
+        assert_eq!(cell_fg(&t, x, y), theme::CALM.text);
+        // 入力欄に打った文字
+        a.overlay = Overlay::None;
+        select(&mut a, Field::MaxActions);
+        a.update(&press(KeyCode::Enter));
+        type_str(&mut a, "7777");
+        let t = draw_term(&a, 120, 40);
+        let (x, y) = find_cell(&t, "7777");
+        assert_eq!(cell_fg(&t, x, y), theme::CALM.text);
+    }
+
+    /// 実入力とパスワード入力の「無効」(安全側) は、上部の帯と同じ `ok` で塗る
+    #[test]
+    fn disabled_master_switches_use_ok_in_left_pane() {
+        let t = draw_term(&app(), 120, 40);
+        for name in ["実入力 (マウスとキー)", "パスワード欄への入力"] {
+            let (_, y) = find_left_cell(&t, name);
+            // 左ペイン (幅 54) の同じ行にある「無効」
+            let cells: Vec<_> = find_cells(&t, "無効")
+                .into_iter()
+                .filter(|&(x, cy)| cy == y && x < 54)
+                .collect();
+            assert_eq!(cells.len(), 1, "{name}\n{}", buffer_text(&t));
+            assert_eq!(cell_fg(&t, cells[0].0, y), theme::CALM.ok, "{name}");
+        }
     }
 
     #[test]
@@ -3635,6 +3754,87 @@ mod tests {
         assert_eq!(a.theme().name, config::ThemeName::Ansi);
         a.env = ThemeEnv::default();
         assert_eq!(a.theme().name, config::ThemeName::Calm);
+    }
+
+    /// 項目「テーマ」(D-129): 左の一覧の最後に並び、Enter / Space で巡回し、確認なしでその場で配色に反映する
+    #[test]
+    fn theme_field_cycles_and_applies_immediately() {
+        assert_eq!(Field::Theme.key(), "tui.theme");
+        assert_eq!(Field::Theme.name(), "テーマ");
+        assert_eq!(Field::Theme.location(), "表示 > テーマ");
+        assert_eq!(fields().last(), Some(&Field::Theme));
+        let mut a = app();
+        select(&mut a, Field::Theme);
+        a.update(&press(KeyCode::Enter));
+        assert_eq!(a.overlay, Overlay::None, "確認は挟まない");
+        assert_eq!(a.config.tui.theme, config::ThemeName::Calm);
+        assert_eq!(a.theme().name, config::ThemeName::Calm);
+        assert_eq!(a.changed_count(), 1);
+        let want = [
+            config::ThemeName::CalmLight,
+            config::ThemeName::Ansi,
+            config::ThemeName::Mono,
+            config::ThemeName::Auto,
+        ];
+        for (i, name) in want.into_iter().enumerate() {
+            // Enter と Space のどちらでも次へ進む
+            let key = if i % 2 == 0 {
+                KeyCode::Char(' ')
+            } else {
+                KeyCode::Enter
+            };
+            a.update(&press(key));
+            assert_eq!(a.config.tui.theme, name);
+            assert_eq!(a.theme().name, theme::resolve(name, a.env).name);
+        }
+        assert_eq!(a.changed_count(), 0, "auto に戻れば保存済みと同じ");
+        assert!(!a.dirty());
+    }
+
+    /// `auto` の行には、いま選ばれているテーマを添える。他は名前だけ。VT が無くて落ちたときは落ち先を添える
+    #[test]
+    fn theme_field_shows_resolved_theme_for_auto() {
+        let mut a = app();
+        let text = draw(&a, 120, 40);
+        assert!(has(&text, "テーマ"), "{text}");
+        assert!(has(&text, "(auto:calm)"), "{text}");
+        a.env = ThemeEnv {
+            no_color: true,
+            vt: true,
+        };
+        assert!(has(&draw(&a, 120, 40), "(auto:mono)"));
+        a.env = ThemeEnv::default();
+        a.config.tui.theme = config::ThemeName::CalmLight;
+        let text = draw(&a, 120, 40);
+        assert!(has(&text, "テーマ calm-light"), "{text}");
+        assert!(!has(&text, "(auto:"), "{text}");
+        a.env = ThemeEnv {
+            no_color: false,
+            vt: false,
+        };
+        let text = draw(&a, 120, 40);
+        assert!(has(&text, "calm-light→ansi"), "{text}");
+        // 右ペインには説明とキーが出る
+        select(&mut a, Field::Theme);
+        let text = draw(&a, 120, 40);
+        assert!(has(&text, "tui.theme"), "{text}");
+        assert!(has(&text, "NO_COLOR"), "{text}");
+        assert!(has(&text, "左の一覧で Enter: 切り替え"), "{text}");
+    }
+
+    #[test]
+    fn theme_change_is_undoable_and_not_widening() {
+        let mut a = app();
+        select(&mut a, Field::Theme);
+        a.update(&press(KeyCode::Enter));
+        assert_eq!(a.config.tui.theme, config::ThemeName::Calm);
+        assert!(
+            widening_changes(&a.saved, &a.config).is_empty(),
+            "配色は許可を広げない"
+        );
+        a.update(&press(KeyCode::Char('u')));
+        assert_eq!(a.config.tui.theme, config::ThemeName::Auto);
+        assert_eq!(a.changed_count(), 0);
     }
 
     fn windows() -> Vec<WindowCandidate> {
