@@ -28,6 +28,9 @@ use crate::run::RunReport;
 use crate::runner::{FirstBatch, PreflightReport, ScriptRunner};
 use crate::script::{Action, ActionKind};
 
+pub mod theme;
+pub use theme::{Theme, ThemeEnv};
+
 /// 1 ペインに切り替える幅
 pub const NARROW_WIDTH: u16 = 80;
 const UNDO_LIMIT: usize = 100;
@@ -150,6 +153,8 @@ pub enum Field {
     IndicatorEnabled,
     IndicatorLeadMs,
     IndicatorSound,
+    /// TUI の配色 (D-129)
+    Theme,
 }
 
 pub fn fields() -> Vec<Field> {
@@ -173,6 +178,7 @@ pub fn fields() -> Vec<Field> {
         Field::IndicatorEnabled,
         Field::IndicatorLeadMs,
         Field::IndicatorSound,
+        Field::Theme,
     ]);
     v
 }
@@ -222,6 +228,7 @@ impl Field {
             Field::IndicatorEnabled => "indicator.enabled".into(),
             Field::IndicatorLeadMs => "indicator.lead_ms".into(),
             Field::IndicatorSound => "indicator.sound".into(),
+            Field::Theme => "tui.theme".into(),
         }
     }
 
@@ -243,6 +250,7 @@ impl Field {
             Field::IndicatorEnabled => "操作の前の枠",
             Field::IndicatorLeadMs => "予告の間 (ミリ秒)",
             Field::IndicatorSound => "予告の音",
+            Field::Theme => "テーマ",
         }
     }
 
@@ -259,7 +267,10 @@ impl Field {
                 "撮影の制限"
             }
             Field::McpRequireApproval => "MCP",
-            Field::IndicatorEnabled | Field::IndicatorLeadMs | Field::IndicatorSound => "表示",
+            Field::IndicatorEnabled
+            | Field::IndicatorLeadMs
+            | Field::IndicatorSound
+            | Field::Theme => "表示",
         }
     }
 
@@ -333,6 +344,11 @@ impl Field {
             Field::IndicatorSound => vec![
                 "有効にすると、予告の間に入るとき (待つときだけ) に Windows の通知音を 1 回鳴らす。",
                 "操作の前の枠が無効なら鳴らない。どれかの層で有効なら鳴らす。",
+            ],
+            Field::Theme => vec![
+                "TUI の配色。auto は環境で選ぶ (NO_COLOR なら mono、VT が使えなければ ansi、それ以外は calm)。明るい背景なら calm-light。",
+                "calm と calm-light は VT が使えない端末では ansi で表示する。ansi は端末の 16 色、mono は色を使わない。",
+                "切り替えるとその場で反映される。許可には関わらない。",
             ],
         };
         let mut out: Vec<String> = v.into_iter().map(String::from).collect();
@@ -429,6 +445,26 @@ fn short_value(cfg: &Config, f: Field) -> String {
         Field::IndicatorEnabled => on_off(cfg.indicator.enabled).into(),
         Field::IndicatorLeadMs => cfg.indicator.lead_ms.to_string(),
         Field::IndicatorSound => on_off(cfg.indicator.sound).into(),
+        Field::Theme => cfg.tui.theme.as_str().into(),
+    }
+}
+
+/// 項目の値の表示。`short_value` に、環境で決まる情報を添える。
+/// テーマは、`auto` なら選ばれたテーマを `(auto: calm)` の形で添え、VT が無くて RGB のテーマから落ちたときは落ち先を添える (D-129)
+fn shown_value(app: &App, f: Field) -> String {
+    match f {
+        Field::Theme => {
+            let chosen = app.config.tui.theme;
+            let resolved = app.theme().name;
+            if chosen == config::ThemeName::Auto {
+                format!("(auto: {})", resolved.as_str())
+            } else if chosen == resolved {
+                chosen.as_str().into()
+            } else {
+                format!("{}→{}", chosen.as_str(), resolved.as_str())
+            }
+        }
+        _ => short_value(&app.config, f),
     }
 }
 
@@ -992,9 +1028,12 @@ pub struct App {
     pub scripts: Option<Vec<ScriptCandidate>>,
     /// 最後に検査した操作列 (次に開いたとき入力欄に入れておく)
     last_script: Option<PathBuf>,
+    /// 配色の選び方が頼る環境 (`NO_COLOR`、VT の可否)。`run` が 1 回だけ読んで入れる (D-129)
+    pub env: ThemeEnv,
 }
 
-const HINT: &str = "↑↓ 選ぶ  Enter/→ 開く・切替  s 保存  u 元に戻す  r 実行  ? ヘルプ  q 終了";
+/// RGB の配色を選んだのに VT が使えず、ansi で描いているときの知らせ (D-129)
+const FELL_BACK_MSG: &str = "VT が使えないので ansi の配色で表示している";
 
 impl App {
     pub fn new(target: Target, config: Config) -> App {
@@ -1006,7 +1045,7 @@ impl App {
             focus: Focus::Left,
             row: 0,
             overlay: Overlay::None,
-            status: HINT.into(),
+            status: String::new(),
             status_kind: StatusKind::Info,
             undo: Vec::new(),
             windows: None,
@@ -1014,7 +1053,13 @@ impl App {
             replace_broken: false,
             scripts: None,
             last_script: None,
+            env: ThemeEnv::default(),
         }
+    }
+
+    /// 描画に使う配色。編集中の設定の `[tui] theme` と環境から選ぶ (その場で反映。D-129)
+    pub fn theme(&self) -> &'static Theme {
+        theme::resolve(self.config.tui.theme, self.env)
     }
 
     /// ファイルから読む。無ければ既定値。読めなければ既定値で開き、復旧の導線を状態行に出す (D-018)。
@@ -1338,9 +1383,9 @@ impl App {
     fn on_key(&mut self, k: KeyEvent) -> Effect {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         let is_ctrl_c = ctrl && matches!(k.code, KeyCode::Char('c') | KeyCode::Char('C'));
-        // 状態行の一時的なメッセージは、次のキーで案内に戻す
-        if self.status_kind != StatusKind::Info || self.status != HINT {
-            self.set_status(StatusKind::Info, HINT);
+        // メッセージの行の一時的なメッセージは、次のキーで消す (キーの案内は別の行に常に出る。D-130)
+        if self.status_kind != StatusKind::Info || !self.status.is_empty() {
+            self.set_status(StatusKind::Info, "");
         }
         // 実行中と結果の画面では、届いた打鍵 (読み捨てをすり抜けた操作列の ctrl+c など) で終了しない (D-045)
         if matches!(
@@ -1421,36 +1466,49 @@ impl App {
             Overlay::None => {}
         }
         debug_assert!(!typing);
+        // 慣れたキー (D-130): Ctrl+Z は u と同じ、F1 は ? と同じ。入力欄などの最中は上で各場面に渡っている
+        if ctrl && matches!(k.code, KeyCode::Char('z') | KeyCode::Char('Z')) {
+            self.undo_last();
+            return Effect::None;
+        }
         match k.code {
-            KeyCode::Char('q') => {
-                if self.dirty() {
-                    self.overlay = Overlay::QuitDialog;
-                    Effect::None
-                } else {
-                    Effect::Quit
-                }
-            }
+            KeyCode::Char('q') => self.quit_or_ask(),
             KeyCode::Char('s') => self.request_save(false),
             KeyCode::Char('r') => self.start_run(),
-            KeyCode::Char('?') => {
+            KeyCode::Char('?') | KeyCode::F(1) => {
                 self.overlay = Overlay::Help;
                 Effect::None
             }
             KeyCode::Char('u') => {
-                match self.undo.pop() {
-                    Some(prev) => {
-                        self.config = prev;
-                        self.clamp_row();
-                        self.set_status(StatusKind::Ok, "直前の変更を元に戻した");
-                    }
-                    None => self.set_status(StatusKind::Warn, "元に戻す変更が無い"),
-                }
+                self.undo_last();
                 Effect::None
             }
             _ => match self.focus {
                 Focus::Left => self.on_left(k),
                 Focus::Right => self.on_right(k),
             },
+        }
+    }
+
+    /// `q` と主画面 (左ペイン) の `Esc`: 未保存があれば終了の確認、無ければ終了 (D-130)
+    fn quit_or_ask(&mut self) -> Effect {
+        if self.dirty() {
+            self.overlay = Overlay::QuitDialog;
+            Effect::None
+        } else {
+            Effect::Quit
+        }
+    }
+
+    /// `u` と `Ctrl+Z`: 直前の変更を元に戻す
+    fn undo_last(&mut self) {
+        match self.undo.pop() {
+            Some(prev) => {
+                self.config = prev;
+                self.clamp_row();
+                self.set_status(StatusKind::Ok, "直前の変更を元に戻した");
+            }
+            None => self.set_status(StatusKind::Warn, "元に戻す変更が無い"),
         }
     }
 
@@ -1464,7 +1522,8 @@ impl App {
             KeyCode::Enter | KeyCode::Char(' ') | KeyCode::Right | KeyCode::Tab => {
                 return self.open_field();
             }
-            KeyCode::Esc => self.set_status(StatusKind::Info, "終了は q"),
+            // 主画面の Esc で終了する (D-130 が D-041 の Esc の部分を置き換える)
+            KeyCode::Esc => return self.quit_or_ask(),
             _ => {}
         }
         self.row = 0;
@@ -1520,6 +1579,19 @@ impl App {
                 self.mutate(|c| set_toggle(c, f, v));
                 self.set_status(StatusKind::Ok, format!("{}を{}にした", f.name(), on_off(v)));
             }
+            // 配色は許可に関わらないので確認しない。その場で描画に反映する (D-129)
+            Field::Theme => {
+                self.mutate(|c| c.tui.theme = c.tui.theme.next());
+                if theme::fell_back(self.config.tui.theme, self.env) {
+                    // 起動時と同じ知らせ。選んだ RGB の配色では描けないことを Warn で伝える
+                    self.set_status(StatusKind::Warn, FELL_BACK_MSG);
+                } else {
+                    self.set_status(
+                        StatusKind::Ok,
+                        format!("{}を {} にした", f.name(), self.config.tui.theme.as_str()),
+                    );
+                }
+            }
             Field::List(..) => {
                 self.focus = Focus::Right;
                 self.row = 0;
@@ -1550,8 +1622,12 @@ impl App {
     fn on_right(&mut self, k: KeyEvent) -> Effect {
         let f = self.field();
         let Field::List(side, kind) = f else {
-            // 数値と文字列の項目は、入力欄を閉じたら左に戻る。キーは捨てずに左で処理する
+            // 数値と文字列の項目は、入力欄を閉じたら左に戻る。キーは捨てずに左で処理する。
+            // ただし Esc は右から左へ戻るだけにして、終了には回さない (D-130)
             self.focus = Focus::Left;
+            if k.code == KeyCode::Esc {
+                return Effect::None;
+            }
             return self.on_left(k);
         };
         let len = self.list_len();
@@ -2066,7 +2142,7 @@ impl App {
     fn on_run_result(&mut self, k: KeyEvent) -> Effect {
         if matches!(k.code, KeyCode::Enter | KeyCode::Esc) {
             self.overlay = Overlay::None;
-            self.set_status(StatusKind::Info, HINT);
+            self.set_status(StatusKind::Info, "");
         }
         Effect::None
     }
@@ -2392,28 +2468,62 @@ fn apply_scalar(c: &mut Config, f: Field, v: &str) {
 // 描画
 // ---------------------------------------------------------------------------
 
-const ALLOW_COLOR: Color = Color::Green;
-const DENY_COLOR: Color = Color::Red;
-
-fn side_color(f: Field) -> Option<Color> {
-    match f {
-        Field::List(Side::Allow, _) => Some(ALLOW_COLOR),
-        Field::List(Side::Deny, _) => Some(DENY_COLOR),
-        _ => None,
+/// allow は強調の青 (`accent`)、deny は `danger`。緑は「安全」と読まれるので、実入力を許す側の allow に使わない (D-129)
+fn side_color(th: &Theme, side: Side) -> Color {
+    match side {
+        Side::Allow => th.accent,
+        Side::Deny => th.danger,
     }
 }
 
-fn status_style(kind: StatusKind) -> Style {
+/// 節の見出しの色。allow と deny の節はその色、他は本文の色
+fn section_color(th: &Theme, f: Field) -> Color {
+    match f {
+        Field::List(side, _) => side_color(th, side),
+        _ => th.text,
+    }
+}
+
+/// 本文の基本の書式。色を持たない文字 (項目の名前、説明、帯、ダイアログの本文、入力欄の文字) は
+/// 端末の既定の前景ではなく、テーマの `text` の役割で塗る (D-129)
+fn body_style(th: &Theme) -> Style {
+    Style::new().fg(th.text)
+}
+
+/// 実入力とパスワード入力の「有効」。重さを色だけに任せず ⚠ を添える (D-129)
+const ON_DANGER: &str = "⚠ 有効";
+
+fn status_style(th: &Theme, kind: StatusKind) -> Style {
     match kind {
-        StatusKind::Info => Style::new().fg(Color::Gray),
-        StatusKind::Ok => Style::new().fg(Color::Green),
-        StatusKind::Warn => Style::new().fg(Color::Yellow),
-        StatusKind::Error => Style::new().fg(Color::Red).add_modifier(Modifier::BOLD),
+        StatusKind::Info => Style::new().fg(th.muted),
+        StatusKind::Ok => Style::new().fg(th.ok),
+        StatusKind::Warn => Style::new().fg(th.warn),
+        StatusKind::Error => Style::new().fg(th.danger).add_modifier(Modifier::BOLD),
+    }
+}
+
+/// ダイアログの重さ。枠とキーの案内の色を役割で決める (`render_dialog`)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Tone {
+    Info,
+    Ok,
+    Warn,
+    Danger,
+}
+
+impl Tone {
+    fn color(self, th: &Theme) -> Color {
+        match self {
+            Tone::Info => th.accent,
+            Tone::Ok => th.ok,
+            Tone::Warn => th.warn,
+            Tone::Danger => th.danger,
+        }
     }
 }
 
 /// 有効な状態の要約 (上部の帯)。
-fn summary_lines(cfg: &Config) -> Vec<Line<'static>> {
+fn summary_lines(cfg: &Config, th: &Theme) -> Vec<Line<'static>> {
     let target = |kind: ListKind, all: &str| {
         let l = list_ref(cfg, Side::Allow, kind);
         if l.is_empty() {
@@ -2428,21 +2538,21 @@ fn summary_lines(cfg: &Config) -> Vec<Line<'static>> {
         .sum();
     let mut first = vec![
         Span::raw("実入力: "),
-        Span::styled(
-            on_off(cfg.general.input_enabled),
-            if cfg.general.input_enabled {
-                Style::new().fg(Color::Red).add_modifier(Modifier::BOLD)
-            } else {
-                Style::new().fg(Color::Green)
-            },
-        ),
+        if cfg.general.input_enabled {
+            Span::styled(
+                ON_DANGER,
+                Style::new().fg(th.danger).add_modifier(Modifier::BOLD),
+            )
+        } else {
+            Span::styled(on_off(false), Style::new().fg(th.ok))
+        },
         Span::raw("  撮影: "),
         Span::styled(
             on_off(cfg.general.capture_enabled),
             if cfg.general.capture_enabled {
-                Style::new().fg(Color::Yellow)
+                Style::new().fg(th.warn)
             } else {
-                Style::new().fg(Color::Green)
+                Style::new().fg(th.ok)
             },
         ),
         Span::raw(format!(
@@ -2456,14 +2566,14 @@ fn summary_lines(cfg: &Config) -> Vec<Line<'static>> {
     if !cfg.general.input_enabled {
         first.push(Span::styled(
             "  (実入力は無効: run はすべて拒否)",
-            Style::new().fg(Color::DarkGray),
+            Style::new().fg(th.muted),
         ));
     }
     let mut out = vec![Line::from(first)];
     if unrestricted(cfg) {
         out.push(Line::styled(
             "⚠ 許可リスト (アプリ、クラス、領域) が空: どのアプリ、どの画面にも実入力できる",
-            Style::new().fg(Color::Red).add_modifier(Modifier::BOLD),
+            Style::new().fg(th.danger).add_modifier(Modifier::BOLD),
         ));
     }
     out
@@ -2471,31 +2581,42 @@ fn summary_lines(cfg: &Config) -> Vec<Line<'static>> {
 
 pub fn render(app: &App, frame: &mut Frame) {
     let area = frame.area();
-    let summary = summary_lines(&app.config);
+    let th = app.theme();
+    let summary = summary_lines(&app.config, th);
+    // 下の 2 行: メッセージの行 (無ければ空行。長ければ 2 行に折る) と、常に出すキーの案内の行 (D-130)
     let status_h = if UnicodeWidthStr::width(app.status.as_str()) > area.width as usize {
         2
     } else {
         1
     };
-    let [title, banner, body, status] = Layout::vertical([
+    let [title, banner, body, status, keys] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(summary.len() as u16),
         Constraint::Fill(1),
         Constraint::Length(status_h),
+        Constraint::Length(1),
     ])
     .areas(area);
+    // ダイアログはキーの案内の行に重ねない
+    let dialog_area = TuiRect {
+        height: area.height.saturating_sub(1),
+        ..area
+    };
 
     // 題名: ファイルと層の種類と未保存の件数
     let layer = if app.target.overlay {
         Span::styled(
             " [追加の層: allow は基本の層より広げられない]",
-            Style::new().fg(Color::Yellow),
+            Style::new().fg(th.warn),
         )
     } else {
-        Span::styled(" [基本の層: 既定の場所]", Style::new().fg(Color::DarkGray))
+        Span::styled(" [基本の層: 既定の場所]", Style::new().fg(th.muted))
     };
     let mut t = vec![
-        Span::styled("ai-cu 設定", Style::new().add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "ai-cu 設定",
+            Style::new().fg(th.text).add_modifier(Modifier::BOLD),
+        ),
         Span::raw(format!(" — {}", app.target.path.display())),
         layer,
     ];
@@ -2503,11 +2624,17 @@ pub fn render(app: &App, frame: &mut Frame) {
         let n = app.changed_count();
         t.push(Span::styled(
             format!(" [未保存 {n} 件]"),
-            Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            Style::new().fg(th.warn).add_modifier(Modifier::BOLD),
         ));
+        t.push(Span::styled(" — ", Style::new().fg(th.muted)));
+        t.push(Span::styled(
+            "s",
+            Style::new().fg(th.warn).add_modifier(Modifier::BOLD),
+        ));
+        t.push(Span::styled(" で保存", Style::new().fg(th.muted)));
     }
-    frame.render_widget(Paragraph::new(Line::from(t)), title);
-    frame.render_widget(Paragraph::new(summary), banner);
+    frame.render_widget(Paragraph::new(Line::from(t)).style(body_style(th)), title);
+    frame.render_widget(Paragraph::new(summary).style(body_style(th)), banner);
 
     if body.width < NARROW_WIDTH {
         // 1 ペイン: 右に入っているとき (操作列の一覧を含む) は右ペインを全画面で出す
@@ -2526,42 +2653,46 @@ pub fn render(app: &App, frame: &mut Frame) {
 
     frame.render_widget(
         Paragraph::new(app.status.as_str())
-            .style(status_style(app.status_kind))
+            .style(status_style(th, app.status_kind))
             .wrap(Wrap { trim: false }),
         status,
     );
+    frame.render_widget(Paragraph::new(key_bar(app, keys.width)), keys);
 
     match &app.overlay {
         Overlay::Confirm { title, lines, .. } => render_dialog(
             frame,
-            area,
+            dialog_area,
             title,
             lines,
             "y 実行する   それ以外のキー 取りやめる",
-            Color::Yellow,
+            Tone::Warn,
+            th,
         ),
         Overlay::QuitDialog => render_dialog(
             frame,
-            area,
+            dialog_area,
             "未保存の変更がある",
             &[format!(
                 "{} 件の項目が保存されていない。",
                 app.changed_count()
             )],
             "s 保存して終了   y 破棄して終了   Esc 戻る   Ctrl+C 強制終了",
-            Color::Yellow,
+            Tone::Warn,
+            th,
         ),
         Overlay::Help => render_dialog(
             frame,
-            area,
+            dialog_area,
             "ヘルプ",
             &help_lines(),
             "何かキーを押すと閉じる",
-            Color::Cyan,
+            Tone::Info,
+            th,
         ),
         Overlay::RunConfirm { report } => render_dialog(
             frame,
-            area,
+            dialog_area,
             "実行の確認",
             &confirm_lines(report),
             &format!(
@@ -2569,10 +2700,11 @@ pub fn render(app: &App, frame: &mut Frame) {
                 RUN_COUNTDOWN_MS / 1000
             ),
             if report.unrestricted {
-                Color::Red
+                Tone::Danger
             } else {
-                Color::Yellow
+                Tone::Warn
             },
+            th,
         ),
         Overlay::Countdown {
             report,
@@ -2580,37 +2712,206 @@ pub fn render(app: &App, frame: &mut Frame) {
             ..
         } => render_dialog(
             frame,
-            area,
+            dialog_area,
             &format!("実行まで {} 秒", remaining_ms.div_ceil(1000)),
             &countdown_lines(report, *remaining_ms),
             "Esc / q 取りやめ",
-            Color::Red,
+            Tone::Danger,
+            th,
         ),
         Overlay::Running { report } => render_dialog(
             frame,
-            area,
+            dialog_area,
             "実行中…",
             &running_lines(report),
             "止めるにはマウスを大きく動かす",
-            Color::Red,
+            Tone::Danger,
+            th,
         ),
         Overlay::RunResult { title, lines, ok } => render_dialog(
             frame,
-            area,
+            dialog_area,
             title,
             lines,
             "Enter / Esc 閉じる",
-            if *ok { Color::Green } else { Color::Red },
+            if *ok { Tone::Ok } else { Tone::Danger },
+            th,
         ),
         _ => {}
     }
 }
 
-fn pane_block(title: String, focused: bool) -> Block<'static> {
+/// キーの案内の札の見え方 (D-130)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TagLook {
+    /// キーは accent の太字、意味は muted
+    Normal,
+    /// 変更が無いときの s / u。キーも意味も muted (控えめ)
+    Quiet,
+    /// 未保存のときの s / u。キーは warn の太字、意味は text
+    Urgent,
+}
+
+/// キーの案内の札 (キー, 意味)。`keep` は幅が足りなくても落とさない
+struct KeyTag {
+    key: &'static str,
+    what: String,
+    keep: bool,
+    look: TagLook,
+}
+
+fn tag(key: &'static str, what: impl Into<String>) -> KeyTag {
+    KeyTag {
+        key,
+        what: what.into(),
+        keep: false,
+        look: TagLook::Normal,
+    }
+}
+
+impl KeyTag {
+    fn keep(mut self) -> Self {
+        self.keep = true;
+        self
+    }
+
+    fn look(mut self, look: TagLook) -> Self {
+        self.look = look;
+        self
+    }
+
+    fn width(&self) -> usize {
+        UnicodeWidthStr::width(self.key) + 1 + UnicodeWidthStr::width(self.what.as_str())
+    }
+}
+
+/// 札と札の区切り
+const TAG_SEP: &str = "   ";
+
+/// 場面ごとの札の並び (spec の「キーの案内」)。場面は `overlay`、`focus`、`dirty()` で決める
+fn key_tags(app: &App) -> Vec<KeyTag> {
+    let save_undo = |look| [tag("s", "保存").look(look), tag("u", "元に戻す").look(look)];
+    match &app.overlay {
+        Overlay::None => {
+            let dirty = app.dirty();
+            let mut v = Vec::new();
+            if dirty {
+                v.extend(save_undo(TagLook::Urgent));
+            }
+            if app.focus == Focus::Right && app.field().is_list() {
+                // 右ペインの一覧: 一覧のキー。未保存のときだけ先頭に s / u
+                v.extend([
+                    tag("↑↓", "選ぶ"),
+                    tag("Enter", "編集/追加"),
+                    tag("a", "追加"),
+                    tag("d", "削除"),
+                ]);
+                if !dirty {
+                    v.push(tag("u", "元に戻す").look(TagLook::Quiet));
+                }
+                v.push(tag("←", "戻る").keep());
+            } else {
+                v.extend([tag("↑↓", "選ぶ"), tag("Enter", "開く・切替")]);
+                if !dirty {
+                    v.extend(save_undo(TagLook::Quiet));
+                }
+                v.extend([
+                    tag("r", "実行"),
+                    tag("F1", "ヘルプ").keep(),
+                    tag("Esc", "終了").keep(),
+                ]);
+            }
+            v
+        }
+        Overlay::Edit { .. } => vec![
+            tag("Enter", "確定").keep(),
+            tag("Esc", "取消").keep(),
+            tag("←→ Home End", "移動"),
+            tag("Ctrl+U", "全消去"),
+        ],
+        Overlay::Checklist { .. } => vec![
+            tag("Space", "切替"),
+            tag("a", "全部"),
+            tag("Enter", "確定").keep(),
+            tag("Esc", "取消").keep(),
+        ],
+        Overlay::Picker { kind, .. } => {
+            let mut v = vec![tag("↑↓", "選ぶ"), tag("Enter", "追加").keep()];
+            if *kind != ListKind::Regions {
+                v.push(tag("F5", "再読み込み"));
+            }
+            v.push(tag("Esc", "取消").keep());
+            v
+        }
+        Overlay::ScriptPicker { .. } => vec![
+            tag("↑↓", "選ぶ"),
+            tag("Enter", "検証").keep(),
+            tag("F5", "再読み込み"),
+            tag("Esc", "取消").keep(),
+        ],
+        Overlay::Confirm { .. } => vec![
+            tag("y", "実行する").keep(),
+            tag("それ以外のキー", "取りやめる").keep(),
+        ],
+        Overlay::QuitDialog => vec![
+            tag("s", "保存して終了").keep(),
+            tag("y", "破棄して終了").keep(),
+            tag("Esc", "戻る").keep(),
+            tag("Ctrl+C", "強制終了"),
+        ],
+        Overlay::Help => vec![tag("何かキー", "閉じる").keep()],
+        Overlay::RunConfirm { .. } => vec![
+            tag("y", format!("実行 ({} 秒後)", RUN_COUNTDOWN_MS / 1000)).keep(),
+            tag("Esc など", "取りやめる").keep(),
+        ],
+        Overlay::Countdown { .. } => vec![tag("Esc / q", "取りやめ").keep()],
+        Overlay::Running { .. } => vec![tag("マウスを大きく動かす", "止める").keep()],
+        Overlay::RunResult { .. } => vec![tag("Enter / Esc", "閉じる").keep()],
+    }
+}
+
+/// 最下行のキーの案内 (D-130)。幅が足りなければ、`keep` でない札を右から落とす
+fn key_bar(app: &App, width: u16) -> Line<'static> {
+    let th = app.theme();
+    let mut tags = key_tags(app);
+    let total = |tags: &[KeyTag]| {
+        tags.iter().map(KeyTag::width).sum::<usize>() + TAG_SEP.len() * tags.len().saturating_sub(1)
+    };
+    while total(&tags) > usize::from(width) {
+        match tags.iter().rposition(|t| !t.keep) {
+            Some(i) => {
+                tags.remove(i);
+            }
+            None => break,
+        }
+    }
+    let mut spans = Vec::new();
+    for (i, t) in tags.into_iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::raw(TAG_SEP));
+        }
+        let (key_style, what_style) = match t.look {
+            TagLook::Normal => (
+                Style::new().fg(th.accent).add_modifier(Modifier::BOLD),
+                Style::new().fg(th.muted),
+            ),
+            TagLook::Quiet => (Style::new().fg(th.muted), Style::new().fg(th.muted)),
+            TagLook::Urgent => (
+                Style::new().fg(th.warn).add_modifier(Modifier::BOLD),
+                Style::new().fg(th.text),
+            ),
+        };
+        spans.push(Span::styled(t.key, key_style));
+        spans.push(Span::styled(format!(" {}", t.what), what_style));
+    }
+    Line::from(spans)
+}
+
+fn pane_block(th: &Theme, title: String, focused: bool) -> Block<'static> {
     let style = if focused {
-        Style::new().fg(Color::Cyan)
+        Style::new().fg(th.focus)
     } else {
-        Style::new().fg(Color::DarkGray)
+        Style::new().fg(th.border)
     };
     Block::bordered()
         .border_type(if focused {
@@ -2623,6 +2924,7 @@ fn pane_block(title: String, focused: bool) -> Block<'static> {
 }
 
 fn render_left(app: &App, frame: &mut Frame, area: TuiRect) {
+    let th = app.theme();
     let fs = fields();
     let mut items: Vec<ListItem> = Vec::new();
     let mut selected_row = 0;
@@ -2635,7 +2937,7 @@ fn render_left(app: &App, frame: &mut Frame, area: TuiRect) {
     for (i, f) in fs.iter().enumerate() {
         if f.section() != last_section {
             last_section = f.section();
-            let color = side_color(*f).unwrap_or(Color::White);
+            let color = section_color(th, *f);
             items.push(ListItem::new(Line::styled(
                 format!("── {} ", last_section),
                 Style::new().fg(color).add_modifier(Modifier::BOLD),
@@ -2646,32 +2948,36 @@ fn render_left(app: &App, frame: &mut Frame, area: TuiRect) {
         }
         let changed = field_changed(&app.config, &app.saved, *f);
         let pad = name_w.saturating_sub(UnicodeWidthStr::width(f.name()));
-        let value = short_value(&app.config, *f);
+        let mut value = shown_value(app, *f);
         let value_style = match f {
-            Field::InputEnabled if app.config.general.input_enabled => {
-                Style::new().fg(Color::Red).add_modifier(Modifier::BOLD)
+            // 実入力とパスワード入力は安全を緩める側 (D-090)。有効は danger、無効 (安全側) は上部の帯と同じ ok
+            Field::InputEnabled | Field::PasswordInput => {
+                if toggle_value(&app.config, *f) {
+                    value = ON_DANGER.into();
+                    Style::new().fg(th.danger).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::new().fg(th.ok)
+                }
             }
-            Field::CaptureEnabled if app.config.general.capture_enabled => {
-                Style::new().fg(Color::Yellow)
+            Field::CaptureEnabled if app.config.general.capture_enabled => Style::new().fg(th.warn),
+            // 撮影と全画面の撮影の「無効」も安全側なので、上部の帯と同じ ok (D-129)
+            Field::CaptureEnabled | Field::CaptureFullScreen if !toggle_value(&app.config, *f) => {
+                Style::new().fg(th.ok)
             }
-            // 安全を緩める側 (input_enabled と同じ色。D-090)
-            Field::PasswordInput if app.config.general.password_input => {
-                Style::new().fg(Color::Red).add_modifier(Modifier::BOLD)
-            }
-            _ => Style::new().fg(Color::Cyan),
+            _ => Style::new().fg(th.accent),
         };
         items.push(ListItem::new(Line::from(vec![
             Span::styled(
                 if changed { "● " } else { "  " },
-                Style::new().fg(Color::Yellow),
+                Style::new().fg(th.changed),
             ),
-            Span::raw(format!("{}{}  ", f.name(), " ".repeat(pad))),
+            Span::styled(format!("{}{}  ", f.name(), " ".repeat(pad)), body_style(th)),
             Span::styled(value, value_style),
         ])));
     }
     let focused = app.focus == Focus::Left && app.overlay == Overlay::None;
     let list = List::new(items)
-        .block(pane_block(" 項目 ".into(), focused))
+        .block(pane_block(th, " 項目 ".into(), focused))
         .highlight_symbol("▶")
         .highlight_style(Style::new().add_modifier(Modifier::REVERSED));
     let mut state = ListState::default().with_selected(Some(selected_row));
@@ -2679,6 +2985,7 @@ fn render_left(app: &App, frame: &mut Frame, area: TuiRect) {
 }
 
 fn render_right(app: &App, frame: &mut Frame, area: TuiRect, narrow: bool) {
+    let th = app.theme();
     let f = app.field();
     let picking_script = matches!(app.overlay, Overlay::ScriptPicker { .. });
     let crumb = if picking_script {
@@ -2690,6 +2997,7 @@ fn render_right(app: &App, frame: &mut Frame, area: TuiRect, narrow: bool) {
     };
     let focused = app.focus == Focus::Right && app.overlay == Overlay::None;
     let block = pane_block(
+        th,
         crumb,
         focused
             || !matches!(
@@ -2709,7 +3017,7 @@ fn render_right(app: &App, frame: &mut Frame, area: TuiRect, narrow: bool) {
             )),
         ]
     } else {
-        let mut h = vec![Line::styled(f.key(), Style::new().fg(Color::DarkGray))];
+        let mut h = vec![Line::styled(f.key(), Style::new().fg(th.muted))];
         h.extend(f.description().into_iter().map(Line::raw));
         h
     };
@@ -2722,18 +3030,19 @@ fn render_right(app: &App, frame: &mut Frame, area: TuiRect, narrow: bool) {
         .min(inner.height.saturating_sub(6).max(2));
     let [head, rest] =
         Layout::vertical([Constraint::Length(header_h), Constraint::Fill(1)]).areas(inner);
-    frame.render_widget(Paragraph::new(header).wrap(Wrap { trim: false }), head);
+    frame.render_widget(
+        Paragraph::new(header)
+            .style(body_style(th))
+            .wrap(Wrap { trim: false }),
+        head,
+    );
 
     // 追加や編集の最中も、今の値と効果が見えるように、上に 1 行の要約を出す
     let rest = match (&app.overlay, f) {
         (Overlay::Edit { .. } | Overlay::Picker { .. }, Field::List(side, _)) => {
             let [summary, below] =
                 Layout::vertical([Constraint::Length(2), Constraint::Fill(1)]).areas(rest);
-            let color = if side == Side::Allow {
-                ALLOW_COLOR
-            } else {
-                DENY_COLOR
-            };
+            let color = side_color(th, side);
             frame.render_widget(
                 Paragraph::new(Line::styled(
                     format!("今の値: {}", short_value(&app.config, f)),
@@ -2756,7 +3065,7 @@ fn render_right(app: &App, frame: &mut Frame, area: TuiRect, narrow: bool) {
             side,
             checked,
             cursor,
-        } => render_checklist(frame, rest, *side, checked, *cursor),
+        } => render_checklist(th, frame, rest, *side, checked, *cursor),
         Overlay::Picker {
             side,
             kind,
@@ -2771,7 +3080,7 @@ fn render_right(app: &App, frame: &mut Frame, area: TuiRect, narrow: bool) {
             _ => {
                 let mut lines = vec![Line::from(vec![
                     Span::raw("現在の値: "),
-                    Span::styled(short_value(&app.config, f), Style::new().fg(Color::Cyan)),
+                    Span::styled(shown_value(app, f), Style::new().fg(th.accent)),
                 ])];
                 lines.push(Line::raw(""));
                 lines.push(Line::styled(
@@ -2785,27 +3094,32 @@ fn render_right(app: &App, frame: &mut Frame, area: TuiRect, narrow: bool) {
                         Field::IndicatorEnabled | Field::IndicatorSound => {
                             "左の一覧で Enter: 切り替え"
                         }
+                        Field::Theme => {
+                            "左の一覧で Enter: 切り替え (auto → calm → calm-light → ansi → mono)"
+                        }
                         _ => "左の一覧で Enter: 編集する",
                     },
-                    Style::new().fg(Color::DarkGray),
+                    Style::new().fg(th.muted),
                 ));
-                frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), rest);
+                frame.render_widget(
+                    Paragraph::new(lines)
+                        .style(body_style(th))
+                        .wrap(Wrap { trim: false }),
+                    rest,
+                );
             }
         },
     }
 }
 
 fn render_list_values(app: &App, frame: &mut Frame, area: TuiRect, side: Side, kind: ListKind) {
+    let th = app.theme();
     let values = list_ref(&app.config, side, kind);
     let other = match side {
         Side::Allow => list_ref(&app.config, Side::Deny, kind),
         Side::Deny => list_ref(&app.config, Side::Allow, kind),
     };
-    let color = if side == Side::Allow {
-        ALLOW_COLOR
-    } else {
-        DENY_COLOR
-    };
+    let color = side_color(th, side);
     let effect = match (side, values.len()) {
         (Side::Allow, 0) => "効果: 制限なし (この次元はすべて許可)".to_string(),
         (Side::Allow, n) => format!("効果: この {n} 件だけを許可。それ以外は拒否"),
@@ -2822,7 +3136,7 @@ fn render_list_values(app: &App, frame: &mut Frame, area: TuiRect, side: Side, k
             if overlap && side == Side::Allow {
                 spans.push(Span::styled(
                     "  (拒否リストにもある: 拒否が優先)",
-                    Style::new().fg(Color::Yellow),
+                    Style::new().fg(th.warn),
                 ));
             }
             ListItem::new(Line::from(spans))
@@ -2835,7 +3149,7 @@ fn render_list_values(app: &App, frame: &mut Frame, area: TuiRect, side: Side, k
     };
     items.push(ListItem::new(Line::styled(
         add_label,
-        Style::new().fg(Color::Cyan),
+        Style::new().fg(th.accent),
     )));
     let [eff, list_area, help] = Layout::vertical([
         Constraint::Length(1),
@@ -2857,15 +3171,16 @@ fn render_list_values(app: &App, frame: &mut Frame, area: TuiRect, side: Side, k
         });
     let mut state = ListState::default().with_selected(Some(app.row.min(values.len())));
     frame.render_stateful_widget(list, list_area, &mut state);
-    let keys = if focused {
-        "↑↓ 選ぶ  Enter 編集/追加  a 追加  d 削除  u 元に戻す  ← 戻る"
-    } else {
-        "Enter か → で、この一覧を編集する"
-    };
-    frame.render_widget(
-        Paragraph::new(Line::styled(keys, Style::new().fg(Color::DarkGray))),
-        help,
-    );
+    // 一覧に入っているときのキーは、最下行のキーの案内に出す (D-130)
+    if !focused {
+        frame.render_widget(
+            Paragraph::new(Line::styled(
+                "Enter か → で、この一覧を編集する",
+                Style::new().fg(th.muted),
+            )),
+            help,
+        );
+    }
 }
 
 fn render_editor(
@@ -2876,6 +3191,7 @@ fn render_editor(
     item: Option<usize>,
     editor: &LineEditor,
 ) {
+    let th = app.theme();
     let title = match (field, item) {
         (Field::List(..), Some(i)) => format!(" 値を編集 ({}) ", i + 1),
         (Field::List(..), None) => " 新しい値を追加 ".to_string(),
@@ -2885,23 +3201,18 @@ fn render_editor(
         Field::List(side, kind) => check_list_input(side, kind, &editor.text()),
         _ => check_scalar_input(field, &editor.text()),
     };
-    let rows = [
-        Constraint::Length(3),
-        Constraint::Length(4),
-        Constraint::Fill(1),
-        Constraint::Length(1),
-    ];
-    let [input, feedback, _, help] = Layout::vertical(rows).areas(area);
+    let rows = [Constraint::Length(3), Constraint::Length(4)];
+    let [input, feedback] = Layout::vertical(rows).areas(area);
     let block = Block::bordered()
         .border_type(BorderType::Thick)
-        .border_style(Style::new().fg(Color::Cyan))
+        .border_style(Style::new().fg(th.focus))
         .title(title);
     let inner = block.inner(input);
     let (shown, cursor) = editor.view(inner.width as usize);
     let text_style = if editor.fresh {
-        Style::new().add_modifier(Modifier::REVERSED)
+        body_style(th).add_modifier(Modifier::REVERSED)
     } else {
-        Style::new()
+        body_style(th)
     };
     frame.render_widget(
         Paragraph::new(Span::styled(shown, text_style)).block(block),
@@ -2910,35 +3221,31 @@ fn render_editor(
     frame.set_cursor_position((inner.x + cursor as u16, inner.y));
     let mut lines = vec![match &checked.value {
         Ok(_) if editor.text().trim().is_empty() && matches!(field, Field::SentinelFile) => {
-            Line::styled("✓ 空 (使わない)", Style::new().fg(Color::Green))
+            Line::styled("✓ 空 (使わない)", Style::new().fg(th.ok))
         }
         Ok(v) if v.is_empty() && matches!(field, Field::CaptureSaveDirs) => {
-            Line::styled("✓ 空 (制限なし)", Style::new().fg(Color::Green))
+            Line::styled("✓ 空 (制限なし)", Style::new().fg(th.ok))
         }
         Ok(v) if v.is_empty() && matches!(field, Field::McpRequireApproval) => {
-            Line::styled("✓ 空 (なし)", Style::new().fg(Color::Green))
+            Line::styled("✓ 空 (なし)", Style::new().fg(th.ok))
         }
-        Ok(v) => Line::styled(format!("✓ {v}"), Style::new().fg(Color::Green)),
-        Err(e) => Line::styled(format!("✗ {e}"), Style::new().fg(Color::Red)),
+        Ok(v) => Line::styled(format!("✓ {v}"), Style::new().fg(th.ok)),
+        Err(e) => Line::styled(format!("✗ {e}"), Style::new().fg(th.danger)),
     }];
     if let Some(w) = &checked.warning {
-        lines.push(Line::styled(
-            format!("⚠ {w}"),
-            Style::new().fg(Color::Yellow),
-        ));
+        lines.push(Line::styled(format!("⚠ {w}"), Style::new().fg(th.warn)));
     }
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), feedback);
-    let _ = app;
-    frame.render_widget(
-        Paragraph::new(Line::styled(
-            "Enter 確定  Esc 取消  ←→ Home End 移動  Ctrl+U 全消去",
-            Style::new().fg(Color::DarkGray),
-        )),
-        help,
-    );
 }
 
-fn render_checklist(frame: &mut Frame, area: TuiRect, side: Side, checked: &[bool], cursor: usize) {
+fn render_checklist(
+    th: &Theme,
+    frame: &mut Frame,
+    area: TuiRect,
+    side: Side,
+    checked: &[bool],
+    cursor: usize,
+) {
     let kinds = checklist_kinds();
     let items: Vec<ListItem> = kinds
         .iter()
@@ -2952,32 +3259,22 @@ fn render_checklist(frame: &mut Frame, area: TuiRect, side: Side, checked: &[boo
         (Side::Deny, 0) => "拒否する操作なし".to_string(),
         (Side::Deny, n) => format!("選んだ {n} 種を常に拒否"),
     };
-    let [list_area, note_area, help] = Layout::vertical([
-        Constraint::Fill(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-    ])
-    .areas(area);
+    let [list_area, note_area] =
+        Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(area);
     let block = Block::bordered()
         .border_type(BorderType::Thick)
-        .border_style(Style::new().fg(Color::Cyan))
+        .border_style(Style::new().fg(th.focus))
         .title(" 操作を選ぶ ");
     let list = List::new(items)
         .block(block)
+        .style(body_style(th))
         .highlight_symbol("▶")
         .highlight_style(Style::new().add_modifier(Modifier::REVERSED));
     let mut state = ListState::default().with_selected(Some(cursor));
     frame.render_stateful_widget(list, list_area, &mut state);
     frame.render_widget(
-        Paragraph::new(Line::styled(note, Style::new().fg(Color::Yellow))),
+        Paragraph::new(Line::styled(note, Style::new().fg(th.warn))),
         note_area,
-    );
-    frame.render_widget(
-        Paragraph::new(Line::styled(
-            "Space 切替  a 全部  Enter 確定  Esc 取消",
-            Style::new().fg(Color::DarkGray),
-        )),
-        help,
     );
 }
 
@@ -2990,12 +3287,12 @@ fn render_picker(
     filter: &LineEditor,
     cursor: usize,
 ) {
+    let th = app.theme();
     let rows = app.picker_rows(side, kind, &filter.text());
-    let [input, verdict, list_area, help] = Layout::vertical([
+    let [input, verdict, list_area] = Layout::vertical([
         Constraint::Length(3),
         Constraint::Length(1),
         Constraint::Fill(1),
-        Constraint::Length(1),
     ])
     .areas(area);
     let title = match kind {
@@ -3007,11 +3304,14 @@ fn render_picker(
     };
     let block = Block::bordered()
         .border_type(BorderType::Thick)
-        .border_style(Style::new().fg(Color::Cyan))
+        .border_style(Style::new().fg(th.focus))
         .title(title);
     let inner = block.inner(input);
     let (shown, c) = filter.view(inner.width as usize);
-    frame.render_widget(Paragraph::new(shown).block(block), input);
+    frame.render_widget(
+        Paragraph::new(Span::styled(shown, body_style(th))).block(block),
+        input,
+    );
     if cursor == 0 {
         frame.set_cursor_position((inner.x + c as u16, inner.y));
     }
@@ -3019,32 +3319,30 @@ fn render_picker(
     let v = if filter.text().trim().is_empty() {
         Line::styled(
             "文字を打つと絞り込む。そのまま Enter で、打った値を追加",
-            Style::new().fg(Color::DarkGray),
+            Style::new().fg(th.muted),
         )
     } else {
         match (&checked.value, &checked.warning) {
-            (Ok(v), Some(w)) => {
-                Line::styled(format!("✓ {v}  ⚠ {w}"), Style::new().fg(Color::Yellow))
-            }
-            (Ok(v), None) => Line::styled(format!("✓ {v}"), Style::new().fg(Color::Green)),
-            (Err(e), _) => Line::styled(format!("✗ {e}"), Style::new().fg(Color::Red)),
+            (Ok(v), Some(w)) => Line::styled(format!("✓ {v}  ⚠ {w}"), Style::new().fg(th.warn)),
+            (Ok(v), None) => Line::styled(format!("✓ {v}"), Style::new().fg(th.ok)),
+            (Err(e), _) => Line::styled(format!("✗ {e}"), Style::new().fg(th.danger)),
         }
     };
     frame.render_widget(Paragraph::new(v), verdict);
     let mut items = vec![ListItem::new(Line::styled(
         format!("✎ 入力した値を追加: {}", filter.text()),
-        Style::new().fg(Color::Cyan),
+        Style::new().fg(th.accent),
     ))];
     if kind != ListKind::Regions && app.windows.is_none() {
         items.push(ListItem::new(Line::styled(
             "(開いているウィンドウを読み込み中…)",
-            Style::new().fg(Color::DarkGray),
+            Style::new().fg(th.muted),
         )));
     }
     for r in &rows {
         items.push(ListItem::new(Line::from(vec![
-            Span::raw(r.value.clone()),
-            Span::styled(format!("  {}", r.detail), Style::new().fg(Color::DarkGray)),
+            Span::styled(r.value.clone(), body_style(th)),
+            Span::styled(format!("  {}", r.detail), Style::new().fg(th.muted)),
         ])));
     }
     let list = List::new(items)
@@ -3052,15 +3350,6 @@ fn render_picker(
         .highlight_style(Style::new().add_modifier(Modifier::REVERSED));
     let mut state = ListState::default().with_selected(Some(cursor));
     frame.render_stateful_widget(list, list_area, &mut state);
-    let keys = if kind == ListKind::Regions {
-        "↑↓ 選ぶ  Enter 追加  Esc 取消"
-    } else {
-        "↑↓ 選ぶ  Enter 追加  F5 再読み込み  Esc 取消"
-    };
-    frame.render_widget(
-        Paragraph::new(Line::styled(keys, Style::new().fg(Color::DarkGray))),
-        help,
-    );
 }
 
 fn render_script_picker(
@@ -3070,24 +3359,24 @@ fn render_script_picker(
     filter: &LineEditor,
     cursor: usize,
 ) {
+    let th = app.theme();
     let rows = app.script_rows(filter);
-    let [input, note, list_area, help] = Layout::vertical([
+    let [input, note, list_area] = Layout::vertical([
         Constraint::Length(3),
         Constraint::Length(1),
         Constraint::Fill(1),
-        Constraint::Length(1),
     ])
     .areas(area);
     let block = Block::bordered()
         .border_type(BorderType::Thick)
-        .border_style(Style::new().fg(Color::Cyan))
+        .border_style(Style::new().fg(th.focus))
         .title(" 操作列 JSON のパスを入力するか、下から選ぶ ");
     let inner = block.inner(input);
     let (shown, c) = filter.view(inner.width as usize);
     let text_style = if filter.fresh {
-        Style::new().add_modifier(Modifier::REVERSED)
+        body_style(th).add_modifier(Modifier::REVERSED)
     } else {
-        Style::new()
+        body_style(th)
     };
     frame.render_widget(
         Paragraph::new(Span::styled(shown, text_style)).block(block),
@@ -3099,32 +3388,29 @@ fn render_script_picker(
     frame.render_widget(
         Paragraph::new(Line::styled(
             "文字を打つと絞り込む。Enter で検証 (装置には触れない)",
-            Style::new().fg(Color::DarkGray),
+            Style::new().fg(th.muted),
         )),
         note,
     );
     let mut items = vec![ListItem::new(Line::styled(
         format!("✎ 入力したパスを使う: {}", filter.text()),
-        Style::new().fg(Color::Cyan),
+        Style::new().fg(th.accent),
     ))];
     match &app.scripts {
         None => items.push(ListItem::new(Line::styled(
             "(作業ディレクトリの *.json を読み込み中…)",
-            Style::new().fg(Color::DarkGray),
+            Style::new().fg(th.muted),
         ))),
         Some(all) if all.is_empty() => items.push(ListItem::new(Line::styled(
             "(作業ディレクトリに *.json が無い)",
-            Style::new().fg(Color::DarkGray),
+            Style::new().fg(th.muted),
         ))),
         Some(_) => {}
     }
     for r in &rows {
         items.push(ListItem::new(Line::from(vec![
-            Span::raw(r.name.clone()),
-            Span::styled(
-                format!("  {}", r.path.display()),
-                Style::new().fg(Color::DarkGray),
-            ),
+            Span::styled(r.name.clone(), body_style(th)),
+            Span::styled(format!("  {}", r.path.display()), Style::new().fg(th.muted)),
         ])));
     }
     let list = List::new(items)
@@ -3132,13 +3418,6 @@ fn render_script_picker(
         .highlight_style(Style::new().add_modifier(Modifier::REVERSED));
     let mut state = ListState::default().with_selected(Some(cursor));
     frame.render_stateful_widget(list, list_area, &mut state);
-    frame.render_widget(
-        Paragraph::new(Line::styled(
-            "↑↓ 選ぶ  Enter 検証  F5 再読み込み  Esc 取消",
-            Style::new().fg(Color::DarkGray),
-        )),
-        help,
-    );
 }
 
 fn render_dialog(
@@ -3147,8 +3426,10 @@ fn render_dialog(
     title: &str,
     lines: &[String],
     keys: &str,
-    color: Color,
+    tone: Tone,
+    th: &Theme,
 ) {
+    let color = tone.color(th);
     let content_w = lines
         .iter()
         .map(|l| UnicodeWidthStr::width(l.as_str()))
@@ -3185,7 +3466,10 @@ fn render_dialog(
     };
     clear_wide_left_of(frame.buffer_mut(), r);
     frame.render_widget(Clear, r);
-    let mut text: Vec<Line> = wrapped.into_iter().map(Line::raw).collect();
+    let mut text: Vec<Line> = wrapped
+        .into_iter()
+        .map(|l| Line::styled(l, body_style(th)))
+        .collect();
     text.push(Line::raw(""));
     text.extend(
         keys_rows
@@ -3239,7 +3523,7 @@ fn help_lines() -> Vec<String> {
     [
         "項目の一覧: ↑↓ 選ぶ / Enter・→ 開く (総スイッチは切り替え)",
         "一覧の編集: ↑↓ 選ぶ / Enter 編集・追加 / a 追加 / d 削除 / ← 戻る",
-        "どこでも: s・Ctrl+S 保存 / u 元に戻す / ? ヘルプ / q 終了 / Ctrl+C 終了",
+        "どこでも: s・Ctrl+S 保存 / u・Ctrl+Z 元に戻す / ?・F1 ヘルプ / q 終了 (主画面では Esc も) / Ctrl+C 終了",
         "操作列の実行: r で JSON を選ぶ → 検証 → y → 5 秒後に実行 (保存済みの設定で判定。未保存なら先に s)",
         "実行中はマウスを大きく動かすと止まる。自分の端末のウィンドウには送らない",
         "",
@@ -3261,6 +3545,19 @@ fn help_lines() -> Vec<String> {
 /// 操作列の実行は `runner` に頼む (CLI の `run` と同じ経路。D-044)。
 pub fn run(target: &Target, runner: &mut dyn ScriptRunner) -> i32 {
     let mut app = App::load(target.clone());
+    // 配色の環境は 1 回だけ読む。RGB のテーマを選んだのに VT が無ければ、ansi で描くことを知らせる (D-129)
+    app.env = ThemeEnv::detect();
+    if theme::fell_back(app.config.tui.theme, app.env) {
+        // 読み込みの知らせ (読めないファイルの復旧の導線など) は消さずに、後ろへ足す
+        let text = if app.status.is_empty() {
+            FELL_BACK_MSG.to_string()
+        } else {
+            format!("{} / {FELL_BACK_MSG}", app.status)
+        };
+        app.set_status(StatusKind::Warn, text);
+    }
+    // NO_COLOR は resolve が mono を選ぶことで扱う。crossterm にも効かせると、明示したテーマの色まで消える
+    ratatui::crossterm::style::force_color_output(true);
     // 領域の雛形 (読み取りだけ)
     if let Ok(r) = crate::win32::screen::primary_screen() {
         app.screens
@@ -3460,6 +3757,495 @@ mod tests {
         buffer_text(&t)
     }
 
+    fn draw_term(app: &App, w: u16, h: u16) -> Terminal<TestBackend> {
+        let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
+        t.draw(|f| render(app, f)).unwrap();
+        t
+    }
+
+    /// セル (x, y) の文字の色
+    fn cell_fg(t: &Terminal<TestBackend>, x: u16, y: u16) -> Color {
+        t.backend().buffer()[(x, y)].fg
+    }
+
+    /// `needle` (空白は無視して照合) が始まるセルの座標を、上の行から順にすべて返す
+    fn find_cells(t: &Terminal<TestBackend>, needle: &str) -> Vec<(u16, u16)> {
+        let strip = |s: &str| s.chars().filter(|c| *c != ' ').collect::<String>();
+        let want = strip(needle);
+        let buf = t.backend().buffer();
+        let mut out = Vec::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                if buf[(x, y)].symbol().trim().is_empty() {
+                    continue;
+                }
+                let rest: String = (x..buf.area.width).map(|i| buf[(i, y)].symbol()).collect();
+                if strip(&rest).starts_with(&want) {
+                    out.push((x, y));
+                }
+            }
+        }
+        out
+    }
+
+    /// `needle` が始まる最初のセルの座標
+    fn find_cell(t: &Terminal<TestBackend>, needle: &str) -> (u16, u16) {
+        *find_cells(t, needle)
+            .first()
+            .unwrap_or_else(|| panic!("{needle} が画面に無い:\n{}", buffer_text(t)))
+    }
+
+    /// 左ペイン (幅 120 の画面で 54 桁まで) の中で `needle` が始まる最初のセル。右ペインの枠の題と区別する
+    fn find_left_cell(t: &Terminal<TestBackend>, needle: &str) -> (u16, u16) {
+        *find_cells(t, needle)
+            .iter()
+            .find(|(x, _)| *x < 54)
+            .unwrap_or_else(|| panic!("{needle} が左ペインに無い:\n{}", buffer_text(t)))
+    }
+
+    #[test]
+    fn allow_heading_uses_accent_not_green() {
+        let t = draw_term(&app(), 120, 40);
+        let (x, y) = find_cell(&t, "許可リスト (allow)");
+        assert_eq!(cell_fg(&t, x, y), theme::CALM.accent);
+        let (x, y) = find_cell(&t, "拒否リスト (deny)");
+        assert_eq!(cell_fg(&t, x, y), theme::CALM.danger);
+    }
+
+    #[test]
+    fn unsaved_count_uses_warn_and_mark_uses_changed() {
+        let mut a = app();
+        a.config.general.capture_enabled = !a.config.general.capture_enabled;
+        let t = draw_term(&a, 120, 40);
+        let (x, y) = find_cell(&t, "未保存");
+        assert_eq!(cell_fg(&t, x, y), theme::CALM.warn);
+        let (x, y) = find_cell(&t, "●");
+        assert_eq!(cell_fg(&t, x, y), theme::CALM.changed);
+    }
+
+    /// 本文 (項目の名前、説明、帯、ダイアログ、入力欄の文字) は、端末の既定の前景ではなく `text` の役割で塗る
+    #[test]
+    fn body_text_uses_text_role() {
+        let mut a = app();
+        let t = draw_term(&a, 120, 40);
+        // 左ペインの項目の名前 (帯の「実入力:」とは別。空白を除くと「実入力(マウスとキー)」)
+        let (x, y) = find_left_cell(&t, "実入力 (マウスとキー)");
+        assert_eq!(cell_fg(&t, x, y), theme::CALM.text);
+        // 上部の帯の本文
+        let (x, y) = find_cell(&t, "撮影:");
+        assert_eq!(cell_fg(&t, x, y), theme::CALM.text);
+        // 右ペインの説明
+        let (x, y) = find_cell(&t, "有効にすると、ai-cu が本物の");
+        assert_eq!(cell_fg(&t, x, y), theme::CALM.text);
+        // ダイアログの本文
+        a.overlay = Overlay::Help;
+        let t = draw_term(&a, 120, 40);
+        let (x, y) = find_cell(&t, "項目の一覧:");
+        assert_eq!(cell_fg(&t, x, y), theme::CALM.text);
+        // 入力欄に打った文字
+        a.overlay = Overlay::None;
+        select(&mut a, Field::MaxActions);
+        a.update(&press(KeyCode::Enter));
+        type_str(&mut a, "7777");
+        let t = draw_term(&a, 120, 40);
+        let (x, y) = find_cell(&t, "7777");
+        assert_eq!(cell_fg(&t, x, y), theme::CALM.text);
+    }
+
+    /// 実入力とパスワード入力の「無効」(安全側) は、上部の帯と同じ `ok` で塗る
+    #[test]
+    fn disabled_master_switches_use_ok_in_left_pane() {
+        let t = draw_term(&app(), 120, 40);
+        for name in [
+            "実入力 (マウスとキー)",
+            "パスワード欄への入力",
+            "画面撮影",
+            "全画面の撮影",
+        ] {
+            let (_, y) = find_left_cell(&t, name);
+            // 左ペイン (幅 54) の同じ行にある「無効」
+            let cells: Vec<_> = find_cells(&t, "無効")
+                .into_iter()
+                .filter(|&(x, cy)| cy == y && x < 54)
+                .collect();
+            assert_eq!(cells.len(), 1, "{name}\n{}", buffer_text(&t));
+            assert_eq!(cell_fg(&t, cells[0].0, y), theme::CALM.ok, "{name}");
+        }
+    }
+
+    #[test]
+    fn input_enabled_shows_warning_mark() {
+        let mut a = app();
+        a.config.general.input_enabled = true;
+        a.config.general.capture_enabled = true;
+        let t = draw_term(&a, 120, 40);
+        let text = buffer_text(&t);
+        assert!(has(&text, "⚠有効"), "{text}");
+        // 上部の帯と左ペインの実入力の 2 か所。撮影の有効には ⚠ を付けない
+        let cells = find_cells(&t, "⚠ 有効");
+        assert_eq!(cells.len(), 2, "{text}");
+        for (x, y) in cells {
+            assert_eq!(cell_fg(&t, x, y), theme::CALM.danger);
+        }
+        assert!(has(&text, "撮影:有効"), "{text}");
+        assert!(!has(&text, "撮影:⚠"), "{text}");
+    }
+
+    #[test]
+    fn mono_theme_draws_without_color() {
+        let mut a = app();
+        a.config.tui.theme = config::ThemeName::Mono;
+        a.config.general.input_enabled = true;
+        for overlay in [Overlay::None, Overlay::Help] {
+            a.overlay = overlay;
+            let t = draw_term(&a, 120, 40);
+            let buf = t.backend().buffer();
+            for c in &buf.content {
+                assert_eq!(c.fg, Color::Reset, "{:?}", c.symbol());
+            }
+        }
+        // 選んでいる行の REVERSED は残る
+        a.overlay = Overlay::None;
+        let t = draw_term(&a, 120, 40);
+        assert!(
+            t.backend()
+                .buffer()
+                .content
+                .iter()
+                .any(|c| c.modifier.contains(Modifier::REVERSED))
+        );
+    }
+
+    #[test]
+    fn ansi_theme_used_without_vt() {
+        let mut a = app();
+        a.env = ThemeEnv {
+            no_color: false,
+            vt: false,
+        };
+        assert_eq!(a.theme().name, config::ThemeName::Ansi);
+        a.env = ThemeEnv::default();
+        assert_eq!(a.theme().name, config::ThemeName::Calm);
+    }
+
+    /// 項目「テーマ」(D-129): 左の一覧の最後に並び、Enter / Space で巡回し、確認なしでその場で配色に反映する
+    #[test]
+    fn theme_field_cycles_and_applies_immediately() {
+        assert_eq!(Field::Theme.key(), "tui.theme");
+        assert_eq!(Field::Theme.name(), "テーマ");
+        assert_eq!(Field::Theme.location(), "表示 > テーマ");
+        assert_eq!(fields().last(), Some(&Field::Theme));
+        let mut a = app();
+        select(&mut a, Field::Theme);
+        a.update(&press(KeyCode::Enter));
+        assert_eq!(a.overlay, Overlay::None, "確認は挟まない");
+        assert_eq!(a.config.tui.theme, config::ThemeName::Calm);
+        assert_eq!(a.theme().name, config::ThemeName::Calm);
+        assert_eq!(a.changed_count(), 1);
+        let want = [
+            config::ThemeName::CalmLight,
+            config::ThemeName::Ansi,
+            config::ThemeName::Mono,
+            config::ThemeName::Auto,
+        ];
+        for (i, name) in want.into_iter().enumerate() {
+            // Enter と Space のどちらでも次へ進む
+            let key = if i % 2 == 0 {
+                KeyCode::Char(' ')
+            } else {
+                KeyCode::Enter
+            };
+            a.update(&press(key));
+            assert_eq!(a.config.tui.theme, name);
+            assert_eq!(a.theme().name, theme::resolve(name, a.env).name);
+        }
+        assert_eq!(a.changed_count(), 0, "auto に戻れば保存済みと同じ");
+        assert!(!a.dirty());
+    }
+
+    /// `auto` の行には、いま選ばれているテーマを添える。他は名前だけ。VT が無くて落ちたときは落ち先を添える
+    #[test]
+    fn theme_field_shows_resolved_theme_for_auto() {
+        let mut a = app();
+        let text = draw(&a, 120, 40);
+        assert!(has(&text, "テーマ"), "{text}");
+        assert!(has(&text, "(auto:calm)"), "{text}");
+        a.env = ThemeEnv {
+            no_color: true,
+            vt: true,
+        };
+        assert!(has(&draw(&a, 120, 40), "(auto:mono)"));
+        a.env = ThemeEnv::default();
+        a.config.tui.theme = config::ThemeName::CalmLight;
+        let text = draw(&a, 120, 40);
+        assert!(has(&text, "テーマ calm-light"), "{text}");
+        assert!(!has(&text, "(auto:"), "{text}");
+        a.env = ThemeEnv {
+            no_color: false,
+            vt: false,
+        };
+        let text = draw(&a, 120, 40);
+        assert!(has(&text, "calm-light→ansi"), "{text}");
+        // 右ペインには説明とキーが出る
+        select(&mut a, Field::Theme);
+        let text = draw(&a, 120, 40);
+        assert!(has(&text, "tui.theme"), "{text}");
+        assert!(has(&text, "NO_COLOR"), "{text}");
+        assert!(has(&text, "左の一覧で Enter: 切り替え"), "{text}");
+    }
+
+    #[test]
+    fn theme_change_is_undoable_and_not_widening() {
+        let mut a = app();
+        select(&mut a, Field::Theme);
+        a.update(&press(KeyCode::Enter));
+        assert_eq!(a.config.tui.theme, config::ThemeName::Calm);
+        assert!(
+            widening_changes(&a.saved, &a.config).is_empty(),
+            "配色は許可を広げない"
+        );
+        a.update(&press(KeyCode::Char('u')));
+        assert_eq!(a.config.tui.theme, config::ThemeName::Auto);
+        assert_eq!(a.changed_count(), 0);
+        // 配色だけを変えて保存しても、確認を挟まずにそのまま保存する
+        a.update(&press(KeyCode::Enter));
+        assert_eq!(a.update(&press(KeyCode::Char('s'))), Effect::Save);
+        assert_eq!(a.overlay, Overlay::None, "確認を挟まない");
+    }
+
+    /// VT の無い端末で calm / calm-light に切り替えたら、起動時と同じく ansi で描くことを Warn で知らせる (D-129)
+    #[test]
+    fn theme_cycle_warns_when_falling_back_without_vt() {
+        let mut a = app();
+        a.env = ThemeEnv {
+            no_color: false,
+            vt: false,
+        };
+        select(&mut a, Field::Theme);
+        a.update(&press(KeyCode::Enter));
+        assert_eq!(a.config.tui.theme, config::ThemeName::Calm);
+        assert_eq!(a.status_kind, StatusKind::Warn);
+        assert!(
+            a.status
+                .contains("VT が使えないので ansi の配色で表示している")
+        );
+        a.update(&press(KeyCode::Enter));
+        assert_eq!(a.config.tui.theme, config::ThemeName::CalmLight);
+        assert_eq!(a.status_kind, StatusKind::Warn);
+        // ansi は落ちないので Ok
+        a.update(&press(KeyCode::Enter));
+        assert_eq!(a.config.tui.theme, config::ThemeName::Ansi);
+        assert_eq!(a.status_kind, StatusKind::Ok);
+    }
+
+    // -----------------------------------------------------------------------
+    // キーの案内の行と慣れたキー (D-130)
+    // -----------------------------------------------------------------------
+
+    /// 画面の行 `y` の文字列
+    fn row(t: &Terminal<TestBackend>, y: u16) -> String {
+        buffer_text(t)
+            .lines()
+            .nth(usize::from(y))
+            .unwrap_or("")
+            .to_string()
+    }
+
+    /// 行 `y` で `needle` が始まるセル
+    fn find_in_row(t: &Terminal<TestBackend>, y: u16, needle: &str) -> (u16, u16) {
+        *find_cells(t, needle)
+            .iter()
+            .find(|(_, cy)| *cy == y)
+            .unwrap_or_else(|| panic!("{needle} が行 {y} に無い:\n{}", buffer_text(t)))
+    }
+
+    fn strip(s: &str) -> String {
+        s.chars().filter(|c| *c != ' ').collect()
+    }
+
+    fn dirty_app() -> App {
+        let mut a = app();
+        select(&mut a, Field::CaptureEnabled);
+        a.update(&press(KeyCode::Enter));
+        a.update(&press(KeyCode::Char('y')));
+        assert!(a.dirty());
+        a
+    }
+
+    #[test]
+    fn key_bar_clean_main() {
+        let t = draw_term(&app(), 120, 40);
+        let bar = row(&t, 39);
+        for needle in [
+            "s 保存",
+            "u 元に戻す",
+            "Esc 終了",
+            "F1 ヘルプ",
+            "↑↓ 選ぶ",
+            "r 実行",
+        ] {
+            assert!(has(&bar, needle), "{needle}\n{bar}");
+        }
+        assert!(strip(&bar).starts_with("↑↓"), "{bar}");
+        let (x, y) = find_in_row(&t, 39, "s 保存");
+        assert_eq!(cell_fg(&t, x, y), theme::CALM.muted);
+        let (x, y) = find_in_row(&t, 39, "F1 ヘルプ");
+        assert_eq!(cell_fg(&t, x, y), theme::CALM.accent);
+        assert!(
+            t.backend().buffer()[(x, y)]
+                .modifier
+                .contains(Modifier::BOLD)
+        );
+        assert_eq!(cell_fg(&t, x + 3, y), theme::CALM.muted, "意味は muted");
+        // 変更が無ければ題名に「s で保存」は出ない
+        assert!(!has(&row(&t, 0), "s で保存"));
+    }
+
+    #[test]
+    fn key_bar_dirty_puts_save_first_in_warn() {
+        let t = draw_term(&dirty_app(), 120, 40);
+        let bar = row(&t, 39);
+        assert!(strip(&bar).starts_with("s保存u元に戻す"), "{bar}");
+        let (x, y) = find_in_row(&t, 39, "s 保存");
+        assert_eq!(cell_fg(&t, x, y), theme::CALM.warn);
+        assert_eq!(cell_fg(&t, x + 2, y), theme::CALM.text, "意味は text");
+        let title = row(&t, 0);
+        assert!(has(&title, "s で保存"), "{title}");
+        let (x, y) = find_in_row(&t, 0, "s で保存");
+        assert_eq!(cell_fg(&t, x, y), theme::CALM.warn);
+    }
+
+    #[test]
+    fn status_message_does_not_hide_key_bar() {
+        let mut a = dirty_app();
+        a.update(&press(KeyCode::Char('u')));
+        assert_eq!(a.status, "直前の変更を元に戻した");
+        let t = draw_term(&a, 120, 40);
+        assert!(has(&row(&t, 39), "F1 ヘルプ"), "{}", buffer_text(&t));
+        assert!(
+            has(&row(&t, 38), "直前の変更を元に戻した"),
+            "{}",
+            buffer_text(&t)
+        );
+        // 次のキーでメッセージは消え、案内は残る
+        a.update(&press(KeyCode::Down));
+        assert_eq!(a.status, "");
+        let t = draw_term(&a, 120, 40);
+        assert!(row(&t, 38).trim().is_empty(), "{}", buffer_text(&t));
+        assert!(has(&row(&t, 39), "F1 ヘルプ"));
+    }
+
+    #[test]
+    fn key_bar_in_dialog_shows_only_dialog_keys() {
+        let mut a = dirty_app();
+        a.update(&press(KeyCode::Char('q')));
+        assert_eq!(a.overlay, Overlay::QuitDialog);
+        let t = draw_term(&a, 120, 40);
+        let bar = row(&t, 39);
+        assert!(!bar.contains("F1"), "{bar}");
+        assert!(has(&bar, "Esc 戻る"), "{bar}");
+        assert!(has(&bar, "y 破棄して終了"), "{bar}");
+    }
+
+    #[test]
+    fn key_bar_in_right_list_keeps_save_when_dirty() {
+        let mut a = app();
+        select(&mut a, Field::List(Side::Deny, ListKind::Keys));
+        a.update(&press(KeyCode::Enter));
+        a.update(&press(KeyCode::Enter));
+        type_str(&mut a, "ctrl+w");
+        a.update(&press(KeyCode::Enter));
+        assert_eq!(a.focus, Focus::Right);
+        assert!(a.dirty());
+        let t = draw_term(&a, 120, 40);
+        let bar = strip(&row(&t, 39));
+        assert!(bar.starts_with("s保存u元に戻す"), "{bar}");
+        for needle in ["↑↓選ぶ", "Enter編集/追加", "a追加", "d削除", "←戻る"] {
+            assert!(bar.contains(needle), "{needle}\n{bar}");
+        }
+        let (x, y) = find_in_row(&t, 39, "s 保存");
+        assert_eq!(cell_fg(&t, x, y), theme::CALM.warn);
+        // 変更が無ければ一覧のキーだけ
+        let mut a = app();
+        select(&mut a, Field::List(Side::Deny, ListKind::Keys));
+        a.update(&press(KeyCode::Enter));
+        let bar = strip(&row(&draw_term(&a, 120, 40), 39));
+        assert!(bar.starts_with("↑↓選ぶ"), "{bar}");
+        assert!(!bar.contains("s保存"), "{bar}");
+    }
+
+    #[test]
+    fn key_bar_keeps_help_and_quit_when_narrow() {
+        for a in [app(), dirty_app()] {
+            let t = draw_term(&a, 60, 30);
+            let bar = row(&t, 29);
+            assert!(has(&bar, "F1 ヘルプ"), "{bar}");
+            assert!(has(&bar, "Esc 終了"), "{bar}");
+        }
+        // 純関数として: 幅 30 でも 1 行で、ヘルプと終了は残る
+        let line = key_bar(&app(), 30);
+        let s: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(s.contains("F1") && s.contains("Esc"), "{s}");
+    }
+
+    #[test]
+    fn ctrl_z_undoes() {
+        let mut a = dirty_app();
+        a.update(&ctrl('z'));
+        assert!(!a.dirty());
+        assert_eq!(a.status, "直前の変更を元に戻した");
+    }
+
+    #[test]
+    fn ctrl_z_in_editor_does_not_undo_config() {
+        let mut a = dirty_app();
+        let before = a.config.clone();
+        select(&mut a, Field::MaxActions);
+        a.update(&press(KeyCode::Enter));
+        type_str(&mut a, "12");
+        a.update(&ctrl('z'));
+        assert!(matches!(&a.overlay, Overlay::Edit { editor, .. } if editor.text() == "12"));
+        assert_eq!(a.config, before);
+    }
+
+    #[test]
+    fn f1_opens_help() {
+        let mut a = app();
+        a.update(&press(KeyCode::F(1)));
+        assert_eq!(a.overlay, Overlay::Help);
+        let help = help_lines().join("\n");
+        assert!(help.contains("u・Ctrl+Z 元に戻す"), "{help}");
+        assert!(help.contains("?・F1 ヘルプ"), "{help}");
+        assert!(help.contains("q 終了 (主画面では Esc も)"), "{help}");
+    }
+
+    #[test]
+    fn esc_quits_main_when_clean() {
+        let mut a = app();
+        assert_eq!(a.focus, Focus::Left);
+        assert_eq!(a.update(&press(KeyCode::Esc)), Effect::Quit);
+    }
+
+    #[test]
+    fn esc_twice_with_unsaved_changes_keeps_changes() {
+        let mut a = dirty_app();
+        assert_eq!(a.update(&press(KeyCode::Esc)), Effect::None);
+        assert_eq!(a.overlay, Overlay::QuitDialog);
+        assert_eq!(a.update(&press(KeyCode::Esc)), Effect::None);
+        assert_eq!(a.overlay, Overlay::None);
+        assert!(a.dirty());
+    }
+
+    #[test]
+    fn esc_in_right_pane_returns_left_not_quit() {
+        let mut a = app();
+        select(&mut a, Field::List(Side::Deny, ListKind::Keys));
+        a.update(&press(KeyCode::Enter));
+        assert_eq!(a.focus, Focus::Right);
+        assert_eq!(a.update(&press(KeyCode::Esc)), Effect::None);
+        assert_eq!(a.focus, Focus::Left);
+    }
+
     fn windows() -> Vec<WindowCandidate> {
         let w = |p: &str, c: &str, t: &str| WindowCandidate {
             process: p.into(),
@@ -3487,7 +4273,7 @@ mod tests {
             "実入力 (マウスとキー)",
             "general.input_enabled",
             "実入力: 無効",
-            "? ヘルプ",
+            "F1 ヘルプ",
         ] {
             assert!(has(&text, needle), "{needle}\n{text}");
         }
@@ -3791,7 +4577,7 @@ mod tests {
         assert!(a.config.general.password_input);
         assert!(!a.config.general.input_enabled, "他の総スイッチは動かない");
         let text = draw(&a, 120, 32);
-        assert!(has(&text, "パスワード欄への入力  有効"), "{text}");
+        assert!(has(&text, "パスワード欄への入力  ⚠ 有効"), "{text}");
         a.update(&press(KeyCode::Enter));
         assert!(!a.config.general.password_input, "無効にする向きは即時");
     }
@@ -3959,7 +4745,6 @@ mod tests {
         type_str(&mut a, "30001");
         a.update(&press(KeyCode::Enter));
         assert_eq!(a.config.indicator.lead_ms, 30001);
-        a.update(&press(KeyCode::Esc));
         assert_eq!(a.update(&ctrl('s')), Effect::None, "保存しない");
         assert_eq!(a.overlay, Overlay::None, "確認も出さない");
         assert!(a.dirty(), "保存済みの設定は元のまま");
@@ -3979,7 +4764,6 @@ mod tests {
         a.update(&press(KeyCode::Enter));
         type_str(&mut a, "30000");
         a.update(&press(KeyCode::Enter));
-        a.update(&press(KeyCode::Esc));
         assert_eq!(
             a.update(&ctrl('s')),
             Effect::Save,
@@ -4193,9 +4977,10 @@ mod tests {
         let mut a = app();
         assert_eq!(
             a.update(&press(KeyCode::Esc)),
-            Effect::None,
-            "Esc では終了しない"
+            Effect::Quit,
+            "未保存が無ければ主画面の Esc で終了 (D-130)"
         );
+        let mut a = app();
         assert_eq!(
             a.update(&ctrl('c')),
             Effect::Quit,
@@ -4497,7 +5282,7 @@ mod tests {
                 .draw(|f| {
                     let area = f.area();
                     f.render_widget(bg(), area);
-                    render_dialog(f, area, "t", &["x".into()], "k", Color::Cyan);
+                    render_dialog(f, area, "t", &["x".into()], "k", Tone::Info, &theme::CALM);
                 })
                 .unwrap()
                 .buffer
