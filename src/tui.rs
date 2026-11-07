@@ -3523,7 +3523,7 @@ fn help_lines() -> Vec<String> {
     [
         "項目の一覧: ↑↓ 選ぶ / Enter・→ 開く (総スイッチは切り替え)",
         "一覧の編集: ↑↓ 選ぶ / Enter 編集・追加 / a 追加 / d 削除 / ← 戻る",
-        "どこでも: s・Ctrl+S 保存 / u・Ctrl+Z 元に戻す / ?・F1 ヘルプ / q・Esc 終了 / Ctrl+C 終了",
+        "どこでも: s・Ctrl+S 保存 / u・Ctrl+Z 元に戻す / ?・F1 ヘルプ / q 終了 (主画面では Esc も) / Ctrl+C 終了",
         "操作列の実行: r で JSON を選ぶ → 検証 → y → 5 秒後に実行 (保存済みの設定で判定。未保存なら先に s)",
         "実行中はマウスを大きく動かすと止まる。自分の端末のウィンドウには送らない",
         "",
@@ -4216,7 +4216,7 @@ mod tests {
         let help = help_lines().join("\n");
         assert!(help.contains("u・Ctrl+Z 元に戻す"), "{help}");
         assert!(help.contains("?・F1 ヘルプ"), "{help}");
-        assert!(help.contains("q・Esc 終了"), "{help}");
+        assert!(help.contains("q 終了 (主画面では Esc も)"), "{help}");
     }
 
     #[test]

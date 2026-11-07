@@ -1727,7 +1727,7 @@
   - `calm` と `calm-light` の値は、WCAG の相対輝度の比で、文字の役割 (text、muted、accent、changed、ok、warn、danger) を基準の背景に対して 4.5:1 以上、枠の `focus` を 3:1 以上にそろえ、その比は単体テストで見張る。基準の背景は `calm` が #0C0C0C、#1E2228、選択の面 #2A3442、`calm-light` が白と #F5F7FA (自分)
   - 背景は塗らない (`Color::Reset`)。前景の色だけをテーマで決める (自分)
   - 選び方 (`[tui] theme` の値は `auto`、`calm`、`calm-light`、`ansi`、`mono`): `auto` 以外が書かれていればそれを使う (`NO_COLOR` より優先。no-color.org の約束どおり)。`auto` は順に、環境変数 `NO_COLOR` が空でなければ `mono`、Windows で VT の処理が使えなければ `ansi`、それ以外は `calm`。Windows では `COLORTERM` を見ない (Windows Terminal は設定しない)。選び方は「設定の値と環境を受け取ってテーマを返す純関数」にし、環境の読み取りは `tui::run` で 1 回だけ行う (自分)
-  - Rgb を使う `calm` と `calm-light` を明示していても、VT が使えない端末では `ansi` で描き、メッセージの行に「VT が使えないので ansi で表示している」を 1 回出す。設定の値は書き換えない (TUI の中の巡回で選んでも同じ) (自分)
+  - Rgb を使う `calm` と `calm-light` を明示していても、VT が使えない端末では `ansi` で描き、メッセージの行に「VT が使えないので ansi の配色で表示している」を 1 回出す。設定の値は書き換えない (TUI の中の巡回で選んでも同じ) (自分)
   - 設定は `[tui] theme`。`Config` に `tui` を `#[serde(default)]` で足し、`deny_unknown_fields`、`CONFIG_VERSION` は 1 のまま (D-049、D-093 と同じ型)。未知のテーマ名と未知のキーは読み込みのエラー。雛形 (`TEMPLATE`) には注釈でだけ載せる (自分)
   - `[tui]` は判定 (allow / deny、D-018) に関わらない表示だけの設定として扱う。層 (`Layer`) には持たず、追加の層でも自由に書ける (自分)
   - 既定 (`auto`) のときは、保存 (`render_edit`) で `[tui]` を書き出さない。ファイルにすでに `[tui]` があれば値を更新する (`auto` に戻したときは `theme = "auto"` を書く) (自分)
