@@ -1,7 +1,7 @@
 # ai-cu 手動確認チェックリスト
 
 自動テスト (`cargo test`、フィクスチャ限定の `cargo test -- --ignored`) では確かめられないことを、本物の端末と本物のアプリで確かめる手順。
-TUI の手順 (5 と 13) は人が自分の Windows Terminal (PowerShell) で行う。それ以外の CLI の手順は、末尾の節のとおり AI のセッションに任せられる。
+TUI の手順 (5、13、32) は人が自分の Windows Terminal (PowerShell) で行う。それ以外の CLI の手順は、末尾の節のとおり AI のセッションに任せられる。
 各コマンドの後に `$LASTEXITCODE` で終了コードを確かめる。実施したら、末尾の「実施の記録」に日付と結果を足す。
 
 ```powershell
@@ -268,11 +268,11 @@ Start-Sleep -Seconds 4; & $cu shot --out "$env:TEMP\ai-cu-shot.png" --region 0,0
 Set-Location $dir
 & $cu
 ```
-- [ ] 状態行に `r 実行` が出る。`?` のヘルプに「操作列の実行」の行がある
+- [ ] 最下行のキーの案内に `r 実行` が出る。`?` か `F1` のヘルプに「操作列の実行」の行がある
 - [ ] `r` → 右ペインが「操作列を実行」になり、`sample.json` と `sample-estop.json` が一覧に出る。文字を打つと絞り込まれる
 - [ ] `↓` で `sample.json` を選んで Enter → 「実行の確認」の画面。操作数、判定に使う設定 (config.toml のパス)、停止の手段、最初の操作の注意が出る。枠が崩れていない
 - [ ] `Esc` で取りやめ、`r` → 入力欄に前回のパスが入っていて、一覧も全件出る。行 0 で Enter すると同じファイルを再検査する
-- [ ] 確認の画面で `y` → 「実行まで 5 秒」のカウントダウン。`x` などのキーでは取り消されず、`Esc` で取りやめられる (状態行に「取りやめた (何も送っていない)」)
+- [ ] 確認の画面で `y` → 「実行まで 5 秒」のカウントダウン。`x` などのキーでは取り消されず、`Esc` で取りやめられる (メッセージの行に「取りやめた (何も送っていない)」)
 
 端末を前面にしたまま走らせる (自分の端末への送信の拒否)。
 
@@ -294,7 +294,7 @@ Set-Location $dir
 
 未保存の変更があるとき。
 
-- [ ] 何かの項目を変えて (題名に `[未保存]`)、`r` → 状態行に「未保存の変更があるので実行しない」と出て、一覧は開かない。`u` で戻すと `r` が使える
+- [ ] 何かの項目を変えて (題名に `[未保存]`)、`r` → メッセージの行に「未保存の変更があるので実行しない」と出て、一覧は開かない。`u` で戻すと `r` が使える
 
 端末でない起動からは到達しない (手順 5 と同じ)。
 
@@ -937,6 +937,67 @@ wait $pa; echo "A exit=$?"
 記録する値: 使った release の版 (`target/release/ai-cu.exe --version`)、(a) と (b) の終了コード、B の `wall_ms` と `elapsed_ms`、(b) の `waited_ms`、`text` の本文。「実施の記録」の節に日付つきで書く。
 後片付け: メモ帳の文字は人が消すか、保存せずに閉じる。`target/manual-check/s31-*` は残してよい (git 管理外)
 
+## 32. TUI の配色とキーの案内 (D-129、D-130)
+
+TUI の見た目の確かめで、人が自分の端末で行う。AI は TUI を起動しない (端末が無く、実入力にも関わらない手順だが、見た目は人の目でしか確かめられない)。
+本物の設定ファイルは使わない。`--config=` で、手順の間だけ使う設定のコピーを指す (題名に「[追加の層: …]」が付く。配色は TUI が編集しているファイルの `[tui]` から読む)。基本の層は触れない。
+`example-config.toml` に `[tui]` は無いので、`theme` は `auto` で始まる。
+
+```powershell
+New-Item -ItemType Directory -Force "<repo>\target\manual-check" | Out-Null
+$cfg = "<repo>\target\manual-check\s32-config.toml"
+Copy-Item "$dir\example-config.toml" $cfg -Force
+```
+
+(a) Windows Terminal の暗い背景で、`auto` が `calm` を選び、キーの案内が最下行に常に出る:
+
+```powershell
+& $cu --config=$cfg
+```
+- [ ] 左の一覧の末尾の節「表示」に「テーマ」があり、値が `(auto: calm)`。右に説明が出て、`左の一覧で Enter: 切り替え` の案内がある
+- [ ] 全体が落ち着いた青灰色の配色で、原色のべた塗りが無い。補足の灰色の文字、枠、キー名のどれも暗い背景から読める。許可リスト (allow) の値は青系で、緑で塗られていない。拒否リスト (deny) の値は赤系
+- [ ] 最下行に `↑↓ 選ぶ  Enter 開く・切替  s 保存  u 元に戻す  r 実行  F1 ヘルプ  Esc 終了` が出る (`s` と `u` は他の札より控えめ)。その上の行は空か、操作の結果のメッセージ
+- [ ] 「画面撮影」で `Enter` → 値が切り替わり、題名が `[未保存 1 件] — s で保存` になる。最下行の先頭が `s 保存  u 元に戻す` に替わり、琥珀色で目立つ。メッセージの行に結果が出ても、最下行の案内は消えない
+- [ ] `Ctrl+Z` → 元に戻る。題名の `[未保存 …]` と `— s で保存` が消え、`s` と `u` が元の控えめな位置と色に戻る
+- [ ] 「アプリ (プロセス)」で `Enter` → 最下行が一覧のキー (`↑↓ 選ぶ  Enter 編集/追加  a 追加  d 削除  u 元に戻す  ← 戻る`) に替わる。`Esc` → 左の一覧に戻るだけで、終了しない。もう一度 `Enter` で右に入り、`a` で候補の一覧を開く → 最下行が候補のキー (`↑↓ 選ぶ  Enter 追加  F5 再読み込み  Esc 取消`) に替わり、`Esc` で取りやめても TUI は終わらない。`←` で左に戻る
+- [ ] `F1` → ヘルプの枠が崩れずに出る。「どこでも」の行に `s・Ctrl+S`、`u・Ctrl+Z`、`?・F1`、`q・Esc` がある。最下行は `何かキー 閉じる` だけ。何かキーで閉じる。`?` でも同じヘルプが出る
+- [ ] 変更が無いまま左の一覧で `Esc` → 確認なしで終了し、端末の表示が元に戻る。もう一度起動し、何かの項目を変えてから `Esc` → 「未保存の変更がある」の確認が出る (最下行は `s 保存して終了  y 破棄して終了  Esc 戻る  Ctrl+C 強制終了`)。確認の中の `Esc` は戻るだけ。`q` でも同じ確認が出る。`y` で破棄して終了する
+- [ ] 端末の幅を 80 桁未満にして 1 ペインにしても、最下行の案内が崩れず、`F1 ヘルプ` と `Esc 終了` が最後まで残る (幅が足りなければ右の札から省かれる)
+
+(b) 「テーマ」の切り替え: 起動し直して (`& $cu --config=$cfg`)、左の一覧の「テーマ」を選ぶ:
+- [ ] `Enter` で `auto → calm → calm-light → ansi → mono → auto` の順に切り替わり (`Space` でも同じ)、確認の画面が出ずに、その場で配色が変わる。値の表示は `calm`、`calm-light`、`ansi`、`mono`、`(auto: calm)`。変更のたびに題名に `[未保存 1 件]` と、項目に `●` が付く (`auto` に戻れば消える)
+- [ ] `calm-light`: 明るい背景用なので、暗い背景では文字が読みにくくなる (正しい)。そのまま `Enter` で次に進む
+- [ ] `ansi`: 端末の 16 色で、枠と強調がシアン系、注意が黄色、成功が緑、危険が赤。背景は塗られない
+- [ ] `mono`: 色が付かない。選んでいる行は反転し、前面のペインの枠が太く、✓ ✗ ⚠ ● ▶ の記号で区別できる
+- [ ] `Ctrl+Z` で 1 つ前のテーマに戻る。配色もすぐ戻る
+- [ ] `calm-light` にして `s` → 確認が出ずに保存される (テーマは許可を広げる変更ではない)。別の端末で `Get-Content $cfg` に `[tui]` と `theme = "calm-light"` がある。続けて `Enter` を 3 回で `auto` に戻して `s` → `Get-Content $cfg` が `theme = "auto"` になり、設定ファイルのほかの行は変わっていない。元のファイルは `.bak` に残る
+- [ ] `& $cu config show --config=$cfg; $LASTEXITCODE` が終了コード `0` で、出力に `tui` も `theme` も出ない (許可の層だけを出す道具。D-129)
+- [ ] `Copy-Item "$dir\example-config.toml" $cfg -Force` で戻して起動し、「画面撮影」だけを変えて `s` → `Get-Content $cfg` に `[tui]` の行が無い (既定の `auto` のときは `[tui]` を書き出さない)。確認が出たら内容を見て保存してよい
+
+(c) 明るい背景: Windows Terminal の別のタブで明るい背景の配色 (設定 > 配色。例 One Half Light) にする。`Copy-Item "$dir\example-config.toml" $cfg -Force` で設定を戻してから、`& $cu --config=$cfg` で起動する:
+- [ ] `auto` は背景の明暗を判定せず、`calm` を選ぶ。明るい背景では文字が読みにくい (正しい。覆る条件は D-129)
+- [ ] 「テーマ」で `Enter` を 2 回 → `calm-light`。補足の灰色の文字、枠、キー名、allow の青、deny の赤が、明るい背景から読める。未保存のときの琥珀 (`s 保存  u 元に戻す`) も読める
+
+(d) VT を使えないコンソール: レガシコンソールを使う設定の conhost (conhost のタイトルバーのメニュー > プロパティ > オプション >「レガシ コンソールを使う」を有効にして、開き直す) で、`cmd.exe` から起動する。この PC でレガシコンソールにできない、または起動した画面で VT が使えてしまうなら、そう記録して飛ばす (VT が無いときのテーマの選び方は `cargo test` が値で確かめているが、実際のコンソールでの色は人の目でしか確かめられない)。`Copy-Item "$dir\example-config.toml" $cfg -Force` で設定を戻してから:
+
+```
+"<repo>\target\release\ai-cu.exe" --config=<repo>\target\manual-check\s32-config.toml
+```
+- [ ] `theme` が `auto` のとき、色は 16 色 (`ansi`) で、黒地に黒のような読めない画面にならない。「テーマ」の値は `(auto: ansi)`。起動時のメッセージの行に警告は出ない (`auto` が選んだので)
+- [ ] 「テーマ」で `Enter` → `calm`: 値が `calm→ansi`、配色は `ansi` のまま。メッセージの行に琥珀色で「VT が使えないので ansi の配色で表示している」が出る。`Enter` で `calm-light` に進めても同じ (値は `calm-light→ansi`)。`ansi` に進めると警告が消え、値は `ansi`
+- [ ] `calm` にして `s` で保存して終了し、同じ conhost で起動し直す → 起動時のメッセージの行に同じ警告が出て、配色は `ansi`。`Get-Content` で設定の値が `calm` のまま (書き換えられていない)
+
+(e) `NO_COLOR`: 手順 (a) と同じ Windows Terminal で、設定を戻してから起動する:
+
+```powershell
+Copy-Item "$dir\example-config.toml" $cfg -Force
+$env:NO_COLOR = "1"; & $cu --config=$cfg; Remove-Item Env:NO_COLOR
+```
+- [ ] `theme` が `auto` のとき、色が付かない (`mono`)。「テーマ」の値は `(auto: mono)`。選んでいる行の反転、枠の太さ、記号で区別できる
+- [ ] 「テーマ」で `Enter` → `calm`: `NO_COLOR` があっても、明示した `calm` の色が付く (明示は `NO_COLOR` より優先)。`Enter` を続けて `auto` に戻すと、また色が消える
+
+後片付け: `$env:NO_COLOR` が残っていないこと (`$env:NO_COLOR` が空)。`target/manual-check/s32-*` は残してよい (git 管理外)。実施の記録には、見た端末 (Windows Terminal か conhost、背景の明暗)、各テーマの見え方で読みにくかった箇所、(d) をレガシコンソールで再現できたかを書く
+
 ## 結果が違ったとき
 
 - 手順 1 で `dev_mode: true`: この端末に `AI_CU_DEV_FORBID_REAL_INPUT` がある。`Remove-Item Env:AI_CU_DEV_FORBID_REAL_INPUT` で外す
@@ -946,7 +1007,7 @@ wait $pa; echo "A exit=$?"
 
 ## AI のセッションから CLI の手順を確かめるとき
 
-TUI の手順 (5 と 13 の本体、14 の TUI の部分) は端末が要るので人が行う。それ以外は、AI のセッションから release の
+TUI の手順 (5 と 13 の本体、14 の TUI の部分、32) は端末が要るので人が行う。それ以外は、AI のセッションから release の
 ai-cu.exe を呼んで確かめられる。開発セッション (このリポジトリ) からは、`/verify` の全手順を通した `target/release/ai-cu.exe` を
 パスで呼ぶときだけ hook が通す (D-051)。それも、人が Claude Code を起動したシェルに `AI_CU_MANUAL_CHECK=1` を付けた
 セッションに限る (PowerShell なら `$env:AI_CU_MANUAL_CHECK = "1"` の後に `claude`)。実機に触れる一連の手順の前に、人の GO を 1 回もらい、その間は人がマウスとキーボードから

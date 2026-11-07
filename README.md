@@ -213,16 +213,22 @@ require_approval = []     # 呼ぶたびにクライアント (Claude Code) に�
 enabled = true            # 画面を変える操作の前に、画面の縁に青い枠と案内の札を出すか (既定 true)
 lead_ms = 3000            # 枠を出してから最初の操作までの予告の間 (ミリ秒。0 なら待たない。上限 30000)
 sound = false             # 予告の間に入るときに通知音を 1 回鳴らすか (既定 false)
+
+# TUI の配色。表示だけの設定で、許可には関わらない。既定 (auto) のときは、TUI は保存でこの節を書き出さない
+# [tui]
+# theme = "auto"          # auto | calm | calm-light | ansi | mono (auto は環境で選ぶ。calm は暗い背景用、calm-light は明るい背景用)
 ```
 
 - 優先順位は、組み込みの拒否 > `deny` > `allow`。組み込みの拒否は設定では緩められない
 - 人間の設定ファイルが基本の層。追加の層 (`AI_CU_CONFIG`、`--config=PATH`) は deny を足せるが、allow を広げられない
 - 未知のキー、未知の版、解析できない値は、既定値に落とさず設定エラー (終了コード 5) にする
 - 全画面の撮影は `capture.full_screen = true` のときだけ通す。撮影の保存先は `.png` に限り、`capture.save_dirs` で絞れる
+- TUI の配色は `[tui] theme` で選ぶ。`auto` (既定) は、環境変数 `NO_COLOR` があれば色なし (`mono`)、VT が使えない端末なら 16 色 (`ansi`)、それ以外は落ち着いた暗い背景用の `calm`。明るい背景なら `calm-light`。TUI の項目「テーマ」(節「表示」) でもその場で切り替えられる。`[tui]` を書いた設定は、この項目を知らない古い ai-cu が読めない
 
 基本の層は `%APPDATA%\ai-cu\config.toml` で、無ければ何も許可しない。
 解決した場所は `ai-cu config path`、各層の中身は `ai-cu config show` で確かめられる。
 引数なしで起動する TUI (端末のときだけ) で、この設定を項目ごとに編集し、保存の前に許可を広げる変更を確かめられる。
+画面の最下行に、いま使えるキーが常に出る (保存は `s`、元に戻すは `u`、ヘルプは `F1`、終了は `Esc` か `q`。未保存の変更があるときは、`s` と `u` を先頭に出す)。
 
 判定の規則の全部、場所と層、TUI のキー操作は [docs/reference/config.md](docs/reference/config.md)。
 
