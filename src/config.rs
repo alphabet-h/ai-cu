@@ -40,6 +40,9 @@ pub struct Config {
     pub mcp: Mcp,
     #[serde(default)]
     pub indicator: IndicatorConfig,
+    /// TUI の見た目 (D-129)。判定には関わらないので `Layer` には持たない
+    #[serde(default)]
+    pub tui: Tui,
 }
 
 impl Default for Config {
@@ -54,8 +57,65 @@ impl Default for Config {
             capture: Capture::default(),
             mcp: Mcp::default(),
             indicator: IndicatorConfig::default(),
+            tui: Tui::default(),
         }
     }
+}
+
+/// TUI の配色の選び方 (D-129)。`Auto` は端末と環境から決める (`NO_COLOR`、VT の可否)。
+/// 並びは TUI の中で巡回する順 (`ALL`、`next`)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ThemeName {
+    #[default]
+    Auto,
+    Calm,
+    CalmLight,
+    Ansi,
+    Mono,
+}
+
+impl ThemeName {
+    /// 巡回の順 (auto → calm → calm-light → ansi → mono)
+    pub const ALL: [ThemeName; 5] = [
+        ThemeName::Auto,
+        ThemeName::Calm,
+        ThemeName::CalmLight,
+        ThemeName::Ansi,
+        ThemeName::Mono,
+    ];
+
+    /// 設定に書く名前 (serde の名前と同じ)
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ThemeName::Auto => "auto",
+            ThemeName::Calm => "calm",
+            ThemeName::CalmLight => "calm-light",
+            ThemeName::Ansi => "ansi",
+            ThemeName::Mono => "mono",
+        }
+    }
+
+    /// 巡回で次のテーマ。最後の次は最初に戻る
+    pub fn next(self) -> ThemeName {
+        match self {
+            ThemeName::Auto => ThemeName::Calm,
+            ThemeName::Calm => ThemeName::CalmLight,
+            ThemeName::CalmLight => ThemeName::Ansi,
+            ThemeName::Ansi => ThemeName::Mono,
+            ThemeName::Mono => ThemeName::Auto,
+        }
+    }
+}
+
+/// TUI の見た目の設定 (D-129)。許可と拒否の判定 (D-018) には関わらない。
+/// 既定 (`auto`) のときは保存で `[tui]` を書き出さない (古い ai-cu が読めなくなるのを避ける)。
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Tui {
+    /// 配色。既定 `auto`
+    #[serde(default)]
+    pub theme: ThemeName,
 }
 
 /// `indicator.lead_ms` の上限 (ミリ秒)。超えたら設定のエラー (D-093。誤記で毎回長く止まるのを防ぐ)
@@ -769,6 +829,9 @@ enabled = true
 lead_ms = 3000
 # 予告の間に入るときに通知音を鳴らすか (既定 false)
 sound = false
+
+# [tui]
+# theme = "auto"   # auto | calm | calm-light | ansi | mono (TUI の配色。D-129)
 "#;
 
 /// 値が意味として同じか (書式やコメントは見ない)。
@@ -881,6 +944,11 @@ pub fn render_edit(existing: Option<&str>, cfg: &Config) -> Result<String, Strin
         set_preserving(t, "enabled", cfg.indicator.enabled.into());
         set_preserving(t, "lead_ms", to_i64(cfg.indicator.lead_ms)?.into());
         set_preserving(t, "sound", cfg.indicator.sound.into());
+    }
+    // `[tui]` は既定 (auto) なら書き出さない (D-129)。ファイルにすでにあれば、auto に戻しても値を更新する
+    if cfg.tui.theme != ThemeName::Auto || doc.as_table().get("tui").is_some() {
+        let t = table_mut(&mut doc, "tui");
+        set_preserving(t, "theme", cfg.tui.theme.as_str().into());
     }
     let out = doc.to_string();
     // 書いたものが読み戻せることを確かめる (壊れた設定を保存しない)
@@ -1187,6 +1255,114 @@ mod tests {
         // 既定に戻して保存し直しても読み戻せる
         let back = render_edit(Some(&text), &Config::default()).unwrap();
         assert_eq!(Config::parse(&back).unwrap(), Config::default());
+    }
+
+    /// 書き出した文字列に、表の見出し `[tui]` の行があるか (コメントの `# [tui]` は数えない)
+    fn has_tui_table(text: &str) -> bool {
+        text.lines().any(|l| l.trim() == "[tui]")
+    }
+
+    /// `[tui]` を書かなければ theme は auto。書けば読める。表だけで中身が無くても auto (D-129)
+    #[test]
+    fn tui_theme_defaults_to_auto_and_parses() {
+        let c = Config::parse("version = 1\n").unwrap();
+        assert_eq!(c.tui.theme, ThemeName::Auto);
+        assert_eq!(c.tui, Tui::default());
+        let c = Config::parse("version = 1\n[tui]\n").unwrap();
+        assert_eq!(c.tui.theme, ThemeName::Auto);
+        let c = Config::parse("version = 1\n[tui]\ntheme = \"calm-light\"\n").unwrap();
+        assert_eq!(c.tui.theme, ThemeName::CalmLight);
+        // 名前はどれも `as_str` の字面で読める
+        for t in ThemeName::ALL {
+            let text = format!("version = 1\n[tui]\ntheme = \"{}\"\n", t.as_str());
+            assert_eq!(Config::parse(&text).unwrap().tui.theme, t, "{text}");
+        }
+    }
+
+    /// 未知のテーマ名、大文字、型の違う値、未知のキーは読み込みのエラー (D-129)
+    #[test]
+    fn tui_rejects_unknown_theme_and_keys() {
+        for body in [
+            "[tui]\ntheme = \"neon\"\n",
+            "[tui]\ntheme = \"Calm\"\n",
+            "[tui]\ntheme = \"calm_light\"\n",
+            "[tui]\ntheme = 1\n",
+            "[tui]\ncolor = \"x\"\n",
+            "[tui]\nTheme = \"calm\"\n",
+        ] {
+            assert!(
+                Config::parse(&format!("version = 1\n{body}")).is_err(),
+                "{body:?}"
+            );
+        }
+    }
+
+    /// 既定 (auto) のときは `[tui]` を書き出さない。古い ai-cu が `deny_unknown_fields` で読めなくなるのを、
+    /// 既定のままの利用者に波及させない (D-129)。雛形の注釈 (`# [tui]`) は表ではない
+    #[test]
+    fn render_edit_omits_tui_when_auto() {
+        let text = render_edit(None, &Config::default()).unwrap();
+        assert!(!has_tui_table(&text), "{text}");
+        assert!(text.contains("# [tui]"), "雛形の注釈が無い: {text}");
+        let text = render_edit(Some("version = 1\n"), &Config::default()).unwrap();
+        assert!(!has_tui_table(&text), "{text}");
+        // calm にすると表と値が足される。既存の文字列に表が無くても、雛形からでも
+        let calm = Config {
+            tui: Tui {
+                theme: ThemeName::Calm,
+            },
+            ..Config::default()
+        };
+        for base in [Some("version = 1\n"), None] {
+            let text = render_edit(base, &calm).unwrap();
+            assert!(has_tui_table(&text), "{text}");
+            assert!(text.contains("theme = \"calm\""), "{text}");
+            assert_eq!(Config::parse(&text).unwrap(), calm);
+        }
+    }
+
+    /// calm で書いた文字列を元に auto へ戻して保存し直しても、読み戻すと auto。
+    /// 既存の `[tui]` に手書きのコメントがあれば残る
+    #[test]
+    fn tui_theme_round_trips_back_to_auto() {
+        let calm = Config {
+            tui: Tui {
+                theme: ThemeName::Calm,
+            },
+            ..Config::default()
+        };
+        let text = render_edit(
+            Some("version = 1\n[tui]\n# 手書き\ntheme = \"calm\"\n"),
+            &calm,
+        )
+        .unwrap();
+        assert!(text.contains("# 手書き"), "{text}");
+        let back = render_edit(Some(&text), &Config::default()).unwrap();
+        assert_eq!(Config::parse(&back).unwrap().tui.theme, ThemeName::Auto);
+        assert!(back.contains("# 手書き"), "{back}");
+        // 雛形から calm にして auto に戻しても同じ
+        let text = render_edit(None, &calm).unwrap();
+        let back = render_edit(Some(&text), &Config::default()).unwrap();
+        assert_eq!(Config::parse(&back).unwrap(), Config::default());
+    }
+
+    /// テーマ名の並びは auto → calm → calm-light → ansi → mono → auto (TUI の巡回の順。D-129)
+    #[test]
+    fn theme_name_cycles_through_all() {
+        assert_eq!(ThemeName::ALL.len(), 5);
+        assert_eq!(ThemeName::default(), ThemeName::Auto);
+        assert_eq!(ThemeName::Auto.next(), ThemeName::Calm);
+        assert_eq!(ThemeName::Mono.next(), ThemeName::Auto);
+        // `next` は `ALL` の並びをたどって一周する
+        let mut t = ThemeName::Auto;
+        for want in ThemeName::ALL.iter().skip(1).chain([&ThemeName::Auto]) {
+            t = t.next();
+            assert_eq!(t, *want);
+        }
+        assert_eq!(
+            ThemeName::ALL.map(ThemeName::as_str),
+            ["auto", "calm", "calm-light", "ansi", "mono"]
+        );
     }
 
     #[test]
