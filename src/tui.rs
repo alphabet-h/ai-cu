@@ -28,6 +28,9 @@ use crate::run::RunReport;
 use crate::runner::{FirstBatch, PreflightReport, ScriptRunner};
 use crate::script::{Action, ActionKind};
 
+pub mod theme;
+pub use theme::{Theme, ThemeEnv};
+
 /// 1 ペインに切り替える幅
 pub const NARROW_WIDTH: u16 = 80;
 const UNDO_LIMIT: usize = 100;
