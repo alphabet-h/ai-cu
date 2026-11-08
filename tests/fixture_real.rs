@@ -606,6 +606,35 @@ fn fixture_real_key_combos_reach_foreground_fixture() {
     println!("FIXTURE key ctrl+a f5 left shift+tab vk={vks:02x?}");
 }
 
+/// IME のキー (D-131): 名前が vk に写り、`WM_KEYDOWN` としてフィクスチャに届く。フィクスチャは IME を外してあるので、
+/// IME の反応そのものはここでは見ない (手動確認の手順 33)
+#[test]
+#[ignore = "実機のフィクスチャ限定。cargo test -- --ignored --test-threads=1"]
+fn fixture_real_ime_keys_reach_foreground_fixture() {
+    let f = Fixture::open("ime-keys");
+    f.activate();
+    f.execute(r#"{"type":"key","keys":"kanji"},{"type":"key","keys":"convert"},{"type":"key","keys":"nonconvert"},{"type":"key","keys":"imeon"},{"type":"key","keys":"imeoff"}"#)
+        .expect("IME のキーの操作列");
+    let ev = f.events_until(|e| {
+        e.iter()
+            .filter(|x| matches!(x, FixtureEvent::KeyDown { .. }))
+            .count()
+            >= 5
+    });
+    let vks: Vec<u16> = ev
+        .iter()
+        .filter_map(|e| {
+            if let FixtureEvent::KeyDown { vk } = e {
+                Some(*vk)
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert_eq!(vks, vec![0x19, 0x1C, 0x1D, 0x16, 0x1A], "{ev:?}");
+    println!("FIXTURE ime_keys vk={vks:02x?}");
+}
+
 /// focus (D-050): 前面のプロセス (このテスト) が持つ、前面でないフィクスチャ B を `focus` で前面にしてからキーを送る。
 /// A を前面にしてプロセスを前面プロセスにしておくので、B への `SetForegroundWindow` は OS の条件を満たす。
 /// 実装置の `find_window` (フィクスチャ限定) と `set_foreground` の配線を通す。入力は B のクライアント領域だけ
