@@ -1994,6 +1994,7 @@ mod tests {
     fn guide_says_type_bypasses_ime() {
         assert!(GUIDE.contains("IME を通らない"), "{GUIDE}");
         assert!(GUIDE.contains("kanji"), "{GUIDE}");
+        assert!(GUIDE.contains("送った文字は未確定に入る"), "{GUIDE}");
     }
 
     /// 手引きの前書きは、INSTRUCTIONS の困ったことの送り先の段落を一字一句そのまま含み、要点版にも入る (D-098)

@@ -24,7 +24,7 @@ README の「操作列 JSON」の詳細。[README に戻る](../../README.md#操
 | `wait_change` | `region` または `window` (`wait_stable` と同じ)、`threshold` (既定 0.001。0 以上 1 未満)、`timeout_ms` (既定 10000、1 以上 600000 以下) | 画面が変わるまで待つ (何も送らない)。待ち始めの最初のフレームを基準にし、以後のフレームと基準との差が `threshold` を超えたら満たす (直前のフレームとは比べないので、少しずつ変わる画面でも積もれば満たす)。撮り方、間隔、判定、止まり方は `wait_stable` と同じ。`timeout_ms` のうちに満たされなければ 15 (`unmet: change`)。満たされると `waited` に `rect` と、そのときの基準との差の `changed_ratio` (小数第 4 位まで) が入る。待ち始めに既に変わっていた画面は基準になるので満たされない。狭い `region` では、キャレットの点滅 1 回でも 0.001 を超えうる (`threshold` を上げるか、広く撮る。D-081) |
 
 キーの名前: `a`-`z`、`0`-`9`、`f1`-`f24`、`enter`、`esc`、`tab`、`space`、`backspace`、`delete`、`insert`、`home`、`end`、`pageup`、`pagedown`、`up`、`down`、`left`、`right`、`pause`、`capslock`、`printscreen`、`kanji` (半角/全角)、`convert` (変換)、`nonconvert` (無変換)、`imeon`、`imeoff`。
-IME のキーの別名: `hankaku` と `zenkaku` は `kanji`、`henkan` は `convert`、`muhenkan` は `nonconvert`。IME のキーの反応は IME とアプリに依る (送った後に撮って確かめる。D-131)。
+IME のキーの別名: `hankaku` と `zenkaku` は `kanji`、`henkan` は `convert`、`muhenkan` は `nonconvert`。IME のキーの反応は IME とアプリに依る (送った後に撮って確かめる。D-131)。IME がオンのとき、`key` で 1 字ずつ送った文字は未確定に入る (`type` の文字は入らない)。
 修飾キー: `ctrl` (`control`)、`alt`、`shift`、`win` (`super`)。大文字小文字と修飾キーの順序は問わない。
 未知のキーの失敗では、`issues[].message` に使える名前が出る (`error.message` は「N 件の問題」のまま。D-131)。
 
