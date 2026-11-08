@@ -64,7 +64,12 @@ const NAMED_KEYS: &[(&str, u16, bool)] = &[
     ("enter", 0x0D, false),
     ("pause", 0x13, false),
     ("capslock", 0x14, false),
+    ("imeon", 0x16, false),
+    ("kanji", 0x19, false),
+    ("imeoff", 0x1A, false),
     ("esc", 0x1B, false),
+    ("convert", 0x1C, false),
+    ("nonconvert", 0x1D, false),
     ("space", 0x20, false),
     ("pageup", 0x21, true),
     ("pagedown", 0x22, true),
@@ -91,7 +96,23 @@ const KEY_ALIASES: &[(&str, &str)] = &[
     ("arrowright", "right"),
     ("arrowup", "up"),
     ("arrowdown", "down"),
+    ("hankaku", "kanji"),
+    ("zenkaku", "kanji"),
+    ("henkan", "convert"),
+    ("muhenkan", "nonconvert"),
 ];
+
+/// 使えるキーの名前の一覧 (正規名だけ。a-z、0-9、f1-f24 は範囲でまとめる)。失敗の文に出す (D-131)。
+pub fn usable_key_names() -> String {
+    let mut names = vec!["a-z", "0-9", "f1-f24"];
+    names.extend(NAMED_KEYS.iter().map(|(n, _, _)| *n));
+    names.join(", ")
+}
+
+/// 使える修飾キーの一覧 (正規名だけ)。失敗の文に出す (D-131)。
+pub fn usable_modifier_names() -> String {
+    Modifier::ALL.map(Modifier::name).join(", ")
+}
 
 impl Key {
     pub fn parse(s: &str) -> Option<Key> {
@@ -189,7 +210,12 @@ impl FromStr for KeyCombo {
         let (last, mods) = parts.split_last().expect("非空");
         let mut modifiers = Vec::new();
         for m in mods {
-            let m = Modifier::parse(m).ok_or_else(|| format!("未知の修飾キー {m:?} (in {s:?})"))?;
+            let m = Modifier::parse(m).ok_or_else(|| {
+                format!(
+                    "未知の修飾キー {m:?} (in {s:?})。使える修飾キー: {}",
+                    usable_modifier_names()
+                )
+            })?;
             if modifiers.contains(&m) {
                 return Err(format!("修飾キーが重複: {s:?}"));
             }
@@ -198,7 +224,12 @@ impl FromStr for KeyCombo {
         if Modifier::parse(last).is_some() {
             return Err(format!("修飾キー以外のキーが必要: {s:?}"));
         }
-        let key = Key::parse(last).ok_or_else(|| format!("未知のキー {last:?} (in {s:?})"))?;
+        let key = Key::parse(last).ok_or_else(|| {
+            format!(
+                "未知のキー {last:?} (in {s:?})。使える名前: {}",
+                usable_key_names()
+            )
+        })?;
         modifiers.sort();
         Ok(KeyCombo { modifiers, key })
     }
@@ -276,5 +307,66 @@ mod tests {
         for ok in ["ctrl+s", "alt+tab", "shift+f4", "esc", "ctrl+shift+t"] {
             assert!(combo(ok).builtin_denied().is_none(), "{ok}");
         }
+    }
+
+    /// IME のキーの仮想キーコード。どれも拡張キーではない (D-131)
+    #[test]
+    fn keys_ime_names_map_to_virtual_keys() {
+        for (name, vk) in [
+            ("kanji", 0x19),
+            ("convert", 0x1C),
+            ("nonconvert", 0x1D),
+            ("imeon", 0x16),
+            ("imeoff", 0x1A),
+        ] {
+            let k = combo(name).key;
+            assert_eq!(k.vk, vk, "{name}");
+            assert!(!k.is_extended(), "{name}");
+        }
+    }
+
+    /// IME のキーの別名は大文字まじりでも修飾キーつきでも正規名に戻る (D-131)
+    #[test]
+    fn keys_ime_aliases_normalize_to_canonical() {
+        assert_eq!(combo("hankaku").to_string(), "kanji");
+        assert_eq!(combo("zenkaku").to_string(), "kanji");
+        assert_eq!(combo("Henkan").to_string(), "convert");
+        assert_eq!(combo("MUHENKAN").to_string(), "nonconvert");
+        assert_eq!(combo("KANJI").to_string(), "kanji");
+        assert_eq!(combo("Shift+Hankaku").to_string(), "shift+kanji");
+    }
+
+    /// 表の行は正規名と `Key::name` で往復する (同じ vk の行が 2 つあると崩れる)
+    #[test]
+    fn keys_named_table_round_trips() {
+        for (name, _, _) in NAMED_KEYS {
+            assert_eq!(Key::parse(name).unwrap().name(), *name);
+        }
+    }
+
+    /// 未知のキーの失敗の文に、表のすべての正規名と範囲が要素として出る (D-131)。
+    /// 部分文字列では `convert` が `nonconvert` に隠れるので、要素で比べる
+    #[test]
+    fn keys_unknown_key_error_lists_usable_names() {
+        let e = "ctrl+foo".parse::<KeyCombo>().unwrap_err();
+        assert!(e.contains("未知のキー \"foo\""), "{e}");
+        let (_, list) = e.split_once("使える名前: ").expect("一覧の見出し");
+        let items: Vec<&str> = list.split(", ").collect();
+        for want in ["a-z", "0-9", "f1-f24"] {
+            assert!(items.contains(&want), "{want}: {e}");
+        }
+        for (name, _, _) in NAMED_KEYS {
+            assert!(items.contains(name), "{name}: {e}");
+        }
+    }
+
+    /// 未知の修飾キーの失敗の文に、使える修飾キーが正規の順で出る (D-131)
+    #[test]
+    fn keys_unknown_modifier_error_lists_modifiers() {
+        let e = "hyper+a".parse::<KeyCombo>().unwrap_err();
+        assert!(e.contains("未知の修飾キー \"hyper\""), "{e}");
+        let (_, list) = e.split_once("使える修飾キー: ").expect("一覧の見出し");
+        let items: Vec<&str> = list.split(", ").collect();
+        assert_eq!(items, ["ctrl", "alt", "shift", "win"]);
     }
 }

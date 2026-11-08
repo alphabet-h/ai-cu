@@ -1064,6 +1064,14 @@ mod tests {
         }
     }
 
+    /// 別名で書いた deny.keys が正規名の操作に効く (D-131)
+    #[test]
+    fn deny_keys_alias_matches_canonical_key() {
+        let p = policy(&[&format!("{ENABLED}[deny]\nkeys=[\"hankaku\"]\n")]);
+        let d = p.check_key(&key("kanji")).unwrap_err();
+        assert_eq!(d.rule, Some("deny.keys"), "{}", d.message);
+    }
+
     #[test]
     fn policy_overlay_can_add_deny_but_not_widen_allow() {
         // 床は notepad だけ許可。追加の層が calc を allow しても、床で拒否される

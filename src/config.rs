@@ -1516,6 +1516,14 @@ mod tests {
         }
     }
 
+    /// 未知のキーを書いた設定の失敗の文に、どの一覧かと使える名前が出る (D-131)
+    #[test]
+    fn config_unknown_key_error_names_side_and_usable_keys() {
+        let e = Config::parse("version = 1\n[deny]\nkeys = [\"nope\"]\n").unwrap_err();
+        assert!(e.contains("deny.keys"), "{e}");
+        assert!(e.contains("kanji"), "{e}");
+    }
+
     #[test]
     fn config_normalizes_names() {
         assert_eq!(normalize_process("C:\\Windows\\Notepad.EXE"), "notepad");
