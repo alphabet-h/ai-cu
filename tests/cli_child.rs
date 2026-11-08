@@ -245,6 +245,24 @@ fn step_child_click_with_shot_dry_run_outputs_plan() {
     }
 }
 
+/// 未知のキーの失敗の `issues[0].message` に使える名前が出る (D-131)
+#[test]
+fn key_dry_run_unknown_name_lists_usable_names() {
+    let dir = temp_dir("key-unknown");
+    let floor = dir.join("floor.toml");
+    std::fs::write(&floor, "version = 1\n[general]\ninput_enabled = true\n").unwrap();
+    let floor_s = floor.display().to_string();
+    let (code, stdout, stderr) = run(
+        &["key", "nope", "--dry-run"],
+        &[("AI_CU_DEV_FLOOR", &floor_s)],
+        b"",
+    );
+    assert_eq!(code, 3, "stdout={stdout} stderr={stderr}");
+    let v: serde_json::Value = serde_json::from_str(&stdout).expect("JSON");
+    let message = v["issues"][0]["message"].as_str().unwrap_or_default();
+    assert!(message.contains("kanji"), "{v}");
+}
+
 /// close の対象を --window で渡した usage の誤りに、対象は位置引数だと伝える hint が
 /// JSON と標準エラーの両方に載る。--window が無い誤りには載せない (D-086)
 #[test]

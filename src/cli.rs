@@ -21,6 +21,7 @@ use crate::estop::StopSource;
 use crate::geometry::{Point, Rect};
 use crate::hint::{Hint, Surface, hint};
 use crate::image::{downscale, effective_scale};
+use crate::keys::{usable_key_names, usable_modifier_names};
 use crate::plan::Step;
 use crate::policy::Policy;
 use crate::run::{
@@ -1885,8 +1886,8 @@ pub fn schema() -> Value {
             "drag": { "from": point, "to": point, "button": "既定 left", "steps": "補間の回数 1..=1000 (既定 20)", "duration_ms": "全体の時間 (既定 300、最大 60000)" },
             "move": { "x": "整数", "y": "整数" },
             "scroll": { "clicks": "0 以外で絶対値 100 以下の整数。正で上 / 右 (1 = 1 ノッチ。1 ノッチずつ 20 ミリ秒空けて送る)", "horizontal": "真偽 (既定 false)", "x": "省略可 (y と組で、先にそこへ移動)", "y": "省略可" },
-            "type": { "text": "文字列 (改行は Enter、タブは Tab、その他は KEYEVENTF_UNICODE)", "interval_ms": "文字と文字の間の待ち (既定 20、最大 1000。1 文字ずつ送る。0 は受け手が文字を落としうる)" },
-            "key": { "keys": "組み合わせ。例 ctrl+s, alt+tab, f5 (Win+、Alt+F4、Ctrl+Alt+、Ctrl+Shift+Esc、Ctrl+Esc は組み込みで拒否)" },
+            "type": { "text": "文字列 (改行は Enter、タブは Tab、その他は KEYEVENTF_UNICODE)。文字は IME を通らない (変換に入らない。改行とタブはキーとして送る)", "interval_ms": "文字と文字の間の待ち (既定 20、最大 1000。1 文字ずつ送る。0 は受け手が文字を落としうる)" },
+            "key": { "keys": "組み合わせ。例 ctrl+s, alt+tab, f5、kanji (半角/全角) (Win+、Alt+F4、Ctrl+Alt+、Ctrl+Shift+Esc、Ctrl+Esc は組み込みで拒否)" },
             "wait": { "ms": "待つミリ秒 (最大 600000)" },
             "screenshot": { "path": "保存先の png (.png に限る。PNG でない既存ファイルは上書きしない)", "region": { "x": "整数", "y": "整数", "w": "幅", "h": "高さ", "省略": "window も無ければ仮想デスクトップ全体 (既定の設定では拒否。capture.full_screen)" }, "window": { "process": "撮る対象のウィンドウの実行ファイル名 (focus と同じ探し方。region と排他)", "title": "省略可。題名に含む文字列", "備考": "矩形は撮る直前に解く。見つからない / 最小化 / 画面の外は終了コード 12 (何もしない)。結果の screenshots[].window に撮ったウィンドウが入る" }, "scale": "保存する画像の縮尺 (0 より大きく 1 以下。既定 1)。画像の点 (px, py) は画面の (x + px / scale, y + py / scale)", "max_edge": "長辺の上限 (1 以上、ピクセル。省略で上限なし。MCP は既定 1568)。縮尺は scale と max_edge / 長辺 の小さい方で、出力の scale に実際の値が入る", "settle": { "stable_ms": format!("省略可。静けさが続く長さ (既定 {DEFAULT_STABLE_MS}、{MIN_STABLE_MS} 以上 {MAX_STABLE_MS} 以下)"), "threshold": "省略可。直前のフレームとの差 (変わった点の割合) の許容 (0 以上 1 未満。既定 0)", "timeout_ms": format!("省略可。待つ上限 (既定 {DEFAULT_SETTLE_TIMEOUT_MS}、stable_ms 以上 {MAX_SINGLE_WAIT_MS} 以下)。超えたら落ち着くのを待たずに撮る (失敗にしない)"), "備考": "省略可 ({} でも既定値で付く)。撮る前に wait_stable と同じ判定で画面が落ち着くのを待ち、最後に撮った画像を保存する (撮り直さない)。結果の screenshots[] に settled (落ち着いたか) と settle_ms (待った時間) が入る。一手ずつの --settle-ms auto はこれを既定値で付ける" } },
             "focus": { "process": "実行ファイル名 (例 notepad.exe。大文字小文字と .exe の有無は問わない)", "title": "省略可。題名に含む文字列 (大文字小文字を無視)。前面から見て最初に一致したウィンドウ (許可されていなければ 7) を SetForegroundWindow で前面にする。既に前面なら何もしない。最小化は復元しない。人が操作中 (capture.min_idle_ms) なら 10。できなければ終了コード 11 (何も送らない)。成功の出力の focused に、前面にしたウィンドウが入る" },
@@ -1895,7 +1896,7 @@ pub fn schema() -> Value {
             "wait_stable": { "region": "省略可。撮る矩形 (screenshot と同じ。window と排他。両方省略は全画面で、既定の設定では拒否)", "window": { "process": "省略可。撮る対象のウィンドウ (screenshot と同じ探し方。撮るたびに矩形を解く)", "title": "省略可" }, "stable_ms": "静けさが続く長さ (既定 300、100 以上 60000 以下)", "threshold": "直前のフレームとの差 (変わった点の割合) の許容 (0 以上 1 未満。既定 0)", "timeout_ms": "上限 (既定 10000、stable_ms 以上 600000 以下)。超えたら終了コード 15 (unmet: stable。何も送らない)", "備考": "100 ms ごとに撮り、長辺 256 に縮めて比べる。窓が動けば変わったと数える。撮るたびに screenshot と同じ判定 (撮影の許可、deny の窓、ロック) を通す。満たされると結果の waited[] に rect が入る" },
             "wait_change": { "region": "省略可 (wait_stable と同じ)", "window": "省略可 (wait_stable と同じ)", "threshold": "待ち始めの画像 (基準) との差がこれを超えたら変わった (0 以上 1 未満。既定 0.001)", "timeout_ms": "上限 (既定 10000、1 以上 600000 以下)。超えたら終了コード 15 (unmet: change。何も送らない)", "備考": "100 ms ごとに撮り、基準と比べる (直前ではない)。狭い region ではキャレットの点滅でも満たしうる。満たされると結果の waited[] に rect と changed_ratio が入る" }
         },
-        "key_names": "a-z, 0-9, f1-f24, enter, esc, tab, space, backspace, delete, insert, home, end, pageup, pagedown, up, down, left, right, pause, capslock, printscreen。修飾: ctrl, alt, shift, win",
+        "key_names": format!("{}。修飾: {}", usable_key_names(), usable_modifier_names()),
         "exit_codes": crate::error::ErrorKind::ALL.iter().map(|k| json!({ "code": k.exit_code(), "name": k.code() })).collect::<Vec<_>>(),
         "example": {
             "version": 1,
@@ -4319,6 +4320,20 @@ mod tests {
         assert!(title.contains("hidden"), "{title}");
         assert!(title.contains("破棄とは限らない"), "{title}");
         assert!(title.contains("終わったとは限らない"), "{title}");
+    }
+
+    /// `schema()` の `key_names` はキーの表から組み立てる。`key` は IME のキーを、`type` は IME を通らないことを書く (D-131)
+    #[test]
+    fn schema_key_names_come_from_key_table() {
+        let s = schema();
+        assert_eq!(
+            s["key_names"].as_str().unwrap(),
+            format!("{}。修飾: {}", usable_key_names(), usable_modifier_names())
+        );
+        let keys = s["actions"]["key"]["keys"].as_str().unwrap();
+        assert!(keys.contains("kanji"), "{keys}");
+        let text = s["actions"]["type"]["text"].as_str().unwrap();
+        assert!(text.contains("IME を通らない"), "{text}");
     }
 
     /// 一手ずつの操作も `run` と同じ経路: dry-run は装置に触れず、拒否は 4、形の誤りは 3
