@@ -81,10 +81,13 @@ pub enum Hint {
     /// 1 つの操作のキーの束の途中で、前面が別のプロセスに変わった (7。`reason: target_changed`。D-100)。
     /// 途中まで送ってあるので「何も送っていない」とは言わない
     TargetChanged,
+    /// ドラッグの途中 (実行器が押したままのボタンを持つ) のマウスの束がガードに断られた (7。D-132)。
+    /// 途中まで送ってあり、窓を動かす drag は窓がカーソルの後から動くので、組み直し方を hint が持つ
+    DragGuardMidway,
 }
 
 impl Hint {
-    pub const ALL: [Hint; 28] = [
+    pub const ALL: [Hint; 29] = [
         Hint::MouseGuard,
         Hint::KeyboardGuard,
         Hint::Elevated,
@@ -113,8 +116,14 @@ impl Hint {
         Hint::ForegroundChanged,
         Hint::LeadUserActive,
         Hint::TargetChanged,
+        Hint::DragGuardMidway,
     ];
 }
+
+/// ドラッグの途中でガードに断られた (CLI。D-132)。D-065 の前置き (「操作ごと打ち直さない」) の後に読まれる
+pub const DRAG_GUARD_MIDWAY_HINT: &str = "途中まで送った。ドラッグの途中の点の下に許可された窓が無かったので、残りの点を送らず、押したボタンを離して止めた (断った点は error.detail.point)。窓を動かす drag (タイトルバーを掴むなど) なら、窓が途中まで動いていることがあるので `ai-cu windows` で rect を読み直す。窓はカーソルの後から動くので、1 歩を、掴んだ点から進む向きの窓の端までの距離の半分以下にする (`--steps` を増やし、`--duration-ms` も 1 歩 50 ms ほどに。操作列なら `steps` と `duration_ms`)。同じ始点と終点で送り直さず、読み直した rect から新しい始点で作る。窓の外へ運ぶ drag なら、途中の点と終点の下が許可された窓になる経路にするか、人間に頼む (設定は書き換えない)。組み直しは各点が同じガードを通すもので、ガードの回避ではない。組み直しは 1 回だけで、また断られたら繰り返さず人間に頼む";
+/// ドラッグの途中でガードに断られた (MCP。D-132)
+const MCP_DRAG_GUARD_MIDWAY_HINT: &str = "途中まで送った。ドラッグの途中の点の下に許可された窓が無かったので、残りの点を送らず、押したボタンを離して止めた (断った点は error.detail.point)。窓を動かす drag (タイトルバーを掴むなど) なら、窓が途中まで動いていることがあるので windows の道具で rect を読み直す。窓はカーソルの後から動くので、1 歩を、掴んだ点から進む向きの窓の端までの距離の半分以下にする (steps を増やし、duration_ms も 1 歩 50 ms ほどに)。同じ始点と終点で送り直さず、読み直した rect から新しい始点で作る。窓の外へ運ぶ drag なら、途中の点と終点の下が許可された窓になる経路にするか、人間に頼む (設定は書き換えない)。組み直しは各点が同じガードを通すもので、ガードの回避ではない。組み直しは 1 回だけで、また断られたら繰り返さず人間に頼む";
 
 /// 操作の途中で前面が別のプロセスに変わった (CLI。D-100)
 pub const TARGET_CHANGED_HINT: &str = "途中まで送った。文字を打っている間に前面が別のアプリの窓に変わったので、残りを送らずに止めた (変わった後の窓は error.detail.window、最初の窓の pid は error.detail.pinned_pid)。どこまで入ったかを画面で確かめ、`ai-cu focus` で対象を前面にしてから残りだけを送る。全文を送り直すと二重に入る";
@@ -230,6 +239,8 @@ pub fn hint(kind: Hint, surface: Surface) -> &'static str {
         Hint::LeadUserActive => LEAD_USER_ACTIVE_HINT,
         Hint::TargetChanged if mcp => MCP_TARGET_CHANGED_HINT,
         Hint::TargetChanged => TARGET_CHANGED_HINT,
+        Hint::DragGuardMidway if mcp => MCP_DRAG_GUARD_MIDWAY_HINT,
+        Hint::DragGuardMidway => DRAG_GUARD_MIDWAY_HINT,
     }
 }
 
@@ -516,6 +527,7 @@ mod tests {
                 Hint::ForegroundChanged => 25,
                 Hint::LeadUserActive => 26,
                 Hint::TargetChanged => 27,
+                Hint::DragGuardMidway => 28,
             }
         }
         let mut seen: Vec<usize> = Hint::ALL.iter().map(|h| index(*h)).collect();
@@ -556,6 +568,7 @@ mod tests {
             Hint::ForegroundChanged,
             Hint::LeadUserActive,
             Hint::TargetChanged,
+            Hint::DragGuardMidway,
         ] {
             assert_ne!(hint(h, Surface::Cli), hint(h, Surface::Mcp), "{h:?}");
         }
@@ -671,6 +684,39 @@ mod tests {
                 assert!(h.contains(word), "{word}: {h}");
             }
         }
+    }
+
+    /// ドラッグの途中で断られた (D-132): 途中まで送ったと言い、断った点、離したこと、rect の読み直し、歩幅の目安、
+    /// 新しい始点で作ること、窓の外へ運ぶときの手、組み直しの上限を書く。歩幅の引数は呼ばれ方で書き分ける
+    #[test]
+    fn drag_guard_midway_hint_has_required_parts() {
+        for s in SURFACES {
+            let h = hint(Hint::DragGuardMidway, s);
+            assert!(h.starts_with("途中まで送った"), "{h}");
+            assert!(!h.contains("何も送っていない"), "{h}");
+            for word in [
+                "error.detail.point",
+                "windows",
+                "rect",
+                "離し",
+                "半分",
+                "50 ms",
+                "送り直さず",
+                "新しい始点",
+                "1 回だけ",
+                "人間",
+                "書き換えない",
+                "ガードの回避ではない",
+            ] {
+                assert!(h.contains(word), "{word}: {h}");
+            }
+        }
+        let cli = hint(Hint::DragGuardMidway, Surface::Cli);
+        assert!(cli.contains("--steps"), "{cli}");
+        assert!(cli.contains("--duration-ms"), "{cli}");
+        let mcp = hint(Hint::DragGuardMidway, Surface::Mcp);
+        assert!(mcp.contains("steps"), "{mcp}");
+        assert!(mcp.contains("duration_ms"), "{mcp}");
     }
 
     /// 14 の既定の文 (D-066): CLI と MCP で同じ文で、コマンド名を含まず、何も送っていないと言い切らない

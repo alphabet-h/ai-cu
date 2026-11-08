@@ -606,6 +606,16 @@ fn target_changed(now: &WindowInfo, pinned_pid: u32, surface: Surface) -> AppErr
     .with_detail(serde_json::json!({ "window": window_detail(now), "pinned_pid": pinned_pid }))
 }
 
+/// ボタンを押したままのマウスの束がガードの 7 で断られたら、次の手をドラッグの途中の文に置き換える (D-132)。
+/// 個々の hint の次の手 (focus して rect の中の点を使う、など) は途中の drag に合わない。判定と `reason`、`detail` は変えない
+fn mid_drag_hint(e: AppError, mid_drag: bool, target: &Target, surface: Surface) -> AppError {
+    if mid_drag && matches!(target, Target::Mouse { .. }) && e.kind == ErrorKind::ForegroundGuard {
+        e.with_hint(hint(Hint::DragGuardMidway, surface))
+    } else {
+        e
+    }
+}
+
 /// 無操作の不足 (10) の `error.detail` (D-065)
 fn idle_detail(idle_ms: u64, min_idle_ms: u64) -> serde_json::Value {
     serde_json::json!({ "idle_ms": idle_ms, "min_idle_ms": min_idle_ms })
@@ -1253,7 +1263,10 @@ impl Executor<'_> {
                 self.check_stop(state, ctx).map_err(|e| e.at(i))?;
                 match step {
                     Step::Batch { target, events } => {
-                        let fg = self.guard(target, ctx).map_err(|e| e.at(i))?;
+                        let mid_drag = !state.held_buttons.is_empty();
+                        let fg = self
+                            .guard(target, ctx)
+                            .map_err(|e| mid_drag_hint(e, mid_drag, target, ctx.surface).at(i))?;
                         if let Some(fg) = &fg {
                             match pinned_pid {
                                 None => pinned_pid = Some(fg.pid),
@@ -5820,6 +5833,159 @@ mod tests {
         let w = world.borrow();
         assert!(w.sent.is_empty(), "{:?}", w.sent);
         assert_eq!(w.focused_password_calls, 1, "読み直さない");
+    }
+
+    // ---- ドラッグの途中でガードに断られたときの次の手 (D-132) ----
+
+    /// (10, 10) から (200, 10) へ 4 歩: 補間の点の x は 58、105、153、200
+    const DRAG_4: &str = r#"{"type":"drag","from":{"x":10,"y":10},"to":{"x":200,"y":10},"steps":4,"duration_ms":40}"#;
+
+    /// x が 100 以上の場所の下が `at` の窓になる world (2 点目の x=105 から許可外)
+    fn drag_world(at: WindowInfo) -> Rc<RefCell<World>> {
+        let mut w = World::new();
+        w.windows_at = vec![(Rect::new(100, 0, 3000, 2000), at)];
+        w.shared()
+    }
+
+    fn is_button(events: &[InputEvent], down: bool) -> bool {
+        matches!(events, [InputEvent::Button { down: d, .. }] if *d == down)
+    }
+
+    #[test]
+    fn drag_refused_midway_says_partial_and_how_to_rebuild() {
+        let world = drag_world(chrome());
+        let (r, _) = exec(
+            &world,
+            &policy(&format!("{ENABLED}{ALLOW_TARGET}")),
+            &mut StopSet::new(),
+            &script(DRAG_4),
+        );
+        let e = r.unwrap_err();
+        assert_eq!(e.kind, ErrorKind::ForegroundGuard, "{e}");
+        assert_eq!(e.reason, None);
+        let h = e.hint.as_deref().unwrap();
+        assert!(h.contains("partial=true"), "{h}");
+        assert!(
+            h.ends_with(hint(Hint::DragGuardMidway, Surface::Cli)),
+            "{h}"
+        );
+        assert_eq!(detail(&e)["point"]["x"], 105);
+        assert_eq!(detail(&e)["point"]["y"], 10);
+        assert_eq!(progress(&e)["executed"], 0);
+        assert_eq!(progress(&e)["partial"], true);
+        let w = world.borrow();
+        assert!(
+            !w.sent
+                .iter()
+                .any(|b| b.contains(&InputEvent::MoveTo { x: 105, y: 10 })),
+            "断った点は送らない: {:?}",
+            w.sent
+        );
+        assert!(
+            w.sent.iter().any(|b| is_button(b, true)),
+            "押してある: {:?}",
+            w.sent
+        );
+        assert!(
+            is_button(w.sent.last().unwrap(), false),
+            "押したボタンは離す: {:?}",
+            w.sent
+        );
+    }
+
+    /// 始点で断られたら何も送っていないので、個々の hint のまま (前置きも付かない)
+    #[test]
+    fn drag_refused_at_start_keeps_mouse_guard_hint() {
+        let mut w = World::new();
+        w.windows_at = vec![(Rect::new(0, 0, 3000, 2000), chrome())];
+        let world = w.shared();
+        let (r, _) = exec(
+            &world,
+            &policy(&format!("{ENABLED}{ALLOW_TARGET}")),
+            &mut StopSet::new(),
+            &script(DRAG_4),
+        );
+        let e = r.unwrap_err();
+        assert_eq!(e.kind, ErrorKind::ForegroundGuard, "{e}");
+        assert_eq!(
+            e.hint.as_deref(),
+            Some(hint(Hint::MouseGuard, Surface::Cli))
+        );
+        assert!(world.borrow().sent.is_empty());
+    }
+
+    /// 始点への移動は送ったが押す前に断られた: partial でもボタンは押していないのでドラッグの途中の文にしない
+    #[test]
+    fn drag_refused_before_press_keeps_mouse_guard_hint() {
+        let mut w = World::new();
+        w.windows_at = vec![(Rect::new(0, 0, 3000, 2000), chrome())];
+        // 移動のガード (t = 0) の後、DRAG_SETTLE_MS の Sleep の間に点の下が変わる
+        w.windows_at_from_ms = Some(1);
+        let world = w.shared();
+        let (r, _) = exec(
+            &world,
+            &policy(&format!("{ENABLED}{ALLOW_TARGET}")),
+            &mut StopSet::new(),
+            &script(DRAG_4),
+        );
+        let e = r.unwrap_err();
+        assert_eq!(e.kind, ErrorKind::ForegroundGuard, "{e}");
+        let h = e.hint.as_deref().unwrap();
+        assert!(h.contains("partial=true"), "{h}");
+        assert!(h.ends_with(hint(Hint::MouseGuard, Surface::Cli)), "{h}");
+        let w = world.borrow();
+        assert_eq!(w.sent.len(), 1, "始点への移動だけ: {:?}", w.sent);
+        assert!(
+            !w.sent.iter().any(|b| is_button(b, true)),
+            "押していない: {:?}",
+            w.sent
+        );
+    }
+
+    /// 途中の点の下がホストの窓なら、個々の hint (focus の案内) でなくドラッグの途中の文を呼ばれ方で出す
+    #[test]
+    fn drag_midway_over_host_window_uses_drag_hint() {
+        for surface in [Surface::Cli, Surface::Mcp] {
+            let world = drag_world(terminal());
+            let e = exec_on(
+                &world,
+                &mut StopSet::new(),
+                &script(DRAG_4),
+                &[terminal().pid],
+                surface,
+            )
+            .unwrap_err();
+            assert_eq!(e.kind, ErrorKind::ForegroundGuard, "{e}");
+            let h = e.hint.as_deref().unwrap();
+            assert!(h.ends_with(hint(Hint::DragGuardMidway, surface)), "{h}");
+        }
+    }
+
+    /// 補間の点は始点と終点の間にあり、validate を通った drag では途中の点が画面の外にならないので、純関数で見る
+    #[test]
+    fn drag_midway_off_screen_uses_drag_hint() {
+        let mouse = Target::Mouse {
+            points: vec![Point::new(5000, 10)],
+        };
+        for surface in [Surface::Cli, Surface::Mcp] {
+            let e = AppError::new(ErrorKind::ForegroundGuard, "画面の外");
+            let e = mid_drag_hint(e, true, &mouse, surface);
+            assert_eq!(
+                e.hint.as_deref(),
+                Some(hint(Hint::DragGuardMidway, surface))
+            );
+        }
+    }
+
+    #[test]
+    fn mid_drag_hint_leaves_keyboard_and_policy_denied_alone() {
+        let mouse = Target::Mouse { points: vec![] };
+        let e = AppError::new(ErrorKind::ForegroundGuard, "前面").with_hint("元の文");
+        let e = mid_drag_hint(e, true, &Target::Keyboard, Surface::Cli);
+        assert_eq!(e.hint.as_deref(), Some("元の文"));
+        let e = AppError::new(ErrorKind::PolicyDenied, "領域");
+        let e = mid_drag_hint(e, true, &mouse, Surface::Cli);
+        assert_eq!(e.hint, None);
     }
 
     const ALLOW_TARGET_AND_NOTEPAD: &str = "[allow]\nprocesses=[\"target\",\"notepad\"]\n";
