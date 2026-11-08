@@ -1989,6 +1989,13 @@ mod tests {
         assert!(s.contains("| 15 | wait_timeout |"), "{s}");
     }
 
+    /// 手引きの全文は、`type` の文字が IME を通らないことと IME のキーの名前を書く (D-131)
+    #[test]
+    fn guide_says_type_bypasses_ime() {
+        assert!(GUIDE.contains("IME を通らない"), "{GUIDE}");
+        assert!(GUIDE.contains("kanji"), "{GUIDE}");
+    }
+
     /// 手引きの前書きは、INSTRUCTIONS の困ったことの送り先の段落を一字一句そのまま含み、要点版にも入る (D-098)
     #[test]
     fn guide_tells_where_to_send_feedback() {

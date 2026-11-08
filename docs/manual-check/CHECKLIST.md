@@ -998,6 +998,76 @@ $env:NO_COLOR = "1"; & $cu --config=$cfg; Remove-Item Env:NO_COLOR
 
 後片付け: `$env:NO_COLOR` が残っていないこと (`$env:NO_COLOR` が空)。`target/manual-check/s32-*` は残してよい (git 管理外)。実施の記録には、見た端末 (Windows Terminal か conhost、背景の明暗)、各テーマの見え方で読みにくかった箇所、(d) をレガシコンソールで再現できたかを書く
 
+## 33. IME のキー (D-131)
+
+`key` の IME のキー (`kanji`、`imeon`、`imeoff`、`convert`、`nonconvert`) に MS-IME が反応することと、`type` の文字が IME を通らないことを、MS-IME が有効なメモ帳で確かめる。ai-cu に IME の状態を読む機能は無いので、IME の表示は人が目で見て AI に伝える。
+手順 0 の設定 (基本の層。allow に notepad) のまま行い、設定ファイルを作らない。
+メモ帳に実入力を送るので、準備と GO の書き方は手順 31 と同じ: `AI_CU_MANUAL_CHECK=1` のセッションで、release のパスを文字どおり書き、GO を 1 回もらってから行う。操作は一手ずつの `focus`、`key`、`type` だけ (`run` は使わない)。送る入力はメモ帳の中だけで、撮影はしない。本文は `text` で読む。
+
+GO の前に `target/release/ai-cu.exe config show` で確かめる (読むだけ):
+- `allow.actions` を書いているなら、`focus`、`key`、`type` がある
+- `allow.keys` を書いているなら、`kanji`、`imeon`、`imeoff`、`convert`、`nonconvert`、`a`、`i`、`space`、`esc` がある
+- 無ければ 4 になるので、AI は設定を書き換えず、そのまま記録して止まる
+
+準備:
+- 人が空の新しいメモ帳のウィンドウを開く (手順 31 と同じ。題名「タイトルなし」のウィンドウが 1 つだけであることを `windows` で確かめる)。`focus` は題名を「メモ帳」で探す
+- 人がそのメモ帳を前面にして、タスクバーの IME の表示 (「あ」か「A」) を読み、確認の前の状態として AI に伝える (AI は記録する。後片付けで戻す)
+- 人は GO と区切りごとの返事のほかは、マウスとキーに触れない (マウスを動かすと 6、予告の間にキーを押すと 10 で止まる)。返事を打つと前面が端末に戻り、最後の入力も更新されるので、各区切りの先頭で `focus` を打つ。`focus` が 10 (`user_active`) なら何も送っていないので、数秒待って打ち直す
+- 各コマンドの終了コードは、期待の書いていないものも `0` のはず。違えばそのまま記録して止まる
+
+(a) `kanji` で IME のオンとオフが切り替わる。次の 2 行を打ち、人にタスクバーの IME の表示を聞く:
+
+```
+target/release/ai-cu.exe focus notepad.exe --title メモ帳
+target/release/ai-cu.exe key kanji
+```
+- [ ] 表示が押す前と逆になった (「あ」と「A」が入れ替わった)
+- [ ] 同じ 2 行をもう一度打つと、表示が元に戻った
+
+(b) `imeoff` と `imeon` で状態を決め打ちできる。次の `<キー>` を `imeoff`、`imeon`、`imeon` の順に替えて 3 回打ち、1 回ごとに人に表示を聞く:
+
+```
+target/release/ai-cu.exe focus notepad.exe --title メモ帳
+target/release/ai-cu.exe key <キー>
+```
+- [ ] 1 回目 (`imeoff`) の後は「A」
+- [ ] 2 回目 (`imeon`) の後は「あ」
+- [ ] 3 回目 (もう一度 `imeon`) の後も「あ」のまま
+
+(c) IME がオンのとき、`key` で未確定の文字と変換に入る ((b) の続きで IME はオン)。未確定の間に端末へ返事を打つと、前面が移って IME が未確定を確定か破棄しうる (推定) ので、AI は次を `target/manual-check/s33-c.sh` にまとめ、Bash ツールで `sh target/manual-check/s33-c.sh; echo "exit=$?"` として 1 回で打つ。人はメモ帳を見たまま、終わるまで返事を打たない:
+
+```
+set -e
+target/release/ai-cu.exe focus notepad.exe --title メモ帳
+target/release/ai-cu.exe key a
+target/release/ai-cu.exe key i
+target/release/ai-cu.exe key space
+target/release/ai-cu.exe key convert
+target/release/ai-cu.exe key nonconvert
+target/release/ai-cu.exe key esc
+target/release/ai-cu.exe key esc
+target/release/ai-cu.exe key esc
+```
+- [ ] `exit=0`
+- [ ] `key a` と `key i` で、下線つきの未確定の文字 (「あい」) が出た
+- [ ] `key space` で変換に入り、`key convert` と `key nonconvert` のそれぞれで IME が反応した (候補や読みの種類の変化。見えたものをそのまま記録する)
+- [ ] `key esc` の後、人が未確定の文字の無いことを確かめた。残っていれば `focus` の後に `key esc` を足し、未確定が消えるまで打つ
+
+(d) 未確定の無い状態で、IME がオンでも `type` の文字は未確定にならない。人に IME の表示が「あ」のままであることを確かめてから打つ:
+
+```
+target/release/ai-cu.exe focus notepad.exe --title メモ帳
+target/release/ai-cu.exe type aiueo
+target/release/ai-cu.exe text --window notepad.exe --type document
+```
+- [ ] (人の目) `aiueo` が下線なしでそのまま入った (「あいうえお」にも未確定にもならない)
+- [ ] `text` の本文が `aiueo`。(c) の未確定が確定して残っていれば、その前に文字が付くので、そのまま記録する
+
+記録する値: 使った release の版 (`target/release/ai-cu.exe --version`)、(a) から (d) の人の目の結果、各コマンドの終了コード、(d) の `text` の本文。「実施の記録」の節のとおり、手元に日付つきで書く。
+後片付け: 人が IME を確認の前の状態に戻し、メモ帳を保存せずに閉じる。`target/manual-check/s33-*` は残してよい (git 管理外)
+
+結果が違ったときは、D-131 の覆る条件に戻る: (a) で `kanji` に反応しなければ VK_OEM_AUTO / VK_OEM_ENLW を試す、(b) で `imeon` / `imeoff` に反応しなければ表から外す、どのキーも届かなければスキャンコードの指定を考える、(d) で文字が未確定に入ったら手引き、参照、説明の文を直す。(c) で未確定に入ると確かめられたら、手引きに足す。
+
 ## 結果が違ったとき
 
 - 手順 1 で `dev_mode: true`: この端末に `AI_CU_DEV_FORBID_REAL_INPUT` がある。`Remove-Item Env:AI_CU_DEV_FORBID_REAL_INPUT` で外す
@@ -1014,8 +1084,8 @@ ai-cu.exe を呼んで確かめられる。開発セッション (このリポ�
 手を離す。別のディレクトリで開いたセッション (hook 無し) に頼む形も使える (2026-10-08 に実施)。そのときの依頼文に書くこと:
 
 - 使うのは release の ai-cu.exe だけ。リポジトリを編集しない、cargo を走らせない
-- 実際の設定ファイルは読むだけ。手順 9 と 10 は `--config=` の上書き層 (deny と stop だけを足す。`version = 1` と `[general] input_enabled = true` が要る) で行い、allow を広げる設定は作らない。手順 23 も上書き層で行う (`version = 1`、`[general] capture_enabled = true`、deny だけ)。手順 24 も上書き層で行う (`version = 1`、`[general] capture_enabled = true`、`[mcp] require_approval = ["windows"]` だけ。登録と確認の画面は人が行う)。手順 25 は `guide --setup` と `validate` だけで、設定ファイルを作らない (TUI の左の一覧で fix の場所を探すのは人)。手順 26 は基本の層のまま行い、設定ファイルを作らない (基本の層の `allow.actions` を書いた設定では `wait_stable` / `wait_change` を並べないと 4 になる。そのときは記録して止まる)。手順 27 は基本の層のまま行い、設定ファイルを作らない (撮影の許可が要る。実入力は送らない)。手順 28 は確認専用のアプリ pw-probe (`tools/pw-probe`、D-092) で行う。人がビルドし、基本の層の `allow.processes` に `pw-probe.exe` がある (入れたままでよい。無ければ人が TUI で足す) ことを確かめてから、(a) の読み取りは GO 無しで、(b) から (d) は GO をもらって行い、設定ファイルを作らない (`general.password_input` は書かない)。送る文字は無害な 1 文字 (`x`、`a`、`b`、`y`)。読めないアプリでは 4 にならず文字が入るので、先に (a) の `find` で `secret` の `password` が true になることを確かめてから (b) を行う。pw-probe は AI が起動してよい (起動は実入力ではない)。手順 29 は基本の層のまま行い、(d) だけ上書き層 (`version = 1`、`[general] input_enabled = true`、`[indicator] sound = true` だけ) を `target/manual-check/` に作る。枠は撮影に写らないので、枠と札の見え方と音は人に聞いて記録する。手順 30 は基本の層のまま行い、設定ファイルを作らない。ignored の段がフィクスチャへ実入力を送るので GO の後に行う。枠と札は撮影に写らないので、人に聞いて記録する。cargo を走らせるので、別のディレクトリのセッションへの依頼には入れず、開発セッションの主エージェントが行う (D-111)
-- `--dry-run` の無い `run` は手順 6、7、8、9、20、26、28 (c)、29、31 だけ (26 の `run` は `focus` と画面の待ちだけで、入力は送らない。28 (c) は pw-probe のふつうの欄に Tab を含む `type` を送る標準入力の `run -`。28 の (b) と (d) は `run` ではなく一手ずつの `focus`、`click`、`key`、`type` で、これも実入力。31 は基本の層のまま (allow に notepad) で、設定ファイルを作らずに 2 本の `run` を同時にメモ帳へ送る実入力なので、GO をもらってから行う)。7 と 8 は実行の直前にターンを終え、人の GO を待つ (GO の後、人は枠が出てから約 3 秒 (予告の間) 待って Alt+Tab でメモ帳を前面にし、マウスに触れない)。7 は `sample-with-focus.json` (sample.json の先頭に `focus` を足したもの) を使えば、端末が前面のままで済み、Alt+Tab の合図が要らない (2026-10-09 に実施)
+- 実際の設定ファイルは読むだけ。手順 9 と 10 は `--config=` の上書き層 (deny と stop だけを足す。`version = 1` と `[general] input_enabled = true` が要る) で行い、allow を広げる設定は作らない。手順 23 も上書き層で行う (`version = 1`、`[general] capture_enabled = true`、deny だけ)。手順 24 も上書き層で行う (`version = 1`、`[general] capture_enabled = true`、`[mcp] require_approval = ["windows"]` だけ。登録と確認の画面は人が行う)。手順 25 は `guide --setup` と `validate` だけで、設定ファイルを作らない (TUI の左の一覧で fix の場所を探すのは人)。手順 26 は基本の層のまま行い、設定ファイルを作らない (基本の層の `allow.actions` を書いた設定では `wait_stable` / `wait_change` を並べないと 4 になる。そのときは記録して止まる)。手順 27 は基本の層のまま行い、設定ファイルを作らない (撮影の許可が要る。実入力は送らない)。手順 28 は確認専用のアプリ pw-probe (`tools/pw-probe`、D-092) で行う。人がビルドし、基本の層の `allow.processes` に `pw-probe.exe` がある (入れたままでよい。無ければ人が TUI で足す) ことを確かめてから、(a) の読み取りは GO 無しで、(b) から (d) は GO をもらって行い、設定ファイルを作らない (`general.password_input` は書かない)。送る文字は無害な 1 文字 (`x`、`a`、`b`、`y`)。読めないアプリでは 4 にならず文字が入るので、先に (a) の `find` で `secret` の `password` が true になることを確かめてから (b) を行う。pw-probe は AI が起動してよい (起動は実入力ではない)。手順 29 は基本の層のまま行い、(d) だけ上書き層 (`version = 1`、`[general] input_enabled = true`、`[indicator] sound = true` だけ) を `target/manual-check/` に作る。枠は撮影に写らないので、枠と札の見え方と音は人に聞いて記録する。手順 30 は基本の層のまま行い、設定ファイルを作らない。ignored の段がフィクスチャへ実入力を送るので GO の後に行う。枠と札は撮影に写らないので、人に聞いて記録する。cargo を走らせるので、別のディレクトリのセッションへの依頼には入れず、開発セッションの主エージェントが行う (D-111)。手順 33 は基本の層のまま行い、設定ファイルを作らない。一手ずつの `focus`、`key`、`type` は実入力なので GO の後に行う。IME の表示は撮影では確かめず、人に聞いて記録する (D-131)
+- `--dry-run` の無い `run` は手順 6、7、8、9、20、26、28 (c)、29、31 だけ (26 の `run` は `focus` と画面の待ちだけで、入力は送らない。28 (c) は pw-probe のふつうの欄に Tab を含む `type` を送る標準入力の `run -`。28 の (b) と (d) は `run` ではなく一手ずつの `focus`、`click`、`key`、`type` で、これも実入力。31 は基本の層のまま (allow に notepad) で、設定ファイルを作らずに 2 本の `run` を同時にメモ帳へ送る実入力なので、GO をもらってから行う。33 は `run` を使わないが、28 の (b) と (d) と同じく一手ずつの `focus`、`key`、`type` が実入力)。7 と 8 は実行の直前にターンを終え、人の GO を待つ (GO の後、人は枠が出てから約 3 秒 (予告の間) 待って Alt+Tab でメモ帳を前面にし、マウスに触れない)。7 は `sample-with-focus.json` (sample.json の先頭に `focus` を足したもの) を使えば、端末が前面のままで済み、Alt+Tab の合図が要らない (2026-10-09 に実施)
 - 手順 2 の前提 (allow に notepad があり、端末と端末を内蔵するエディタが allow に無く deny にある、input_enabled が true、dev_mode が false) が崩れていたら、run 系を走らせずに止まる。allow に `pw-probe` や利用者がふだん使うアプリがあるのは崩れではない
 - 画像は全画面を撮らない。手順 12 の画像は寸法だけ調べて消す。メモ帳の内容は `windows` で矩形を取り、その範囲だけ撮って読んでよい
 - コマンド、終了コード、出力をそのまま記録し、期待と違っても直さず報告する

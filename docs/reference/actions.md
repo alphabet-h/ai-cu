@@ -13,7 +13,7 @@ README の「操作列 JSON」の詳細。[README に戻る](../../README.md#操
 | `drag` | `from: {x, y}`, `to: {x, y}`, `button`, `steps` (1 から 1000、既定 20), `duration_ms` (既定 300、最大 60000) | 始点で押し、`steps` 回に補間して移動し、終点で離す |
 | `move` | `x`, `y` | カーソルの移動 |
 | `scroll` | `clicks` (0 以外。正で上または右), `horizontal` (既定 false), `x` と `y` (省略可。組で指定すると先に移動) | 1 クリック = 1 ノッチ (WHEEL_DELTA = 120)。本物のホイールと同じく 1 ノッチずつ、間を 20 ミリ秒空けて送る (100 ノッチで約 2 秒。D-063) |
-| `type` | `text`, `interval_ms` (既定 20、最大 1000) | 文字入力。1 文字ずつ送り、文字の間を `interval_ms` だけ空ける。改行は Enter、タブは Tab、その他は `KEYEVENTF_UNICODE` (サロゲートペア対応) |
+| `type` | `text`, `interval_ms` (既定 20、最大 1000) | 文字入力。1 文字ずつ送り、文字の間を `interval_ms` だけ空ける。改行は Enter、タブは Tab、その他は `KEYEVENTF_UNICODE` (サロゲートペア対応)。文字は IME を通らない (変換に入らない。改行とタブはキーとして送る。D-131) |
 | `key` | `keys` (例 `ctrl+s`, `alt+tab`, `f5`, `shift+left`) | 修飾キーを押し、キーを押して離し、修飾キーを逆順に離す (1 回の `SendInput`)。その後 50 ミリ秒待つ |
 | `wait` | `ms` (最大 600000) | 待つ。待っている間も緊急停止を確かめる |
 | `screenshot` | `path`, `region: {x, y, w, h}` または `window: {process, title?}` (どちらも省略で仮想デスクトップ全体。既定の設定では拒否)、`scale` (0 より大きく 1 以下。既定 1)、`max_edge` (1 以上。長辺の上限。縮尺は `scale` と `max_edge` / 長辺 の小さい方。省略で上限なし、MCP は既定 1568)、`settle` (省略可。`{stable_ms?, threshold?, timeout_ms?}`。既定 300 / 0 / 3000、`timeout_ms` は `stable_ms` 以上 600000 以下。`{}` で既定値) | png に保存する。`window` の矩形は撮る直前に `focus` と同じ探し方で解き、見つからない / 最小化 / 画面の外なら終了コード 12。`settle` があれば、撮る前に `wait_stable` と同じ判定で画面が落ち着くのを待ち、最後に撮った画像を保存する (撮り直さない)。`timeout_ms` のうちに落ち着かなくても失敗にせず、そのときの画像を保存する。出力の `screenshots[]` に `settled` (落ち着いたか) と `settle_ms` (待った時間) が入る。一手ずつの `--settle-ms auto` と MCP の `shot.settle_ms: "auto"` は、これを既定値で付ける (D-081) |
@@ -23,8 +23,10 @@ README の「操作列 JSON」の詳細。[README に戻る](../../README.md#操
 | `wait_stable` | `region: {x, y, w, h}` または `window: {process, title?}` (`screenshot` と同じ形と検証。どちらも省略で全画面、既定の設定では拒否)、`stable_ms` (既定 300、100 以上 60000 以下)、`threshold` (既定 0。0 以上 1 未満)、`timeout_ms` (既定 10000、`stable_ms` 以上 600000 以下) | 画面が落ち着くまで待つ (何も送らない)。UI Automation に要素を出さないアプリや、描き終わるまでの時間が読めない画面に使う。最初の撮影は待たずに行い (`window` が隠れて見えたときは猶予だけ待つ。D-082)、100 ミリ秒の間を空けて撮り直す (撮影の時間は間に含めない。その間も緊急停止と最大実行時間を見る)。各フレームを長辺 256 以下に縮め、RGB のどれかの差が 16 を超える点の割合を直前のフレームと比べ、その差が `threshold` 以下の比較が `stable_ms` 以上続いたら満たす。`window` の矩形は撮るたびに解き、矩形が前と違えば (移動、大きさの変化) 変わったと数える。撮るたびに `screenshot` と同じ判定 (入力デスクトップ、`window` の解決、領域と全画面の規則、deny のウィンドウ) を通し、当たれば止める (`window` の隠れだけは 50 ms ごとに 500 ms まで解き直してから 7。D-082。ロックやセーバーは 14、`window` が見つからない / 最小化は 12、`window` が隠れている、または deny のウィンドウが見えていれば 7 (待つ間に現れても同じ)、許可の外れは 4)。`timeout_ms` のうちに満たされなければ 15 (`unmet: stable`)。満たされると出力の `waited` に最後に撮った矩形の `rect` が入る。`waited[].elapsed_ms` は最初の撮影の前の隠れの猶予 (D-082) を含めず、途中の猶予の分だけ `timeout_ms` を超えうる。`timeout_ms` は時間の予算に全額数える (D-081) |
 | `wait_change` | `region` または `window` (`wait_stable` と同じ)、`threshold` (既定 0.001。0 以上 1 未満)、`timeout_ms` (既定 10000、1 以上 600000 以下) | 画面が変わるまで待つ (何も送らない)。待ち始めの最初のフレームを基準にし、以後のフレームと基準との差が `threshold` を超えたら満たす (直前のフレームとは比べないので、少しずつ変わる画面でも積もれば満たす)。撮り方、間隔、判定、止まり方は `wait_stable` と同じ。`timeout_ms` のうちに満たされなければ 15 (`unmet: change`)。満たされると `waited` に `rect` と、そのときの基準との差の `changed_ratio` (小数第 4 位まで) が入る。待ち始めに既に変わっていた画面は基準になるので満たされない。狭い `region` では、キャレットの点滅 1 回でも 0.001 を超えうる (`threshold` を上げるか、広く撮る。D-081) |
 
-キーの名前: `a`-`z`、`0`-`9`、`f1`-`f24`、`enter`、`esc`、`tab`、`space`、`backspace`、`delete`、`insert`、`home`、`end`、`pageup`、`pagedown`、`up`、`down`、`left`、`right`、`pause`、`capslock`、`printscreen`。
+キーの名前: `a`-`z`、`0`-`9`、`f1`-`f24`、`enter`、`esc`、`tab`、`space`、`backspace`、`delete`、`insert`、`home`、`end`、`pageup`、`pagedown`、`up`、`down`、`left`、`right`、`pause`、`capslock`、`printscreen`、`kanji` (半角/全角)、`convert` (変換)、`nonconvert` (無変換)、`imeon`、`imeoff`。
+IME のキーの別名: `hankaku` と `zenkaku` は `kanji`、`henkan` は `convert`、`muhenkan` は `nonconvert`。IME のキーの反応は IME とアプリに依る (送った後に撮って確かめる。D-131)。
 修飾キー: `ctrl` (`control`)、`alt`、`shift`、`win` (`super`)。大文字小文字と修飾キーの順序は問わない。
+未知のキーの失敗では、`issues[].message` に使える名前が出る (`error.message` は「N 件の問題」のまま。D-131)。
 
 例:
 

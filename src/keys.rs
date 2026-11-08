@@ -369,4 +369,17 @@ mod tests {
         let items: Vec<&str> = list.split(", ").collect();
         assert_eq!(items, ["ctrl", "alt", "shift", "win"]);
     }
+
+    /// 参照の文書の「キーの名前:」の行に、表のすべての正規名がバッククォートつきで出る (D-131)
+    #[test]
+    fn keys_reference_lists_named_keys() {
+        const REFERENCE: &str = include_str!("../docs/reference/actions.md");
+        let line = REFERENCE
+            .lines()
+            .find(|l| l.starts_with("キーの名前:"))
+            .expect("「キーの名前:」の行がある");
+        for (name, _, _) in NAMED_KEYS {
+            assert!(line.contains(&format!("`{name}`")), "{name}: {line}");
+        }
+    }
 }
