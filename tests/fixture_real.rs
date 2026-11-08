@@ -10,6 +10,8 @@
 //! - 撮影はフィクスチャの領域だけ。画像は target/ の下に保存し、テストの中で画素を確かめる
 //! - 各テストにウォッチドッグを置き、期限を過ぎたらプロセスごと終わらせる
 //! - 予告の間 (D-093) のテストだけは、人の手の代わりに別スレッドからフィクスチャの中へ入力を送る (D-095)
+//! - 帯つきのフィクスチャの drag のテストだけ、矩形をクライアント領域から上へ 120 px 広げる。動いた窓の上の点を送るため
+//!   で、座標の下がフィクスチャであることとプロセスの許可の確かめは残す (D-036 の追記、D-132)
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -29,16 +31,16 @@ use ai_cu::elements::{
 use ai_cu::error::{AppError, ErrorKind};
 use ai_cu::estop::StopSet;
 use ai_cu::geometry::{Point, Rect};
-use ai_cu::hint::{LEAD_USER_ACTIVE_HINT, Surface};
+use ai_cu::hint::{Hint, LEAD_USER_ACTIVE_HINT, Surface, hint};
 use ai_cu::image::{PngFileWriter, decode_png, frame_diff, thumb};
 use ai_cu::policy::Policy;
 use ai_cu::run::{self, ExecOptions, Executor, RunReport};
 use ai_cu::runner::{DeviceFactory, RealDevices};
 use ai_cu::script::{Button, Script};
 use ai_cu::win32::fixture_window::{
-    FIXTURE_BUTTON_ID, FIXTURE_BUTTON_TEXT, FIXTURE_EDIT_ID, FIXTURE_EDIT_TEXT,
-    FIXTURE_PASSWORD_ID, FIXTURE_PASSWORD_TEXT, FIXTURE_RGB, FixtureEvent, FixtureRegion,
-    FixtureWindow,
+    FIXTURE_BUTTON_ID, FIXTURE_BUTTON_TEXT, FIXTURE_CAPTION_HEIGHT, FIXTURE_EDIT_ID,
+    FIXTURE_EDIT_TEXT, FIXTURE_PASSWORD_ID, FIXTURE_PASSWORD_TEXT, FIXTURE_RGB, FixtureEvent,
+    FixtureRegion, FixtureWindow,
 };
 use ai_cu::win32::input_mutex::InputMutex;
 use ai_cu::win32::overlay::{
@@ -118,6 +120,8 @@ enum Kids {
     None,
     Controls,
     Password,
+    /// 子なしで、窓の上端の帯を掴むと窓が動く (D-132)
+    Caption,
 }
 
 /// フィクスチャを開いている間、画面の縁の枠を出すか (D-094)。自分の枠を数えるテストは Hide
@@ -159,16 +163,17 @@ fn start_frame(frame: Frame) -> Option<OverlayThread> {
     }
 }
 
-/// フィクスチャ用の方針: このテストのプロセスと、フィクスチャのクライアント領域 `client` だけを許可する (D-020)。
+/// フィクスチャ用の方針: このテストのプロセスと、矩形 `rect` だけを許可する (D-020)。`rect` は既定でクライアント領域で、
+/// 帯つきの drag のテストだけ上へ広げた矩形を渡す (D-036 の追記、D-132)。
 /// `edit` で設定を足してから層にする (既定の `Fixture::policy` は何も足さない。D-090 のテストは password_input を足す)
-fn fixture_policy(client: Rect, edit: impl FnOnce(&mut Config)) -> Policy {
+fn fixture_policy(rect: Rect, edit: impl FnOnce(&mut Config)) -> Policy {
     let exe = std::env::current_exe().unwrap();
     let exe_name = exe.file_name().unwrap().to_string_lossy().into_owned();
     let mut cfg = Config::default();
     cfg.general.input_enabled = true;
     cfg.general.capture_enabled = true;
     cfg.allow.processes = vec![exe_name];
-    cfg.allow.regions = vec![client.to_string()];
+    cfg.allow.regions = vec![rect.to_string()];
     // 前面化 (activate) の注入したクリックも「最後の入力」に数えられるので、focus の無操作の判定は外す
     // (判定そのものは run のモックのテストで確かめる。D-050)
     cfg.capture.min_idle_ms = 0;
@@ -212,6 +217,11 @@ impl Fixture {
         Fixture::open_inner(name, 0, Kids::Password, Frame::Show)
     }
 
+    /// 窓の上端の帯を掴むと窓が動くフィクスチャを開く (タイトルバーの drag の実機テスト用。D-132)
+    fn open_caption(name: &'static str) -> Fixture {
+        Fixture::open_inner(name, 0, Kids::Caption, Frame::Show)
+    }
+
     /// 主モニタの左上の角に接して開く (枠の帯の上の点がフィクスチャに重なるように。D-093 の実機テスト)。
     /// 枠を出さない (自分の枠を数える実機テスト用。D-094)
     fn open_at_corner(name: &'static str) -> Fixture {
@@ -251,6 +261,7 @@ impl Fixture {
             Kids::None => FixtureWindow::open(rect, &title),
             Kids::Controls => FixtureWindow::open_with_controls(rect, &title),
             Kids::Password => FixtureWindow::open_with_password(rect, &title),
+            Kids::Caption => FixtureWindow::open_with_caption(rect, &title),
         }
         .expect("フィクスチャを開けない");
         std::thread::sleep(Duration::from_millis(300));
@@ -292,10 +303,52 @@ impl Fixture {
 
     /// `execute` と同じ流れで、方針だけを `policy` に差し替えて実行する (D-090。`fixture_policy` で作った方針を渡す)
     fn execute_with(&self, policy: &Policy, actions: &str) -> Result<RunReport, AppError> {
+        self.execute_scoped(self.scope(), policy, actions)
+    }
+
+    /// 帯 (`CAPTION_GRIP`) を掴んで真上へ `CAPTION_DRAG_UP_PX` 運ぶ drag を、矩形を上へ広げて実行する (D-036 の追記、D-132)。
+    /// 広げた同じ矩形を `FixtureScope` と `allow.regions` の両方に渡す。広げないと窓の外の点が領域の 4 で止まり、
+    /// ガードの 7 に届かない。広げても座標の下がフィクスチャであることとプロセスの許可は確かめるので、窓の外の点は送る前に断られる
+    fn execute_caption_drag(&self, steps: u32, duration_ms: u64) -> Result<RunReport, AppError> {
+        let c = self.client;
+        let rect = Rect::new(
+            c.x,
+            c.y - CAPTION_DRAG_UP_PX,
+            c.w,
+            c.h + CAPTION_DRAG_UP_PX as u32,
+        );
+        let primary = screen::primary_screen().expect("主モニタ");
+        assert!(
+            primary.contains_rect(&rect),
+            "広げた矩形が主モニタからはみ出す: {rect}"
+        );
+        let scope = FixtureScope {
+            hwnd: self.win.hwnd(),
+            rect,
+        };
+        let from = Point::new(c.x + CAPTION_GRIP.0, window_top(self) + CAPTION_GRIP.1);
+        let to = Point::new(from.x, from.y - CAPTION_DRAG_UP_PX);
+        self.execute_scoped(
+            scope,
+            &fixture_policy(rect, |_| {}),
+            &format!(
+                r#"{{"type":"drag","from":{{"x":{},"y":{}}},"to":{{"x":{},"y":{}}},"steps":{steps},"duration_ms":{duration_ms}}}"#,
+                from.x, from.y, to.x, to.y
+            ),
+        )
+    }
+
+    /// `execute_with` と同じ流れで、実バックエンドの矩形だけを `scope` に差し替えて実行する (D-132)
+    fn execute_scoped(
+        &self,
+        scope: FixtureScope,
+        policy: &Policy,
+        actions: &str,
+    ) -> Result<RunReport, AppError> {
         let script = Script::from_json(&format!("{{\"version\":1,\"actions\":[{actions}]}}"))
             .expect("操作列");
-        let mut sink = RealSink::for_fixture(self.scope());
-        let desktop = Win32Desktop::for_fixture(self.scope());
+        let mut sink = RealSink::for_fixture(scope);
+        let desktop = Win32Desktop::for_fixture(scope);
         let mut clock = SystemClock::new();
         let mut stops = StopSet::new();
         let mut images = PngFileWriter;
@@ -503,6 +556,88 @@ fn fixture_real_drag_interpolates_between_endpoints() {
         "{ev:?}"
     );
     println!("FIXTURE drag from=(60,60) to=(420,260) moves={moves}");
+}
+
+// ---- タイトルバーの帯の drag (D-132) ----
+//
+// 窓はカーソルの後から動くので、次の点が窓の外に出ない歩幅なら窓が運ばれ、出る歩幅なら途中の点でガードに断られる
+
+/// 帯の中の掴む点。x はクライアントの左端から、y は窓の上端 (`GetWindowRect`) から。
+/// y の 12 が掴みの余裕 (上へ運ぶときの、窓の端までの距離)。帯の高さと同じ基準にして、枠の幅を混ぜない
+const CAPTION_GRIP: (i32, i32) = (320, 12);
+/// 真上へ運ぶ量。広げる矩形の量でもある (D-036 の追記)
+const CAPTION_DRAG_UP_PX: i32 = 120;
+const _: () = assert!(CAPTION_GRIP.1 < FIXTURE_CAPTION_HEIGHT);
+/// 窓が運ばれたとみなす下限 (全量は断言しない。窓は最後の点より遅れうる)
+const CAPTION_MOVED_MIN_PX: i32 = 100;
+
+fn window_top(f: &Fixture) -> i32 {
+    f.win.window_rect().expect("窓の矩形").y
+}
+
+#[test]
+#[ignore = "実機のフィクスチャ限定。cargo test -- --ignored --test-threads=1"]
+fn fixture_real_caption_drag_small_steps_moves_window_up() {
+    let f = Fixture::open_caption("caption-small");
+    let start = window_top(&f);
+    // 1 歩 6 px (掴みの余裕の半分ちょうど)、50 ms
+    f.execute_caption_drag(20, 1000)
+        .expect("小さい歩幅の帯の drag");
+    let moved = wait_until(Duration::from_secs(2), || {
+        window_top(&f) <= start - CAPTION_MOVED_MIN_PX
+    });
+    // 窓の動きが終わってから測る
+    std::thread::sleep(Duration::from_millis(200));
+    let dy = window_top(&f) - start;
+    println!("FIXTURE caption drag steps=20 dy={dy}");
+    assert!(
+        moved,
+        "窓が上へ {CAPTION_MOVED_MIN_PX} px 動いていない: dy={dy}"
+    );
+}
+
+#[test]
+#[ignore = "実機のフィクスチャ限定。cargo test -- --ignored --test-threads=1"]
+fn fixture_real_caption_drag_large_steps_refused_with_midway_hint() {
+    let f = Fixture::open_caption("caption-large");
+    // 1 歩 60 px。最初の点が窓の上端より上になる
+    let e = f
+        .execute_caption_drag(2, 200)
+        .expect_err("大きい歩幅は途中の点で断られる");
+    assert_eq!(e.kind, ErrorKind::ForegroundGuard, "{e}");
+    assert!(
+        e.hint()
+            .ends_with(hint(Hint::DragGuardMidway, Surface::Cli)),
+        "{}",
+        e.hint()
+    );
+    assert!(e.hint().contains("partial=true"), "{}", e.hint());
+    let point = e
+        .detail
+        .as_deref()
+        .and_then(|d| d.get("point"))
+        .expect("detail.point");
+    println!("FIXTURE caption drag refused point={point}");
+}
+
+/// 帯の無いフィクスチャでは、同じ歩幅でも窓は動かず断られる (帯が窓を動かしていることの対照)
+#[test]
+#[ignore = "実機のフィクスチャ限定。cargo test -- --ignored --test-threads=1"]
+fn fixture_real_no_caption_drag_small_steps_is_refused() {
+    let f = Fixture::open("no-caption");
+    let start = window_top(&f);
+    let e = f
+        .execute_caption_drag(20, 1000)
+        .expect_err("帯が無ければ窓は動かず、窓の外の点で断られる");
+    assert_eq!(e.kind, ErrorKind::ForegroundGuard, "{e}");
+    // 窓が遅れて動いた場合も見落とさないよう、少し待ってから測る
+    std::thread::sleep(Duration::from_millis(200));
+    let dy = window_top(&f) - start;
+    println!(
+        "FIXTURE no_caption drag dy={dy} point={:?}",
+        e.detail.as_deref().and_then(|d| d.get("point"))
+    );
+    assert_eq!(dy, 0, "帯が無いのに窓が動いた");
 }
 
 #[test]
