@@ -1882,3 +1882,27 @@
 - 状態: 採用 (2026-11-09)
 - 追記 (2026-11-09、測定の結果): IME がオンの IMM32 のフィクスチャでは、`type` の和文 10 字のうち漢字はそのまま `WM_CHAR` で届き、仮名 5 字 (は、が、い、で、す) は未確定に入った (`comp_str=5`、`comp_result=0`)。先頭の「今日」は未確定の前に届き、「天気良」の 3 字は未確定の最中に届いた (`chars_in_composition=3`)。読むまで未確定は開いたままで (`end=0`)、確定は起きていない。IME がオフでは順どおりで、未確定に入らない。だからこの受け手でも「IME を通らない」は成り立たず、断定を外す判断に合う。測定で言えるのは `WM_CHAR` の順と未確定の有無まで。フィクスチャは `WM_IME_COMPOSITION` を既定の処理に渡すだけで GPUI と受け方が違うので、GPUI の見た目の乱れを再現したとは言えない。手引きには原因の断定を書かない。確定の `WM_CHAR` は `ImeEnd` より後に届きうるが、この測定は確定が起きていないので影響しない。覆る条件には当たらない (オフの段は順どおりで、対照の `key` の `a` で未確定が始まり、測定は有効)
   (via: 主エージェントが HEAD 046a311 で `cargo test --test fixture_real fixture_real_type_with_ime_on_measures_composition -- --ignored --nocapture --test-threads=1` を打ち、exit 0。ログ target/verify/ime-measure.log の `FIXTURE ime on chars="今日天気良" expected="今日は天気が良いです" in_order=false start=1 end=0 comp=5 comp_result=0 comp_str=5 chars_in_composition=3` と `FIXTURE ime off chars="今日は天気が良いです" in_order=true start=0`。実機の対照は作業領域の control_ime.py で主エージェントが打ち、ログは target/verify/ime-control.log: (A) `ImmAssociateContextEx` を常に呼ぶと `FIXTURE ime skipped no_context` で exit 0 (B) `WM_FIXTURE_IME_OPEN` で `wparam` を無視して常にオンにすると tests/fixture_real.rs:899 の `set_ime_open(false)` の断言で exit 101 (left: Some(true) right: Some(false)) (C) `wparam == 0` のとき `ImmSetOpenStatus` を呼ばず 0 を返すと tests/fixture_real.rs:910 の `Char` の断言で exit 101 (left は 5 単位、right は 10 単位)。書き戻しは sha256 の一致で確かめた)
+
+### D-134 最小化の窓を ai-cu が戻さない理由と次の手を手引きに書く (復元は足さない。D-050 のまま)
+- 日付: 2026-11-10
+- 場面: 別のプロジェクトからの起票。窓の操作を確かめる手順で、許可済みの窓の最小化の復元だけが ai-cu でできず、人待ちになった。手引きの `focus` の `minimized` の行は「人間に復元してもらう」だけで、理由も、戻った後の手順も無かった
+- 選択肢: A 手引きに理由と次の手を書く / B `SetForegroundWindow` が先に成功したときだけ復元する (D-050 の覆る条件。ケース D は未測定) / C `focus` が常に復元する
+- 判断: A (○。利用者が /autopilot の候補の選択で選んだ)。復元を足すなら D-050 を覆す設計と測定になるので別に相談する。細部は次のとおり
+  - 手引き (`src/guide.md`) の `minimized` の行に、理由「人が別のアプリを使っていても前面を奪えるため」と次の手を書く。docs/reference/actions.md の `focus` の行に同じ理由を足す。要点版の行をテスト `guide_says_why_minimized_is_not_restored_and_what_to_do` で固定する
+  - 終了コード 12 の hint は変えない (利用者の決定。CLI の文は D-056 で一字一句固定で、D-056 を覆さない。MCP の文だけを変えることもしない)
+  - 復元の操作は足さない (D-050 のまま)
+  - `FOCUS_MINIMIZED_HINT` は変えない。理由はもう定数に書いてあり、`cli_hints_unchanged` の写しで固定している
+  - 次の手は「人間に復元してもらい、戻ったと聞いたら `windows` で確かめて `focus` し直す」にする。`wait_for` は勧めない。`wait_for` の待ちは人のマウスの移動を見ていて、しきい値 (`stop.mouse_threshold_px`、既定 50) を超えると終了コード 6 で止まる (src/run.rs の `sleep` → `check_stop` → `check_user_mouse`、src/mcp.rs の `mcp_stopped_read_tool_hides_overlay`) ので、人がタスクバーへマウスを動かすと止まる。隣の行の「人間に頼み、`windows` の `foreground` で確かめてから続ける」の型に合わせた。最小化の間は `windows` の `rect` が null
+  - 手引きの終了コード 12 の行は変えない
+  - 要点版の上限 (21000 バイト) は増やさない。D-133 でも増やしていないので、手引きの理由は「前面を奪えるため」に縮める
+- 根拠:
+  - D-050 の覆る条件 (ケース D を扱う必要が出たとき) には今回は当たらない。起票の本文が「止めている理由が安全上の判断なら、その旨が手引きか失敗の hint に出ていれば十分」としている
+  - D-050 の実測 C で、復元は前面ロックの境界をすり抜けた。だから C は D-020 の「回避策を使わない」に反し、B はケース D を測ってからでないと決められない
+  - 手引きの 12 の行を変えないのは、要点版が 20836 バイトで上限 21000 まで余裕が 164 バイトしかなく、11 の行で使い切るから (via: `target/release/ai-cu.exe guide | wc -c`、コミット 2c9e782。main の 9abe720 は同じ木)
+- 覆る条件:
+  - 確認の手順で人待ちが実際に繰り返し困る事例が出たとき (D-050 の覆る条件のケース D を先に測る)
+  - hint だけを読む経路で次の手を読み違えた事例が出たとき (`FOCUS_MINIMIZED_HINT` を見直す)
+  - 人の操作で止まらない待ちの手段が足されたとき (次の手に待ちを書くか見直す)
+  - 12 の経路で次の手に迷った事例が出たとき (手引きの 12 の行を見直す)
+  - 理由を縮めても要点版の上限に収まらないとき (上限を見直す)
+- 状態: 採用 (2026-11-10)

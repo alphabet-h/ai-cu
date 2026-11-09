@@ -2001,6 +2001,20 @@ mod tests {
         assert!(GUIDE.contains("送った文字は未確定に入る"), "{GUIDE}");
     }
 
+    /// 要点版の `focus` の最小化の行は、復元しない理由と次の手 (`windows` で確かめて `focus` し直す) を書き、
+    /// 人のマウスの移動で止まる `wait_for` を勧めない (D-134)
+    #[test]
+    fn guide_says_why_minimized_is_not_restored_and_what_to_do() {
+        let s = guide_summary();
+        let lines: Vec<&str> = s.lines().filter(|l| l.contains("(`minimized`)")).collect();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        let line = lines[0];
+        assert!(line.contains("前面を奪える"), "{line}");
+        assert!(line.contains("`windows`"), "{line}");
+        assert!(line.contains("`focus` し直す"), "{line}");
+        assert!(!line.contains("wait_for"), "{line}");
+    }
+
     /// 手引きの前書きは、INSTRUCTIONS の困ったことの送り先の段落を一字一句そのまま含み、要点版にも入る (D-098)
     #[test]
     fn guide_tells_where_to_send_feedback() {
