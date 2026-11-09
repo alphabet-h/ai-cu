@@ -39,8 +39,8 @@ use ai_cu::runner::{DeviceFactory, RealDevices};
 use ai_cu::script::{Button, Script};
 use ai_cu::win32::fixture_window::{
     FIXTURE_BUTTON_ID, FIXTURE_BUTTON_TEXT, FIXTURE_CAPTION_HEIGHT, FIXTURE_EDIT_ID,
-    FIXTURE_EDIT_TEXT, FIXTURE_PASSWORD_ID, FIXTURE_PASSWORD_TEXT, FIXTURE_RGB, FixtureEvent,
-    FixtureRegion, FixtureWindow,
+    FIXTURE_EDIT_TEXT, FIXTURE_GCS_COMPSTR, FIXTURE_GCS_RESULTSTR, FIXTURE_PASSWORD_ID,
+    FIXTURE_PASSWORD_TEXT, FIXTURE_RGB, FixtureEvent, FixtureRegion, FixtureWindow,
 };
 use ai_cu::win32::input_mutex::InputMutex;
 use ai_cu::win32::overlay::{
@@ -122,6 +122,8 @@ enum Kids {
     Password,
     /// 子なしで、窓の上端の帯を掴むと窓が動く (D-132)
     Caption,
+    /// 子なしで、IME を外さない (D-133)
+    Ime,
 }
 
 /// フィクスチャを開いている間、画面の縁の枠を出すか (D-094)。自分の枠を数えるテストは Hide
@@ -222,6 +224,11 @@ impl Fixture {
         Fixture::open_inner(name, 0, Kids::Caption, Frame::Show)
     }
 
+    /// IME を外さないフィクスチャを開く (IME がオンのときの `type` の測定用。D-133)
+    fn open_ime(name: &'static str) -> Fixture {
+        Fixture::open_inner(name, 0, Kids::Ime, Frame::Show)
+    }
+
     /// 主モニタの左上の角に接して開く (枠の帯の上の点がフィクスチャに重なるように。D-093 の実機テスト)。
     /// 枠を出さない (自分の枠を数える実機テスト用。D-094)
     fn open_at_corner(name: &'static str) -> Fixture {
@@ -262,6 +269,7 @@ impl Fixture {
             Kids::Controls => FixtureWindow::open_with_controls(rect, &title),
             Kids::Password => FixtureWindow::open_with_password(rect, &title),
             Kids::Caption => FixtureWindow::open_with_caption(rect, &title),
+            Kids::Ime => FixtureWindow::open_with_ime(rect, &title),
         }
         .expect("フィクスチャを開けない");
         std::thread::sleep(Duration::from_millis(300));
@@ -768,6 +776,144 @@ fn fixture_real_ime_keys_reach_foreground_fixture() {
         .collect();
     assert_eq!(vks, vec![0x19, 0x1C, 0x1D, 0x16, 0x1A], "{ev:?}");
     println!("FIXTURE ime_keys vk={vks:02x?}");
+}
+
+/// IME の測定で打つ和文 (D-133)
+const IME_MEASURE_TEXT: &str = "今日は天気が良いです";
+
+/// 記録の中の `Char` の UTF-16 の単位を順に返す
+fn char_units(events: &[FixtureEvent]) -> Vec<u16> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            FixtureEvent::Char { unit } => Some(*unit),
+            _ => None,
+        })
+        .collect()
+}
+
+/// `flags` に `mask` のどれかを持つ `ImeComposition` の数
+fn composition_count(events: &[FixtureEvent], mask: u32) -> usize {
+    events
+        .iter()
+        .filter(|e| matches!(e, FixtureEvent::ImeComposition { flags } if flags & mask != 0))
+        .count()
+}
+
+/// `ImeStart`..`ImeEnd` の区間に入る `Char` の合計。最後の区間に `ImeEnd` が無ければ記録の終わりまで数える (D-133)
+fn chars_in_composition(events: &[FixtureEvent]) -> usize {
+    let mut total = 0;
+    let mut rest = events;
+    while let Some(start) = rest.iter().position(|e| *e == FixtureEvent::ImeStart) {
+        let after = &rest[start + 1..];
+        let end = after
+            .iter()
+            .position(|e| *e == FixtureEvent::ImeEnd)
+            .unwrap_or(after.len());
+        total += char_units(&after[..end]).len();
+        rest = &after[end..];
+    }
+    total
+}
+
+#[test]
+fn chars_in_composition_counts_every_interval_and_open_end() {
+    use FixtureEvent::{Char, ImeComposition, ImeEnd, ImeStart};
+    let c = || Char { unit: 0x3042 };
+    // 区間 2 つ。区間の外の Char は数えない
+    let two = [
+        c(),
+        ImeStart,
+        c(),
+        ImeComposition { flags: 8 },
+        c(),
+        ImeEnd,
+        c(),
+        ImeStart,
+        c(),
+        ImeEnd,
+        c(),
+    ];
+    assert_eq!(chars_in_composition(&two), 3);
+    // 最後の区間に ImeEnd が無ければ記録の終わりまで
+    let open_end = [c(), ImeStart, c(), ImeEnd, ImeStart, c(), c()];
+    assert_eq!(chars_in_composition(&open_end), 3);
+    // 区間が無ければ 0
+    assert_eq!(chars_in_composition(&[c(), ImeEnd, c()]), 0);
+}
+
+/// IME がオンのときの `type` を、IME を外さないフィクスチャ (IMM32 の受け手) で測る (D-133)。オンの結果は IME の版や
+/// 辞書に依るので断言せず `FIXTURE ime on` の行に出す。IME の無い環境は `FIXTURE ime skipped` を出して通す。
+/// オンのまま panic しても、入力コンテキストは窓のスレッドと一緒に消える
+#[test]
+#[ignore = "実機のフィクスチャ限定。cargo test -- --ignored --test-threads=1"]
+fn fixture_real_type_with_ime_on_measures_composition() {
+    let f = Fixture::open_ime("ime");
+    f.activate();
+    if f.win.set_ime_open(true) != Some(true) {
+        println!("FIXTURE ime skipped no_context");
+        return;
+    }
+    // 対照: IME が生きていれば `key a` で未確定が始まる。esc で片付ける
+    f.execute(r#"{"type":"key","keys":"a"},{"type":"key","keys":"esc"}"#)
+        .expect("対照のキー");
+    std::thread::sleep(Duration::from_millis(500));
+    if !f.win.events().contains(&FixtureEvent::ImeStart) {
+        println!("FIXTURE ime skipped composition=false");
+        let _ = f.win.set_ime_open(false);
+        return;
+    }
+
+    let type_action = format!(
+        r#"{{"type":"type","text":{}}}"#,
+        serde_json::to_string(IME_MEASURE_TEXT).unwrap()
+    );
+    let expected: Vec<u16> = IME_MEASURE_TEXT.encode_utf16().collect();
+
+    // オン: 断言せず印字する
+    let mark = f.win.events().len();
+    f.execute(&type_action).expect("IME オンの文字入力");
+    std::thread::sleep(Duration::from_secs(2));
+    let all = f.win.events();
+    let on = &all[mark..];
+    let units = char_units(on);
+    println!(
+        "FIXTURE ime on chars=\"{}\" expected=\"{IME_MEASURE_TEXT}\" in_order={} start={} end={} comp={} comp_result={} comp_str={} chars_in_composition={}",
+        String::from_utf16_lossy(&units),
+        units == expected,
+        on.iter().filter(|e| **e == FixtureEvent::ImeStart).count(),
+        on.iter().filter(|e| **e == FixtureEvent::ImeEnd).count(),
+        on.iter()
+            .filter(|e| matches!(e, FixtureEvent::ImeComposition { .. }))
+            .count(),
+        composition_count(on, FIXTURE_GCS_RESULTSTR),
+        composition_count(on, FIXTURE_GCS_COMPSTR),
+        chars_in_composition(on),
+    );
+    // 未確定が残っていれば片付ける
+    f.execute(r#"{"type":"key","keys":"esc"}"#)
+        .expect("未確定の片付け");
+    std::thread::sleep(Duration::from_millis(500));
+
+    // オフ: 順どおりに入り、未確定が始まらない
+    assert_eq!(
+        f.win.set_ime_open(false),
+        Some(false),
+        "IME をオフにできない"
+    );
+    std::thread::sleep(Duration::from_millis(500));
+    let mark = f.win.events().len();
+    f.execute(&type_action).expect("IME オフの文字入力");
+    std::thread::sleep(Duration::from_secs(2));
+    let all = f.win.events();
+    let off = &all[mark..];
+    assert_eq!(char_units(off), expected, "{off:?}");
+    assert_eq!(
+        off.iter().filter(|e| **e == FixtureEvent::ImeStart).count(),
+        0,
+        "{off:?}"
+    );
+    println!("FIXTURE ime off chars=\"{IME_MEASURE_TEXT}\" in_order=true start=0");
 }
 
 /// focus (D-050): 前面のプロセス (このテスト) が持つ、前面でないフィクスチャ B を `focus` で前面にしてからキーを送る。
