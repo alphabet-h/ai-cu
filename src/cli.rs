@@ -1871,6 +1871,9 @@ pub(crate) fn config_cmd(action: ConfigCmd, paths: &ConfigPaths) -> Outcome {
     }
 }
 
+/// `type` の文字と IME の 1 句 (D-133)。`ai-cu schema` と MCP の `type` と `run` の `type` の説明が使う
+pub(crate) const TYPE_IME_NOTE: &str = "文字は Unicode で送る。IME がオンだと受け手によっては順が乱れたり変換の窓が出たりするので、先に key の imeoff で切り、打った後に text か shot で確かめる (改行とタブはキーとして送る)";
+
 /// 操作列 JSON の書式 (`ai-cu schema`)。
 pub fn schema() -> Value {
     let point = json!({ "x": "整数 (物理ピクセル)", "y": "整数 (物理ピクセル)" });
@@ -1886,7 +1889,7 @@ pub fn schema() -> Value {
             "drag": { "from": point, "to": point, "button": "既定 left", "steps": "補間の回数 1..=1000 (既定 20)", "duration_ms": "全体の時間 (既定 300、最大 60000)" },
             "move": { "x": "整数", "y": "整数" },
             "scroll": { "clicks": "0 以外で絶対値 100 以下の整数。正で上 / 右 (1 = 1 ノッチ。1 ノッチずつ 20 ミリ秒空けて送る)", "horizontal": "真偽 (既定 false)", "x": "省略可 (y と組で、先にそこへ移動)", "y": "省略可" },
-            "type": { "text": "文字列 (改行は Enter、タブは Tab、その他は KEYEVENTF_UNICODE)。文字は IME を通らない (変換に入らない。改行とタブはキーとして送る)", "interval_ms": "文字と文字の間の待ち (既定 20、最大 1000。1 文字ずつ送る。0 は受け手が文字を落としうる)" },
+            "type": { "text": format!("文字列 (改行は Enter、タブは Tab、その他は KEYEVENTF_UNICODE)。{TYPE_IME_NOTE}"), "interval_ms": "文字と文字の間の待ち (既定 20、最大 1000。1 文字ずつ送る。0 は受け手が文字を落としうる)" },
             "key": { "keys": "組み合わせ。例 ctrl+s, alt+tab, f5、kanji (半角/全角) (Win+、Alt+F4、Ctrl+Alt+、Ctrl+Shift+Esc、Ctrl+Esc は組み込みで拒否)" },
             "wait": { "ms": "待つミリ秒 (最大 600000)" },
             "screenshot": { "path": "保存先の png (.png に限る。PNG でない既存ファイルは上書きしない)", "region": { "x": "整数", "y": "整数", "w": "幅", "h": "高さ", "省略": "window も無ければ仮想デスクトップ全体 (既定の設定では拒否。capture.full_screen)" }, "window": { "process": "撮る対象のウィンドウの実行ファイル名 (focus と同じ探し方。region と排他)", "title": "省略可。題名に含む文字列", "備考": "矩形は撮る直前に解く。見つからない / 最小化 / 画面の外は終了コード 12 (何もしない)。結果の screenshots[].window に撮ったウィンドウが入る" }, "scale": "保存する画像の縮尺 (0 より大きく 1 以下。既定 1)。画像の点 (px, py) は画面の (x + px / scale, y + py / scale)", "max_edge": "長辺の上限 (1 以上、ピクセル。省略で上限なし。MCP は既定 1568)。縮尺は scale と max_edge / 長辺 の小さい方で、出力の scale に実際の値が入る", "settle": { "stable_ms": format!("省略可。静けさが続く長さ (既定 {DEFAULT_STABLE_MS}、{MIN_STABLE_MS} 以上 {MAX_STABLE_MS} 以下)"), "threshold": "省略可。直前のフレームとの差 (変わった点の割合) の許容 (0 以上 1 未満。既定 0)", "timeout_ms": format!("省略可。待つ上限 (既定 {DEFAULT_SETTLE_TIMEOUT_MS}、stable_ms 以上 {MAX_SINGLE_WAIT_MS} 以下)。超えたら落ち着くのを待たずに撮る (失敗にしない)"), "備考": "省略可 ({} でも既定値で付く)。撮る前に wait_stable と同じ判定で画面が落ち着くのを待ち、最後に撮った画像を保存する (撮り直さない)。結果の screenshots[] に settled (落ち着いたか) と settle_ms (待った時間) が入る。一手ずつの --settle-ms auto はこれを既定値で付ける" } },
@@ -1989,10 +1992,11 @@ mod tests {
         assert!(s.contains("| 15 | wait_timeout |"), "{s}");
     }
 
-    /// 手引きの全文は、`type` の文字が IME を通らないことと IME のキーの名前を書く (D-131)
+    /// 手引きの全文は、IME がオンの `type` は受け手によって乱れるので先に `imeoff` で切ることと、IME のキーの名前を書く (D-131、D-133)
     #[test]
-    fn guide_says_type_bypasses_ime() {
-        assert!(GUIDE.contains("IME を通らない"), "{GUIDE}");
+    fn guide_says_turn_ime_off_before_type() {
+        assert!(GUIDE.contains("imeoff` で切ってから打ち"), "{GUIDE}");
+        assert!(GUIDE.contains("順が乱れ"), "{GUIDE}");
         assert!(GUIDE.contains("kanji"), "{GUIDE}");
         assert!(GUIDE.contains("送った文字は未確定に入る"), "{GUIDE}");
     }
@@ -4330,7 +4334,7 @@ mod tests {
         assert!(title.contains("終わったとは限らない"), "{title}");
     }
 
-    /// `schema()` の `key_names` はキーの表から組み立てる。`key` は IME のキーを、`type` は IME を通らないことを書く (D-131)
+    /// `schema()` の `key_names` はキーの表から組み立てる。`key` は IME のキーを、`type` は IME がオンのときの乱れと `imeoff` の手順を書く (D-131、D-133)
     #[test]
     fn schema_key_names_come_from_key_table() {
         let s = schema();
@@ -4341,7 +4345,8 @@ mod tests {
         let keys = s["actions"]["key"]["keys"].as_str().unwrap();
         assert!(keys.contains("kanji"), "{keys}");
         let text = s["actions"]["type"]["text"].as_str().unwrap();
-        assert!(text.contains("IME を通らない"), "{text}");
+        assert!(text.contains("imeoff"), "{text}");
+        assert!(text.contains("順が乱れ"), "{text}");
     }
 
     /// 一手ずつの操作も `run` と同じ経路: dry-run は装置に触れず、拒否は 4、形の誤りは 3

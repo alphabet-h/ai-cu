@@ -22,9 +22,9 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::cli::{
-    ConfigCmd, Context, DEFAULT_STEP_SETTLE_MS, GUIDE, Outcome, SettleOpt, ShotSpec, config_cmd,
-    find_cmd, guide_summary, run_script, shot, step_with_shot, text_cmd, tree_cmd, window_allowed,
-    windows_cmd, with_policy,
+    ConfigCmd, Context, DEFAULT_STEP_SETTLE_MS, GUIDE, Outcome, SettleOpt, ShotSpec, TYPE_IME_NOTE,
+    config_cmd, find_cmd, guide_summary, run_script, shot, step_with_shot, text_cmd, tree_cmd,
+    window_allowed, windows_cmd, with_policy,
 };
 use crate::config::{ConfigPaths, DefaultLocator, EnvLookup};
 use crate::device::{BackendError, FrameState, HeldInputs, Image, InputDesktop};
@@ -548,7 +548,7 @@ fn schema_action() -> Value {
             { "type": "object", "additionalProperties": false, "properties": { "type": t("drag"), "from": point, "to": point, "button": schema_button(), "steps": { "type": "integer", "minimum": 1, "maximum": 1000, "description": "補間の回数 (既定 20)" }, "duration_ms": { "type": "integer", "minimum": 0, "maximum": 60000, "description": "全体の時間 (既定 300)" } }, "required": ["type", "from", "to"] },
             { "type": "object", "additionalProperties": false, "properties": { "type": t("move"), "x": schema_int("X"), "y": schema_int("Y") }, "required": ["type", "x", "y"] },
             { "type": "object", "additionalProperties": false, "properties": { "type": t("scroll"), "clicks": schema_scroll_clicks(), "x": schema_int("省略可 (y と組)"), "y": schema_int("省略可 (x と組)"), "horizontal": { "type": "boolean" } }, "required": ["type", "clicks"] },
-            { "type": "object", "additionalProperties": false, "properties": { "type": t("type"), "text": { "type": "string", "description": "改行は Enter、タブは Tab。文字は IME を通らない (変換に入らない。改行とタブはキーとして送る)" }, "interval_ms": { "type": "integer", "minimum": 0, "maximum": 1000, "description": "文字の間の待ち (既定 20)" } }, "required": ["type", "text"] },
+            { "type": "object", "additionalProperties": false, "properties": { "type": t("type"), "text": { "type": "string", "description": format!("改行は Enter、タブは Tab。{TYPE_IME_NOTE}") }, "interval_ms": { "type": "integer", "minimum": 0, "maximum": 1000, "description": "文字の間の待ち (既定 20)" } }, "required": ["type", "text"] },
             { "type": "object", "additionalProperties": false, "properties": { "type": t("key"), "keys": { "type": "string", "description": "例 ctrl+s、alt+tab、enter、f5、kanji (半角/全角) (反応は IME とアプリに依る)。未知のキーの失敗の issues の message に使える名前が出る" } }, "required": ["type", "keys"] },
             { "type": "object", "additionalProperties": false, "properties": { "type": t("wait"), "ms": { "type": "integer", "minimum": 0, "maximum": 600000 } }, "required": ["type", "ms"] },
             { "type": "object", "additionalProperties": false, "properties": { "type": t("screenshot"), "path": { "type": "string", "description": "png の保存先 (.png に限る。mcp:inline なら保存せず結果の image だけ)" }, "region": schema_region(), "window": schema_capture_window(), "scale": schema_scale(), "max_edge": schema_max_edge(), "settle": schema_settle() }, "required": ["type", "path"] },
@@ -727,7 +727,7 @@ pub fn tools() -> Vec<Value> {
             "type",
             "文字を入れる",
             &format!(
-                "前面のウィンドウに文字を入れる (1 文字ずつ、既定 20 ミリ秒の間隔。改行は Enter、タブは Tab)。文字は IME を通らない (変換に入らない。改行とタブはキーとして送る)。先に focus と入力欄の click を行う。秘密は入れない。長い文字列はクライアントの制限時間に注意 (1 秒に約 50 文字)。{STEP_NOTE}。{LEAD_NOTE}"
+                "前面のウィンドウに文字を入れる (1 文字ずつ、既定 20 ミリ秒の間隔。改行は Enter、タブは Tab)。先に focus と入力欄の click を行う。{TYPE_IME_NOTE}。秘密は入れない。長い文字列はクライアントの制限時間に注意 (1 秒に約 50 文字)。{STEP_NOTE}。{LEAD_NOTE}"
             ),
             json!({ "type": "object", "additionalProperties": false, "properties": step_props(json!({ "text": { "type": "string", "description": "入れる文字列 (そのまま入る。- も文字)" }, "interval_ms": { "type": "integer", "minimum": 0, "maximum": 1000, "description": "文字の間の待ち (既定 20。0 は受け手が文字を落としうる)" } })), "required": ["text"] }),
             input_tool(false),
@@ -3049,7 +3049,7 @@ mod tests {
         assert_eq!(text_json(&r)["error"]["code"], "usage");
     }
 
-    /// `key` の説明は IME のキーと失敗の文の名前を、`type` の説明は IME を通らないことを書く (D-131)
+    /// `key` の説明は IME のキーと失敗の文の名前を、`type` の説明は IME がオンのときの乱れと `imeoff` の手順を書く (D-131、D-133)
     #[test]
     fn key_tool_schema_names_ime_keys() {
         let t = tools();
@@ -3061,7 +3061,8 @@ mod tests {
             assert!(keys.contains(name), "{name}: {keys}");
         }
         let type_tool = tool("type")["description"].as_str().unwrap();
-        assert!(type_tool.contains("IME を通らない"), "{type_tool}");
+        assert!(type_tool.contains("imeoff"), "{type_tool}");
+        assert!(type_tool.contains("順が乱れ"), "{type_tool}");
 
         let run_action = |kind: &str| {
             tool("run")["inputSchema"]["properties"]["actions"]["items"]["oneOf"]
@@ -3082,7 +3083,8 @@ mod tests {
         let run_type = run_type["properties"]["text"]["description"]
             .as_str()
             .unwrap();
-        assert!(run_type.contains("IME を通らない"), "{run_type}");
+        assert!(run_type.contains("imeoff"), "{run_type}");
+        assert!(run_type.contains("順が乱れ"), "{run_type}");
     }
 
     #[test]

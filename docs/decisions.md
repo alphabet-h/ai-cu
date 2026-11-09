@@ -1822,7 +1822,7 @@
   - OEM キーや `kana` / `eisu` の依頼が来たとき
   - `type` の IME の挙動を読み違えた事例が出たとき (要点版に足す)
   - IME の状態を読む機能が入り、自動で確かめられるようになったとき
-- 状態: 採用 (2026-11-09)
+- 状態: 採用 (2026-11-09)。`type` が IME を通らないという断定は D-133 で改めた。覆る条件の「読み違えた事例」には当たったが、要点版には足さない判断も D-133。実機テストの範囲は自前のフィクスチャの測定に限って D-133 で広げた
 - 追記 (2026-11-09、手順 33 の結果): 手動確認の手順 33 の (a) から (d) は期待どおりで、覆る条件のどれにも当たらなかった。VK_OEM_AUTO / VK_OEM_ENLW への切り替え、`imeon` / `imeoff` の取り下げ、スキャンコードの指定は要らない。(c) で `key` の文字が未確定に入ると確かめられたので、未確認のまま手引きに書かなかった点を src/guide.md と docs/reference/actions.md に足した。確かめた事実は docs/design-notes.md
 
 ### D-132 drag が補間の途中でガードに断られたときは、判定を変えず、ドラッグの途中の専用の hint で組み直し方を伝える
@@ -1880,3 +1880,5 @@
   - MS-IME 以外の環境で `key` の `a` が未確定を始めず、IME が生きているのに skipped になる事例が出たとき
   - 説明を直した後も、要点版だけを読む経路で読み違えた事例が出たとき
 - 状態: 採用 (2026-11-09)
+- 追記 (2026-11-09、測定の結果): IME がオンの IMM32 のフィクスチャでは、`type` の和文 10 字のうち漢字はそのまま `WM_CHAR` で届き、仮名 5 字 (は、が、い、で、す) は未確定に入った (`comp_str=5`、`comp_result=0`)。先頭の「今日」は未確定の前に届き、「天気良」の 3 字は未確定の最中に届いた (`chars_in_composition=3`)。読むまで未確定は開いたままで (`end=0`)、確定は起きていない。IME がオフでは順どおりで、未確定に入らない。だからこの受け手でも「IME を通らない」は成り立たず、断定を外す判断に合う。測定で言えるのは `WM_CHAR` の順と未確定の有無まで。フィクスチャは `WM_IME_COMPOSITION` を既定の処理に渡すだけで GPUI と受け方が違うので、GPUI の見た目の乱れを再現したとは言えない。手引きには原因の断定を書かない。確定の `WM_CHAR` は `ImeEnd` より後に届きうるが、この測定は確定が起きていないので影響しない。覆る条件には当たらない (オフの段は順どおりで、対照の `key` の `a` で未確定が始まり、測定は有効)
+  (via: 主エージェントが HEAD 046a311 で `cargo test --test fixture_real fixture_real_type_with_ime_on_measures_composition -- --ignored --nocapture --test-threads=1` を打ち、exit 0。ログ target/verify/ime-measure.log の `FIXTURE ime on chars="今日天気良" expected="今日は天気が良いです" in_order=false start=1 end=0 comp=5 comp_result=0 comp_str=5 chars_in_composition=3` と `FIXTURE ime off chars="今日は天気が良いです" in_order=true start=0`。実機の対照は作業領域の control_ime.py で主エージェントが打ち、ログは target/verify/ime-control.log: (A) `ImmAssociateContextEx` を常に呼ぶと `FIXTURE ime skipped no_context` で exit 0 (B) `WM_FIXTURE_IME_OPEN` で `wparam` を無視して常にオンにすると tests/fixture_real.rs:899 の `set_ime_open(false)` の断言で exit 101 (left: Some(true) right: Some(false)) (C) `wparam == 0` のとき `ImmSetOpenStatus` を呼ばず 0 を返すと tests/fixture_real.rs:910 の `Char` の断言で exit 101 (left は 5 単位、right は 10 単位)。書き戻しは sha256 の一致で確かめた)
