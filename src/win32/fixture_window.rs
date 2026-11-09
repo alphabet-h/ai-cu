@@ -13,6 +13,9 @@
 //! 別のスレッドから眠らせるときは `staller` の値 (`FixtureStaller`) を渡す (D-108)。
 //!
 //! `set_region` はフィクスチャに窓のリージョン (`SetWindowRgn`) を付け外しする (撮影の覆いの判定の実機テスト用。D-112)。
+//!
+//! `open_with_caption` は窓の上端の帯 (`FIXTURE_CAPTION_HEIGHT`) を `WM_NCHITTEST` で `HTCAPTION` にして、タイトルバーの
+//! 代わりに窓を動かせるようにする (drag の途中のガードの実機テスト用。D-132)。
 
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -32,13 +35,14 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::SetFocus;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     BS_PUSHBUTTON, CS_DBLCLKS, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
     ES_AUTOHSCROLL, ES_MULTILINE, ES_PASSWORD, ES_READONLY, GetClientRect, GetDlgItem, GetMessageW,
-    GetWindowRect, GetWindowThreadProcessId, HMENU, IDC_ARROW, IsWindowVisible, LoadCursorW, MSG,
-    PostMessageW, PostQuitMessage, RegisterClassExW, SW_HIDE, SendMessageW, SetForegroundWindow,
-    SetWindowDisplayAffinity, ShowWindow, ShowWindowAsync, TranslateMessage, WINDOW_STYLE, WM_APP,
-    WM_CHAR, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND, WM_GETTEXT, WM_GETTEXTLENGTH, WM_KEYDOWN,
-    WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT,
-    WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WNDCLASSEXW, WS_BORDER, WS_CHILD, WS_CLIPCHILDREN,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
+    GetWindowRect, GetWindowThreadProcessId, HMENU, HTCAPTION, IDC_ARROW, IsWindowVisible,
+    LoadCursorW, MSG, PostMessageW, PostQuitMessage, RegisterClassExW, SW_HIDE, SendMessageW,
+    SetForegroundWindow, SetWindowDisplayAffinity, ShowWindow, ShowWindowAsync, TranslateMessage,
+    WINDOW_STYLE, WM_APP, WM_CHAR, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND, WM_GETTEXT,
+    WM_GETTEXTLENGTH, WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+    WM_MOUSEWHEEL, WM_NCHITTEST, WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN,
+    WNDCLASSEXW, WS_BORDER, WS_CHILD, WS_CLIPCHILDREN, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    WS_VISIBLE,
 };
 
 use crate::geometry::{Point, Rect};
@@ -66,6 +70,8 @@ pub const FIXTURE_PASSWORD_ID: i32 = 103;
 /// パスワード欄つきのフィクスチャ (`open_with_password`) の子のエディットの位置と大きさ。クライアント座標 (D-090)。
 /// 右と下に親の空いた所を残す (フォーカスを親に戻すクリックの先)
 pub const FIXTURE_PASSWORD_RECT: Rect = Rect::new(10, 10, 300, 28);
+/// 帯つきのフィクスチャ (`open_with_caption`) の帯の高さ。窓の上端 (`GetWindowRect`) からのピクセル数 (D-132)
+pub const FIXTURE_CAPTION_HEIGHT: i32 = 40;
 
 const MK_LBUTTON: usize = 0x0001;
 const ERROR_CLASS_ALREADY_EXISTS: u32 = 1410;
@@ -147,6 +153,23 @@ fn stalled() -> std::sync::MutexGuard<'static, Vec<usize>> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+/// 帯つきのフィクスチャのハンドル (`open_with_caption`。D-132)。`WM_DESTROY` で外す
+static CAPTION_WINDOWS: Mutex<Vec<usize>> = Mutex::new(Vec::new());
+
+/// `CAPTION_WINDOWS` を取る。毒されていても中身を使う (`stalled` と同じ。窓の手続きの中で panic させない)
+fn caption_windows() -> MutexGuard<'static, Vec<usize>> {
+    CAPTION_WINDOWS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// 画面座標の `y` が、上端が `window_top` の窓の帯の中か (D-132)。窓より上の点は帯に数えない
+/// (マウスを捕まえている間は、窓の外の点でも `WM_NCHITTEST` が窓に届く)
+fn in_caption_band(y: i32, window_top: i32) -> bool {
+    (0..FIXTURE_CAPTION_HEIGHT).contains(&(y - window_top))
+}
+
+/// 座標は符号つきで読む (Microsoft Learn の WM_NCHITTEST の Remarks。複数モニターでは負になりうる)
 fn lparam_xy(lparam: LPARAM) -> (i32, i32) {
     let x = (lparam & 0xFFFF) as u16 as i16;
     let y = ((lparam >> 16) & 0xFFFF) as u16 as i16;
@@ -230,6 +253,15 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             stalled().retain(|h| *h != hwnd as usize);
             return 0;
         }
+        // 帯つきのフィクスチャだけ、帯の中をタイトルバーと答える。ここの lparam は画面座標で、掴んだ後の窓の移動は
+        // 既定の処理 (DefWindowProc) に任せる。帯の外と読めないときは下の既定の処理に進む (D-132)
+        WM_NCHITTEST if caption_windows().contains(&(hwnd as usize)) => {
+            if let Ok(window) = screen_rect_of(hwnd)
+                && in_caption_band(y, window.y)
+            {
+                return HTCAPTION as LRESULT;
+            }
+        }
         WM_ERASEBKGND => return 1,
         WM_PAINT => {
             let mut ps = PAINTSTRUCT::default();
@@ -259,6 +291,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             return 0;
         }
         WM_DESTROY => {
+            caption_windows().retain(|h| *h != hwnd as usize);
             // SAFETY: このスレッドのメッセージループに WM_QUIT を置くだけ。
             unsafe { PostQuitMessage(0) };
             return 0;
@@ -459,6 +492,8 @@ enum Children {
     Controls,
     /// `ES_PASSWORD` の EDIT 1 つ (`open_with_password`。D-090)
     Password,
+    /// 子なしで、窓の上端の帯が `HTCAPTION` になる (`open_with_caption`。D-132)
+    Caption,
 }
 
 fn window_thread(
@@ -492,7 +527,7 @@ fn window_thread(
         }
     }
     // 子つきのときだけ WS_CLIPCHILDREN を足す (親の WM_PAINT の塗りが子を上書きしないため)。子なしは今までどおり
-    let style = if children != Children::None {
+    let style = if matches!(children, Children::Controls | Children::Password) {
         WS_POPUP | WS_VISIBLE | WS_BORDER | WS_CLIPCHILDREN
     } else {
         WS_POPUP | WS_VISIBLE | WS_BORDER
@@ -524,7 +559,7 @@ fn window_thread(
     // SAFETY: hwnd はこのスレッドが作った有効なウィンドウ。null の入力コンテキストを結びつけて IME を外す。
     unsafe { ImmAssociateContextEx(hwnd, std::ptr::null_mut(), 0) };
     let made = match children {
-        Children::None => Ok(()),
+        Children::None | Children::Caption => Ok(()),
         Children::Controls => create_controls(hwnd, hinst),
         Children::Password => create_password_edit(hwnd, hinst),
     };
@@ -535,6 +570,10 @@ fn window_thread(
         unsafe { DestroyWindow(hwnd) };
         let _ = tx.send(Err(e));
         return;
+    }
+    // 呼び出し側へ返す前に印を付ける (返った直後のドラッグから帯が効く)。外すのは WM_DESTROY
+    if children == Children::Caption {
+        caption_windows().push(hwnd as usize);
     }
     if tx.send(Ok(hwnd as usize)).is_err() {
         // 呼び出し側が待つのをやめた (タイムアウト)。最前面のウィンドウを残さないよう、作ったスレッドで壊す
@@ -598,6 +637,13 @@ impl FixtureWindow {
     /// DPI 認識の宣言を先に済ませておくのは `open` と同じ。
     pub fn open_with_password(rect: Rect, title: &str) -> Result<FixtureWindow, String> {
         Self::open_impl(rect, title, Children::Password)
+    }
+
+    /// 窓の上端から `FIXTURE_CAPTION_HEIGHT` までの帯を掴むと窓が動くフィクスチャを開く (タイトルバーの代わり。D-132)。
+    /// 帯の押下は非クライアントのメッセージになるので、`events` には記録されない。
+    /// DPI 認識の宣言を先に済ませておくのは `open` と同じ。
+    pub fn open_with_caption(rect: Rect, title: &str) -> Result<FixtureWindow, String> {
+        Self::open_impl(rect, title, Children::Caption)
     }
 
     fn open_impl(rect: Rect, title: &str, children: Children) -> Result<FixtureWindow, String> {
@@ -891,6 +937,16 @@ mod tests {
         );
         assert!(!FIXTURE_PASSWORD_RECT.contains(Point::new(400, 300)));
         assert_eq!(FIXTURE_PASSWORD_TEXT.chars().count(), 12);
+    }
+
+    /// 帯は窓の上端から高さの手前まで。窓より上の点は帯に入らず、上端が負の座標でも同じ (D-132)
+    #[test]
+    fn in_caption_band_covers_only_the_top_strip() {
+        assert!(in_caption_band(100, 100));
+        assert!(in_caption_band(100 + FIXTURE_CAPTION_HEIGHT - 1, 100));
+        assert!(!in_caption_band(100 + FIXTURE_CAPTION_HEIGHT, 100));
+        assert!(!in_caption_band(99, 100));
+        assert!(in_caption_band(-90, -100));
     }
 
     /// 眠りを置いてよいのは、生存の印が真で、持ち主が自分の pid (0 でない) のときだけ (D-108)

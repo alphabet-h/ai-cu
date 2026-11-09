@@ -10,7 +10,7 @@ README の「操作列 JSON」の詳細。[README に戻る](../../README.md#操
 |------|------------|------|
 | `click` | `x`, `y`, `button` (`left` / `right` / `middle`、既定 `left`) | 移動して押して離す (1 回の `SendInput`)。操作列で次が `type` か `key` なら、その前に 200 ミリ秒待つ (`double_click` も同じ) |
 | `double_click` | `x`, `y`, `button` | ダブルクリック |
-| `drag` | `from: {x, y}`, `to: {x, y}`, `button`, `steps` (1 から 1000、既定 20), `duration_ms` (既定 300、最大 60000) | 始点で押し、`steps` 回に補間して移動し、終点で離す |
+| `drag` | `from: {x, y}`, `to: {x, y}`, `button`, `steps` (1 から 1000、既定 20), `duration_ms` (既定 300、最大 60000) | 始点で押し、`steps` 回に補間して移動し、終点で離す。各点の下の窓を確かめるので、窓のタイトルバーの drag は、窓がカーソルの後から動く分を見て、1 歩を掴んだ点から進む向きの窓の端までの距離の半分以下にする (1 歩 50 ms ほど。D-132) |
 | `move` | `x`, `y` | カーソルの移動 |
 | `scroll` | `clicks` (0 以外。正で上または右), `horizontal` (既定 false), `x` と `y` (省略可。組で指定すると先に移動) | 1 クリック = 1 ノッチ (WHEEL_DELTA = 120)。本物のホイールと同じく 1 ノッチずつ、間を 20 ミリ秒空けて送る (100 ノッチで約 2 秒。D-063) |
 | `type` | `text`, `interval_ms` (既定 20、最大 1000) | 文字入力。1 文字ずつ送り、文字の間を `interval_ms` だけ空ける。改行は Enter、タブは Tab、その他は `KEYEVENTF_UNICODE` (サロゲートペア対応)。文字は IME を通らない (変換に入らない。改行とタブはキーとして送る。D-131) |

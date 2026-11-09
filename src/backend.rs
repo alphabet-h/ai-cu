@@ -15,7 +15,7 @@ use crate::device::{
 use crate::geometry::{Point, Rect};
 use crate::win32;
 
-/// フィクスチャのウィンドウと、入力を許す矩形 (クライアント領域)。
+/// フィクスチャのウィンドウと、入力を許す矩形 (クライアント領域。帯つきの drag の実機テストとその帯なしの対照だけ上へ広げる。D-036 の追記、D-132)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FixtureScope {
     pub hwnd: usize,
