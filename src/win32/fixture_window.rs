@@ -2,7 +2,8 @@
 //! 受け取ったマウスとキーのメッセージを記録する。製品の経路からは使わない。
 //!
 //! IME はこのウィンドウに対して外す (`ImmAssociateContextEx`)。IME が有効だと、キーの押下が
-//! `VK_PROCESSKEY` に化けて、送ったキーを検証できない。
+//! `VK_PROCESSKEY` に化けて、送ったキーを検証できない。`open_with_ime` だけは外さず、IME のメッセージ
+//! (`WM_IME_STARTCOMPOSITION` など) も記録する (IME がオンのときの `type` の測定用。D-133)。
 //!
 //! `open_with_controls` は BUTTON と読み取り専用の EDIT を子に持つ (UIA の実機テスト用。子のメッセージは
 //! 記録しない。D-088)。`open_with_password` は `ES_PASSWORD` の EDIT を 1 つ子に持つ (D-090)。`open` は子を持たない。
@@ -30,19 +31,23 @@ use windows_sys::Win32::Graphics::Gdi::{
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Threading::GetCurrentProcessId;
-use windows_sys::Win32::UI::Input::Ime::ImmAssociateContextEx;
+use windows_sys::Win32::UI::Input::Ime::{
+    GCS_COMPSTR, GCS_RESULTSTR, ImmAssociateContextEx, ImmGetContext, ImmGetOpenStatus,
+    ImmReleaseContext, ImmSetOpenStatus,
+};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::SetFocus;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     BS_PUSHBUTTON, CS_DBLCLKS, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
     ES_AUTOHSCROLL, ES_MULTILINE, ES_PASSWORD, ES_READONLY, GetClientRect, GetDlgItem, GetMessageW,
     GetWindowRect, GetWindowThreadProcessId, HMENU, HTCAPTION, IDC_ARROW, IsWindowVisible,
-    LoadCursorW, MSG, PostMessageW, PostQuitMessage, RegisterClassExW, SW_HIDE, SendMessageW,
-    SetForegroundWindow, SetWindowDisplayAffinity, ShowWindow, ShowWindowAsync, TranslateMessage,
-    WINDOW_STYLE, WM_APP, WM_CHAR, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND, WM_GETTEXT,
-    WM_GETTEXTLENGTH, WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
-    WM_MOUSEWHEEL, WM_NCHITTEST, WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN,
-    WNDCLASSEXW, WS_BORDER, WS_CHILD, WS_CLIPCHILDREN, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
-    WS_VISIBLE,
+    LoadCursorW, MSG, PostMessageW, PostQuitMessage, RegisterClassExW, SMTO_ABORTIFHUNG, SW_HIDE,
+    SendMessageTimeoutW, SendMessageW, SetForegroundWindow, SetWindowDisplayAffinity, ShowWindow,
+    ShowWindowAsync, TranslateMessage, WINDOW_STYLE, WM_APP, WM_CHAR, WM_CLOSE, WM_DESTROY,
+    WM_ERASEBKGND, WM_GETTEXT, WM_GETTEXTLENGTH, WM_IME_COMPOSITION, WM_IME_ENDCOMPOSITION,
+    WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCHITTEST, WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP,
+    WM_SYSKEYDOWN, WNDCLASSEXW, WS_BORDER, WS_CHILD, WS_CLIPCHILDREN, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
 };
 
 use crate::geometry::{Point, Rect};
@@ -72,6 +77,10 @@ pub const FIXTURE_PASSWORD_ID: i32 = 103;
 pub const FIXTURE_PASSWORD_RECT: Rect = Rect::new(10, 10, 300, 28);
 /// 帯つきのフィクスチャ (`open_with_caption`) の帯の高さ。窓の上端 (`GetWindowRect`) からのピクセル数 (D-132)
 pub const FIXTURE_CAPTION_HEIGHT: i32 = 40;
+/// `FixtureEvent::ImeComposition` の `flags` の、未確定の文字列が変わった印 (`GCS_COMPSTR`。D-133)
+pub const FIXTURE_GCS_COMPSTR: u32 = GCS_COMPSTR;
+/// `FixtureEvent::ImeComposition` の `flags` の、確定した文字列がある印 (`GCS_RESULTSTR`。D-133)
+pub const FIXTURE_GCS_RESULTSTR: u32 = GCS_RESULTSTR;
 
 const MK_LBUTTON: usize = 0x0001;
 const ERROR_CLASS_ALREADY_EXISTS: u32 = 1410;
@@ -116,6 +125,14 @@ pub enum FixtureEvent {
     Char {
         unit: u16,
     },
+    /// `WM_IME_STARTCOMPOSITION`。IME を外さないフィクスチャ (`open_with_ime`) にだけ届く (D-133)
+    ImeStart,
+    /// `WM_IME_COMPOSITION`。`flags` は `lparam` の下位 32 ビット (`GCS_*`) (D-133)
+    ImeComposition {
+        flags: u32,
+    },
+    /// `WM_IME_ENDCOMPOSITION` (D-133)
+    ImeEnd,
 }
 
 static EVENTS: Mutex<Vec<(usize, FixtureEvent)>> = Mutex::new(Vec::new());
@@ -141,6 +158,10 @@ fn hides_on_close(hwnd: HWND) -> bool {
 /// フィクスチャの窓のスレッドを `wparam` ミリ秒だけ眠らせる自前のメッセージ (`stall`。D-105 の実機テスト用)。
 /// 枠の窓 (`overlay.rs`) が使う `WM_APP + 1..=3` と重ならない値にする (クラスは別だが、grep で見分けやすくする)
 const WM_FIXTURE_STALL: u32 = WM_APP + 0x10;
+
+/// フィクスチャの IME を窓のスレッドで開け閉めする自前のメッセージ (`set_ime_open`。D-133)。`wparam` が非 0 なら開く。
+/// 読み戻した状態 (1 か 0) を返し、入力コンテキストが無ければ -1 を返す
+const WM_FIXTURE_IME_OPEN: u32 = WM_APP + 0x11;
 
 /// `WM_FIXTURE_STALL` で眠っている間のフィクスチャのハンドル (`stall`、`is_stalled`。D-105)
 static STALLED: Mutex<Vec<usize>> = Mutex::new(Vec::new());
@@ -245,6 +266,32 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 unit: (wparam & 0xFFFF) as u16,
             },
         ),
+        // IME のメッセージは記録だけして、下の既定の処理に進む (確定の文字を WM_CHAR にするのも既定の処理)。
+        // IME を外したフィクスチャには届かない (D-133)
+        WM_IME_STARTCOMPOSITION => record(hwnd, FixtureEvent::ImeStart),
+        WM_IME_COMPOSITION => record(
+            hwnd,
+            FixtureEvent::ImeComposition {
+                flags: lparam as u32,
+            },
+        ),
+        WM_IME_ENDCOMPOSITION => record(hwnd, FixtureEvent::ImeEnd),
+        WM_FIXTURE_IME_OPEN => {
+            // SAFETY: このウィンドウプロシージャが受け取った、このスレッドの窓のハンドルを渡すだけ。
+            //         入力コンテキストが無ければ null が返り、メモリは参照しない。
+            let himc = unsafe { ImmGetContext(hwnd) };
+            if himc.is_null() {
+                return -1;
+            }
+            // SAFETY: himc は直前の ImmGetContext が返した非 null のコンテキストで、下の ImmReleaseContext まで有効。
+            //         BOOL の値を渡すだけ。
+            unsafe { ImmSetOpenStatus(himc, i32::from(wparam != 0)) };
+            // SAFETY: himc は上と同じで、状態を読むだけ。
+            let open = unsafe { ImmGetOpenStatus(himc) } != 0;
+            // SAFETY: 同じ窓のハンドルと、その窓の ImmGetContext が返した himc を 1 回だけ返す。以後 himc は使わない。
+            unsafe { ImmReleaseContext(hwnd, himc) };
+            return LRESULT::from(open);
+        }
         WM_FIXTURE_STALL => {
             // 印を立ててからロックを放して眠る (握ったまま眠ると `stall` / `is_stalled` の確認が眠りの終わりまで
             // 待たされる)。眠る間、このスレッドはメッセージを汲まない (D-105 の実機テスト用)
@@ -494,6 +541,8 @@ enum Children {
     Password,
     /// 子なしで、窓の上端の帯が `HTCAPTION` になる (`open_with_caption`。D-132)
     Caption,
+    /// 子なしで、IME を外さない (`open_with_ime`。D-133)
+    Ime,
 }
 
 fn window_thread(
@@ -556,10 +605,13 @@ fn window_thread(
         )));
         return;
     }
-    // SAFETY: hwnd はこのスレッドが作った有効なウィンドウ。null の入力コンテキストを結びつけて IME を外す。
-    unsafe { ImmAssociateContextEx(hwnd, std::ptr::null_mut(), 0) };
+    // IME の測定用のフィクスチャだけ外さない (D-133)
+    if children != Children::Ime {
+        // SAFETY: hwnd はこのスレッドが作った有効なウィンドウ。null の入力コンテキストを結びつけて IME を外す。
+        unsafe { ImmAssociateContextEx(hwnd, std::ptr::null_mut(), 0) };
+    }
     let made = match children {
-        Children::None | Children::Caption => Ok(()),
+        Children::None | Children::Caption | Children::Ime => Ok(()),
         Children::Controls => create_controls(hwnd, hinst),
         Children::Password => create_password_edit(hwnd, hinst),
     };
@@ -644,6 +696,12 @@ impl FixtureWindow {
     /// DPI 認識の宣言を先に済ませておくのは `open` と同じ。
     pub fn open_with_caption(rect: Rect, title: &str) -> Result<FixtureWindow, String> {
         Self::open_impl(rect, title, Children::Caption)
+    }
+
+    /// IME を外さないフィクスチャを開く (IME がオンのときの `type` の測定用。D-133)。子を持たず、`WM_IME_*` も
+    /// `events` に記録する。IME の開け閉めは `set_ime_open`。DPI 認識の宣言を先に済ませておくのは `open` と同じ。
+    pub fn open_with_ime(rect: Rect, title: &str) -> Result<FixtureWindow, String> {
+        Self::open_impl(rect, title, Children::Ime)
     }
 
     fn open_impl(rect: Rect, title: &str, children: Children) -> Result<FixtureWindow, String> {
@@ -850,6 +908,29 @@ impl FixtureWindow {
             )
         };
         hr >= 0
+    }
+
+    /// フィクスチャの IME を開け閉めし、読み戻した状態を返す (`open_with_ime` の測定用。D-133)。入力は送らない。
+    /// 入力コンテキストが無い、窓が固まっている、2 秒で返らないときは `None`。処理は窓のスレッドで行う
+    pub fn set_ime_open(&self, open: bool) -> Option<bool> {
+        let mut result = 0usize;
+        // SAFETY: このフィクスチャのウィンドウのハンドルに、整数だけを運ぶ自前のメッセージを送る。result は書き込み
+        //         可能な usize で、呼び出しの間生きている。窓が固まっていれば待たずに 0 が返り、メモリは参照しない。
+        let sent = unsafe {
+            SendMessageTimeoutW(
+                self.handle(),
+                WM_FIXTURE_IME_OPEN,
+                usize::from(open),
+                0,
+                SMTO_ABORTIFHUNG,
+                2000,
+                &mut result,
+            )
+        };
+        if sent == 0 || result as LRESULT == -1 {
+            return None;
+        }
+        Some(result != 0)
     }
 
     /// フィクスチャが見えているか (`IsWindowVisible`。読み取りだけ)。

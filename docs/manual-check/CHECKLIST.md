@@ -1000,7 +1000,7 @@ $env:NO_COLOR = "1"; & $cu --config=$cfg; Remove-Item Env:NO_COLOR
 
 ## 33. IME のキー (D-131)
 
-`key` の IME のキー (`kanji`、`imeon`、`imeoff`、`convert`、`nonconvert`) に MS-IME が反応することと、`type` の文字が IME を通らないことを、MS-IME が有効なメモ帳で確かめる。ai-cu に IME の状態を読む機能は無いので、IME の表示は人が目で見て AI に伝える。
+MS-IME が有効なメモ帳で、`key` の IME のキー (`kanji`、`imeon`、`imeoff`、`convert`、`nonconvert`) に MS-IME が反応することと、`type` の文字が未確定に入らないことを確かめる。ai-cu に IME の状態を読む機能は無いので、IME の表示は人が目で見て AI に伝える。
 手順 0 の設定 (基本の層。allow に notepad) のまま行い、設定ファイルを作らない。
 メモ帳に実入力を送るので、準備と GO の書き方は手順 31 と同じ: `AI_CU_MANUAL_CHECK=1` のセッションで、release のパスを文字どおり書き、GO を 1 回もらってから行う。操作は一手ずつの `focus`、`key`、`type` だけ (`run` は使わない)。送る入力はメモ帳の中だけで、撮影はしない。本文は `text` で読む。
 
