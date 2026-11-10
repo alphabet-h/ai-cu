@@ -53,6 +53,7 @@ ai-cu double-click X Y / ai-cu drag X1 Y1 X2 Y2 / ai-cu move X Y / ai-cu scroll 
 - `--shot PATH` は、操作の後に `--settle-ms` (既定 300 ミリ秒) 待ってから撮る (操作、待ち、撮影の 3 操作の操作列になるので、出力の `executed` は 3。`--settle-ms 0` なら待ちが無く 2。`auto` なら画面が落ち着くまで (最長 3 秒) 待って撮り、2。落ち着かずに撮れば `settled` が false)。この撮影は操作列の `screenshot` と同じ扱いで、無操作の判定 (終了コード 10) は掛からない。だから「押して撮る」は 1 回で済み、`shot` を別に呼んで 3 秒待たなくてよい
 - 撮る範囲は `--window PROCESS` (対象のウィンドウ。題名で絞るなら `--window-title TEXT`) か `--region X,Y,W,H` (`windows` の `rect`)。`--window` の矩形は撮る直前に解くので、ウィンドウが動いても追従する。出力の `screenshots[].window` で、撮ったウィンドウが意図したものかを確かめる。見つからない / 最小化 / 画面の外なら終了コード 12 (操作は済んでいる)。どちらも省くと全画面になる (既定の設定では拒否)
 - 撮影は「その矩形に見えているもの」を撮る (ウィンドウ自身の中身ではない)。対象の一部が別のウィンドウに隠れていると、そのウィンドウの中身 (人の作業中の画面) が写り込むので、`--window` は撮らずに終了コード 7 で止まる。先に `focus` で前面にしてから撮る。`--region` には隠れの確認が無い (拒否されたウィンドウが見えていれば、どちらも 7) ので、ウィンドウを撮るなら `--window` を使う
+- 隠れの 7 の `error.detail` は、覆っている窓の `window`、隠れを見つけた点の `point`、その窓の見えている部分の外接矩形の `visible`、`see_through`。`see_through` は、その窓が deny の窓の判定で覆いに数えない窓か (透けうる窓など。条件は ai-cu の安全機能の文書) を言う。隠れの判定はこの値を見ないので、真でも 7。撮影の対象の 12 (許可された窓が最小化、または画面の外) と、起動した側の窓を撮ろうとした 7 も `error.detail.window` を持つ。`focus` が通っても同じ 7 が続くなら、`focus` を繰り返さず `find` と `text` で読み、画像が要るならその窓 (`error.detail.window`) を片付けてもらうよう人間に頼む
 - `--scale 0.5` か `--max-edge N` (長辺の上限) で画像を縮めて保存できる
 - `--shot` は自分の操作の結果を見るためのもの。撮るためだけに操作を足さない (人が操作中なら `shot` が断るのと同じ理由)
 - 文字が複数行、または引用符を含むなら、`ai-cu type -` で標準入力から読む。座標は負でもよい (複数モニタ)
@@ -76,6 +77,7 @@ ai-cu text --window notepad.exe --type document    # 文書の本文を読む
 - 何があるか分からないときは、先に `tree` で木を見る。行は `種類 "名前" @x,y` で `@x,y` は center。名前の無い入れ物と画面外は畳む (`--all` で全部)。数の読み方は出力の `note`
 - 要素の名前は表示言語に依る (「保存」/ "Save")。`find` で実際の名前を見てから使う
 - 対象のウィンドウが見つからない / 最小化なら 12。別のウィンドウに隠れていても読める (撮影と違う)
+- 起動の直後の窓では、`find` が `ok: true` の空の結果を返し、2 回目で取れた事例がある。空を「無い」と決めず、`wait_for` の `element` で待つか、1 回読み直す
 
 条件がそろうまで待つなら `wait_for` (読むだけ。許可は `find` と同じ)。起動やクリックの後に、固定の `wait` や「撮って見直す」往復の代わりに使う。
 
@@ -171,7 +173,7 @@ ai-cu wait-for notepad.exe --title "保存の確認" --absent                   
 
 どこまで実行したか: 操作に入った後の失敗 (`run` と一手ずつの操作) には、最上位に成功と同じ `executed` (済んだ操作の数。`action_index` と等しい)、`screenshots`、`focused` などと、失敗した操作が入力や前面化を一部でも起こしたかの `partial` が付く。`executed` が無い失敗は、操作に入る前 (検証など) で、何も送っていない。`executed` が 1 以上か `partial` が true なら、`hint` の頭に実行済みの一文が付く。操作ごと打ち直さず (クリックが二重になる)、`windows` や `shot` で状態を見直してから残りを送る。
 
-`error.detail` の状況 (題名は入れない): 7 (入力のガード、`focus` と `close` の対象、撮影) は対象のウィンドウの `window` (`process`、`class`、`pid`、`hwnd`。届く先が無ければ null) と、マウスなら点の `point`、撮影なら window は拒否された窓 (応答しない deny の窓の代わりのゴーストで断れば、class Ghost のゴースト) で、見えている部分の外接矩形の `visible`。6 の人のマウスでの停止は `cursor`、`from`、`expected`、`distance_px`。10 (`focus` と `close`) は `idle_ms` と `min_idle_ms`、10 の `keys_held` は `keys` と `buttons`。14 は `input_desktop` (名前か null。`reason` は `screensaver`、`other_desktop`、`locked` のどれか)。15 は `timeout_ms`、`checks`、`unmet` (`window` / `element` / `text`、画面の待ちは `stable` / `change`)、`window` (題名なし。無ければ null)、画面の待ちは `rect` と `last_changed_ratio` も。16 は待った長さの `waited_ms`。
+`error.detail` の状況 (題名は入れない): 7 (入力のガード、`focus` と `close` の対象、撮影) は対象の `window` (`process`、`class`、`pid`、`hwnd`。無ければ null) と、マウスなら点の `point`。撮影の window は拒否された窓 (ゴーストなら class Ghost) か、隠れなら覆う窓 (`point`、`see_through` も) か、起動した側の窓で、前の 2 つは見えている部分の外接矩形の `visible`。6 の人のマウスでの停止は `cursor`、`from`、`expected`、`distance_px`。10 (`focus` と `close`) は `idle_ms` と `min_idle_ms`、10 の `keys_held` は `keys` と `buttons`。14 は `input_desktop` (名前か null。`reason` は `screensaver`、`other_desktop`、`locked` のどれか)。15 は `timeout_ms`、`checks`、`unmet` (`window` / `element` / `text`、画面の待ちは `stable` / `change`)、`window` (題名なし。無ければ null)、画面の待ちは `rect` と `last_changed_ratio` も。16 は待った長さの `waited_ms`。
 
 `error.fix` が無いときに許可を頼むなら、設定の書き方で伝える。アプリは実行ファイル名 (例 `notepad.exe`)、領域は `x,y,w,h`、キーは `ctrl+s` の形。
 

@@ -135,8 +135,11 @@ pub struct World {
     pub capture_calls: usize,
     /// 撮影の判定 (D-077) に使う Z 順の窓 (前面から奥へ。`stack_windows` が返す)。既定は空
     pub stack: Vec<StackWindow>,
-    /// `stack_windows` が呼ばれた回数 (deny の無い設定では列挙しないことを確かめる。D-077)
+    /// `stack_windows` が呼ばれた回数 (失敗した読みも数える)。撮れたときの deny の無い設定では列挙しない (D-077)。
+    /// 隠れの 7 では deny によらず 1 回 (D-135)
     pub stack_calls: usize,
+    /// 真なら `stack_windows` が `Err(BackendError::Os(..))` を返す (D-135)。既定は偽
+    pub stack_err: bool,
     /// n 回目 (0 始まり) の `capture` は、先頭から `frames[n]` 点 (4 バイト単位) を 0x00、残りを 0x7f にした画像
     /// (n が範囲外なら最後の値、空なら全点 0x7f。画面の待ちを模す。D-081)
     pub frames: Vec<usize>,
@@ -275,6 +278,7 @@ impl World {
             capture_calls: 0,
             stack: Vec::new(),
             stack_calls: 0,
+            stack_err: false,
             frames: Vec::new(),
             capture_rects: Vec::new(),
             tree: Vec::new(),
@@ -464,6 +468,9 @@ impl Desktop for MockDesktop {
     fn stack_windows(&self) -> Result<Vec<StackWindow>, BackendError> {
         let mut w = self.0.borrow_mut();
         w.stack_calls += 1;
+        if w.stack_err {
+            return Err(BackendError::Os("EnumWindows".into()));
+        }
         Ok(w.stack.clone())
     }
 

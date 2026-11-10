@@ -161,7 +161,7 @@ pub const WINDOWS_EMPTY_HINT: &str = "許可されたアプリの見えるウィ
 const MCP_MOUSE_GUARD_HINT: &str = "何も送っていない。クリックする点の下に、許可されていないウィンドウ (タスクバーや別のアプリ) がある。先に focus の道具で対象を前面にし (run なら先頭に focus)、windows の道具の rect の中の点を使う。focus が focus_failed なら、繰り返さず人間に前面に出してもらう";
 const MCP_KEYBOARD_GUARD_HINT: &str = "何も送っていない。キーと文字は前面のウィンドウに届くが、前面が許可されたウィンドウではない。先に focus の道具で対象を前面にしてから送る (run なら先頭に focus)。focus が focus_failed なら、繰り返さず人間に前面に出してもらう";
 const MCP_HOST_WINDOW_HINT: &str = "何も送っていない。届く先が ai-cu を起動した側 (エージェント、シェル、端末) のウィンドウなので、設定にかかわらず送らない。focus の道具で対象を前面にするのを 1 回だけ試し、focus_failed なら繰り返さず人間に前面に出してもらう";
-const MCP_CAPTURE_OCCLUDED_HINT: &str = "何も撮っていない。対象のウィンドウの一部が別のウィンドウに隠れていて、矩形で撮るとそのウィンドウの中身が写り込む。中身を読むだけなら find と text の道具で足りる (隠れていても読める)。画像が要るなら focus の道具を 1 回試し、focus_failed なら人間に前面に出してもらう";
+const MCP_CAPTURE_OCCLUDED_HINT: &str = "何も撮っていない。対象のウィンドウの一部が別のウィンドウ (error.detail の window。見えている部分は visible) に隠れていて、矩形で撮るとそのウィンドウの中身が写り込む。中身を読むだけなら find と text の道具で足りる (隠れていても読める)。画像が要るなら focus の道具を 1 回試し、focus_failed なら人間に前面に出してもらう。focus が通っても同じ foreground_guard が続くなら、繰り返さず find と text で読み、画像が要るならその窓を片付けてもらうよう人間に頼む";
 /// 撮る矩形に、設定で拒否されたウィンドウが見えている (MCP。D-077)
 const MCP_CAPTURE_SENSITIVE_HINT: &str = "何も撮っていない。撮る矩形に、設定で拒否されたウィンドウ (error.detail の window。見えている部分は visible) が見えている。region (と全画面) なら、そのウィンドウにかからないよう region を狭めるか、window で対象のウィンドウだけを撮る。window で撮っていて対象の手前に重なっているなら、先に focus の道具で対象を前面にしてから撮る (focus は 1 回だけ。focus_failed なら繰り返さない)。中身を読むだけなら find と text の道具で足りる。そのウィンドウを閉じる・動かすのは人間に頼む。設定を緩めるよう頼まない";
 const MCP_HOST_UNKNOWN_HINT: &str = "何も送っていない。ai-cu を起動した側のプロセスを特定できないので、実入力をすべて止めている。focus や再試行では変わらない。読むだけの道具 (windows、shot、find、tree、text、status) は使える。人間に ai-cu の起動のしかたを確かめてもらう";
@@ -491,6 +491,29 @@ mod tests {
         for h in [Hint::FocusHostFront, Hint::FocusRefusedUnknown] {
             assert!(!hint(h, Surface::Cli).contains("人が別のアプリ"), "{h:?}");
         }
+    }
+
+    /// 撮影の隠れの MCP の文は、覆う窓を error.detail で読めることと、focus が通っても foreground_guard が続くときの次の手を書く。
+    /// 他の MCP の文と同じく失敗は code の名前で書く (終了コードの数は CLI の書き方)。
+    /// 写り込みの守りの迂回になる region は勧めず、原因が未確認の IME の名は書かない。CLI の文は D-056 の固定のまま (D-135)
+    #[test]
+    fn mcp_occluded_hint_says_what_to_do_when_focus_does_not_help() {
+        let mcp = hint(Hint::CaptureOccluded, Surface::Mcp);
+        for s in ["error.detail", "find", "人間"] {
+            assert!(mcp.contains(s), "{s}: {mcp}");
+        }
+        // 次の手は「focus が通っても」の後ろに、繰り返さないことと、窓を片付けてもらうことを書く
+        let (_, after) = mcp
+            .split_once("focus が通っても同じ foreground_guard が続くなら")
+            .unwrap_or_else(|| panic!("focus が通っても: {mcp}"));
+        for s in ["繰り返さず", "find", "片付け", "人間"] {
+            assert!(after.contains(s), "{s}: {after}");
+        }
+        for s in ["region", "IME"] {
+            assert!(!mcp.contains(s), "{s}: {mcp}");
+        }
+        let cli = hint(Hint::CaptureOccluded, Surface::Cli);
+        assert!(!cli.contains("focus が通っても"), "{cli}");
     }
 
     /// `Hint::ALL` が全ての種類を 1 回ずつ並べている (総当たりの検査はこの一覧を回るので、足し忘れを捕まえる)。
