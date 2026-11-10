@@ -754,7 +754,7 @@ pub fn tools() -> Vec<Value> {
             "run",
             "操作列を実行する",
             &format!(
-                "操作の配列を順に実行する (click、double_click、drag、move、scroll、type、key、wait、screenshot、focus、close、wait_for、wait_stable、wait_change)。wait_stable は画面が落ち着くまで、wait_change は変わるまで待つ (region か window を 100 ms ごとに撮って比べる。UIA に要素を出さないアプリの描画待ちに使う。時間切れは wait_timeout で unmet が stable / change)。決まった短い手順に向く (1 回の呼び出しで済む)。先頭に focus を置く。クライアントの制限時間 (Codex は既定 60 秒) に収まる長さにする。dry_run なら装置に触れず、検証と展開した手順 (plan) だけを返す。screenshot の path に mcp:inline を書くとファイルに保存せず結果の image だけになる。結果は executed、screenshots (screenshot に settle を付けると、撮る前に落ち着くのを待ち settled と settle_ms が付く)、focused、elapsed_ms (close があれば closed。gone は見える窓から消えたか (破棄とは限らない)、hidden が true なら隠れただけでプロセスは動いている。gone が false なら撮って確かめる。wait_for、wait_stable、wait_change があれば waited。画面の待ちは rect と、wait_change なら changed_ratio)。失敗でも、操作に入った後なら executed (どこまで実行したか) と partial が返る (無ければ何も送っていない)。1 以上か partial なら操作ごと打ち直さない。{LEAD_NOTE}"
+                "操作の配列を順に実行する (click、double_click、drag、move、scroll、type、key、wait、screenshot、focus、close、wait_for、wait_stable、wait_change)。wait_stable は画面が落ち着くまで、wait_change は変わるまで待つ (region か window を 100 ms ごとに撮って比べる。UIA に要素を出さないアプリの描画待ちに使う。時間切れは wait_timeout で unmet が stable / change)。決まった短い手順に向く (1 回の呼び出しで済む)。先頭に focus を置く。クライアントの制限時間 (Codex は既定 60 秒) に収まる長さにする。dry_run なら装置に触れず、検証と展開した手順 (plan) だけを返す。screenshot の path に mcp:inline を書くとファイルに保存せず結果の image だけになる。失敗の結果では image を捨てるクライアントがある (撮り直せない画面は path にも保存する)。結果は executed、screenshots (screenshot に settle を付けると、撮る前に落ち着くのを待ち settled と settle_ms が付く)、focused、elapsed_ms (close があれば closed。gone は見える窓から消えたか (破棄とは限らない)、hidden が true なら隠れただけでプロセスは動いている。gone が false なら撮って確かめる。wait_for、wait_stable、wait_change があれば waited。画面の待ちは rect と、wait_change なら changed_ratio)。失敗でも、操作に入った後なら executed (どこまで実行したか) と partial が返る (無ければ何も送っていない)。1 以上か partial なら操作ごと打ち直さない。{LEAD_NOTE}"
             ),
             json!({ "type": "object", "additionalProperties": false, "properties": { "actions": { "type": "array", "minItems": 1, "items": schema_action() }, "dry_run": schema_dry_run(), "inline": schema_inline() }, "required": ["actions"] }),
             input_tool(false),
@@ -5751,6 +5751,8 @@ mod tests {
         let d = run["description"].as_str().unwrap();
         assert!(d.contains("hidden"), "{d}");
         assert!(d.contains("破棄とは限らない"), "{d}");
+        // 失敗の結果の mcp:inline の画像は捨てるクライアントがある (D-136)
+        assert!(d.contains("失敗の結果では image を捨てる"), "{d}");
         assert!(d.chars().count() <= 2048, "{}", d.chars().count());
     }
 

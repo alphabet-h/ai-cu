@@ -136,6 +136,7 @@ ai-cu wait-for notepad.exe --title "保存の確認" --absent                   
 - 1 回の操作列は短く保つ (数個から十数個)。長い手順は、区切りごとに撮って確かめながら進める
 - `screenshot`、`wait_stable`、`wait_change` の `region` は必ず書く (省略すると全画面になる)。`path` は絶対パスで書く (相対パスは ai-cu を起動した作業ディレクトリが基準)
 - `wait_stable` / `wait_change` は撮るたびに `screenshot` と同じ判定を通す (待つ間に deny の窓が現れたら 7)。動き続ける部分 (動画、スピナー、点滅) は `region` から外すか `threshold` を上げる。狭い `region` の `wait_change` はキャレットの点滅でも満たしうる
+- MCP の `run` の途中で失敗すると、それまでに撮った `mcp:inline` の画像はクライアントに届かないことがある (Claude Code は失敗の結果の画像を捨てる)。撮り直せない画面は `path` にファイルの保存先を書くか、失敗しうる操作の前で run を分ける
 - JSON はファイルに書いて `ai-cu run <file>` で渡すのが確実 (シェルによっては、複数行の文字列を標準入力に渡しにくい)
 
 ## 終わり方の例 (保存せずに閉じる)
@@ -186,7 +187,7 @@ ai-cu wait-for notepad.exe --title "保存の確認" --absent                   
 
 ## MCP の道具として呼ばれているとき
 
-ai-cu は MCP サーバー (`ai-cu mcp`) としても動く。そのときは、CLI のサブコマンド (全文 `guide --full` の「一手ずつ操作する」) が同じ名前の道具 (`windows`、`shot`、`find`、`tree`、`text`、`wait_for`、`focus`、`click`、`double_click`、`drag`、`move`、`scroll`、`type`、`key`、`close`、`run`、`config`、`guide`) になり、引数は道具の inputSchema のとおり (一手ずつの `--shot` は `shot` オブジェクト)。結果は CLI と同じ JSON が text で返り、撮った画像は `image` としてそのまま見える (既定で長辺 1568 に縮む。`max_edge`。`path` を書けばファイルにも保存する)。失敗は `isError` の結果に CLI と同じ `error` (`exit_code` と `hint`) と最上位の `executed`、`partial` が入るので、この手引きの終了コードの表がそのまま使える。
+ai-cu は MCP サーバー (`ai-cu mcp`) としても動く。そのときは、CLI のサブコマンド (全文 `guide --full` の「一手ずつ操作する」) が同じ名前の道具 (`windows`、`shot`、`find`、`tree`、`text`、`wait_for`、`focus`、`click`、`double_click`、`drag`、`move`、`scroll`、`type`、`key`、`close`、`run`、`config`、`guide`) になり、引数は道具の inputSchema のとおり (一手ずつの `--shot` は `shot` オブジェクト)。結果は CLI と同じ JSON が text で返り、撮った画像は成功なら `image` としてそのまま見える (既定で長辺 1568 に縮む。`max_edge`。`path` を書けばファイルにも保存する)。失敗は `isError` の結果に CLI と同じ `error` (`exit_code` と `hint`) と最上位の `executed`、`partial` が入るので、この手引きの終了コードの表がそのまま使える。
 クライアントの制限時間 (Codex は既定 60 秒) に収まるよう、`run` は短く保つ。制限時間で切れた呼び出しをそのまま再発行せず、`windows` や `shot` で状態を見直す。人が実行を止めた直後 (cooldown) を含め、10 や 14 で断られたら、再試行の前に MCP だけの道具 `status` で原因と待つ時間 (`retry_after_ms`) を読む。人から青枠が出ないと言われたとき、または画面を変える道具が毎回 `lead_ms` ほど長くかかるときは、`status` の `indicator.frame` を読む (枠は撮影に写らないので、自分では気づけない)。別の ai-cu が画面を操作している間は、その終わりまで錠を待ってから `lead_ms` をまるごと待つので長くなる (30 秒で待ちきれなければ 16)。ai-cu を起動した側のウィンドウは、設定にかかわらず対象にならない (7)。MCP の `hint` は、CLI の書き方ではなく道具の名前で書いてある。道具が終了コードも無く拒否されるならクライアントの判定 (auto モードで allow か ask のルールが無い、dontAsk モードで毎回人の確認が要る `mcp.require_approval` の道具)。人間にルールかモードを見直してもらう。
 
 前面化について: 常駐の MCP サーバーは、起動の後に人が何か入力すると、前面化の権利を失う。そこで `focus` は、自分の呼び出しが断られて前面があなたの端末 (ai-cu を起動した側) なら、使い捨ての補助プロセスを起動して前面化を 1 回だけ頼む。前面が人の使っている別のアプリなら、補助プロセスも使わない (人の操作を奪わない)。補助を使ったかは、失敗の `error.detail` の `helper` と `helper_result` で分かる。それでも 11 (`reason` が `refused_host_front`) なら、`focus` を繰り返さず、人間に対象のウィンドウを前面に出してもらい (クリックでよい)、`windows` で対象の `foreground` が true になったのを確かめてから続ける。中身を読むだけなら、前面でなくても `find` と `text` で読める。起動した側を特定できないとき (7、`reason` が `host_unknown`) は、実入力の道具がすべて断られる (表の 7)。片付けで閉じるなら `close` (前面にしなくてよい)。
