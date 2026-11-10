@@ -2030,6 +2030,23 @@ mod tests {
         assert!(line.contains("起動した側"), "{line}");
     }
 
+    /// 全文の操作列 JSON の節は、run の途中の失敗で mcp:inline の画像が届かないことがあることと回り道を書き、
+    /// その行は要点版に入れない。要点版の MCP の節は画像が見えるのを成功に限る (D-136)
+    #[test]
+    fn guide_full_says_inline_images_may_be_dropped_on_failure() {
+        let lines: Vec<&str> = GUIDE
+            .lines()
+            .filter(|l| l.contains("mcp:inline") && l.contains("捨てる"))
+            .collect();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        let line = lines[0];
+        assert!(line.contains("path"), "{line}");
+        assert!(line.contains("run を分ける"), "{line}");
+        let s = guide_summary();
+        assert!(!s.contains(line), "{line}");
+        assert!(s.contains("成功なら `image`"), "{s}");
+    }
+
     /// 全文の撮影の節は、`focus` が通っても隠れの 7 が続くときの次の手を書き、`region` を勧めない (D-135)
     #[test]
     fn guide_says_what_to_do_when_focus_does_not_clear_occlusion() {
