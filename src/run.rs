@@ -62,12 +62,13 @@ pub const SCREEN_WAIT_HINT: &str = "画面が時間内に落ち着かなかっ�
 
 /// 矩形の中を間引いて見て、対象 (と対象に所有されたウィンドウ) 以外のウィンドウが上にあれば、それを返す (D-053 の追記)。
 /// 画面の矩形の撮影は、そこに見えているものを撮る (ウィンドウ自身の中身ではない) ので、隠れている部分には
-/// 別のアプリ (deny の端末など) の中身が写り込む。角の丸み (Windows 11) を避けて内側から見る
+/// 別のアプリ (deny の端末など) の中身が写り込む。角の丸み (Windows 11) を避けて内側から見る。
+/// 見つけた点も返す (隠れの 7 の `error.detail.point`。D-135)
 fn occluding_window(
     desktop: &dyn Desktop,
     rect: &Rect,
     target: usize,
-) -> Result<Option<WindowInfo>, BackendError> {
+) -> Result<Option<(WindowInfo, Point)>, BackendError> {
     const INSET: i64 = 8;
     const STEP: usize = 64;
     let (x0, y0) = (i64::from(rect.x) + INSET, i64::from(rect.y) + INSET);
@@ -85,11 +86,12 @@ fn occluding_window(
     };
     for y in axis(y0, y1) {
         for x in axis(x0, x1) {
-            if let Some(w) = desktop.window_at(Point::new(x as i32, y as i32))?
+            let p = Point::new(x as i32, y as i32);
+            if let Some(w) = desktop.window_at(p)?
                 && w.hwnd != target
                 && desktop.owner_root(w.hwnd) != target
             {
-                return Ok(Some(w));
+                return Ok(Some((w, p)));
             }
         }
     }
@@ -262,7 +264,9 @@ pub fn resolve_capture_window(
 ) -> Result<(Rect, ShotWindow), AppError> {
     match resolve_capture_window_parts(desktop, policy, screen, target, host_pids, surface)? {
         Resolved::Clear(rect, w) => Ok((rect, ShotWindow::of(&w))),
-        Resolved::Occluded(cover) => Err(occluded_error(target, &cover, surface, None)),
+        Resolved::Occluded { cover, point, rect } => Err(occluded_error(
+            desktop, target, &cover, point, &rect, surface, None,
+        )),
     }
 }
 
@@ -271,9 +275,14 @@ enum Resolved {
     /// 隠れていない。撮影の矩形の規則 (領域、全画面) も通った。見つけたウィンドウは `WindowInfo` のまま
     /// (画面の待ちの 15 の `error.detail.window` は `window_detail` で作るので、プロセス、クラス、pid が要る。D-081)
     Clear(Rect, WindowInfo),
-    /// 対象の矩形の中に別のウィンドウ (この値) が上にある。矩形の規則はまだ通していない
-    /// (隠れの 7 を矩形の規則より先に出す)
-    Occluded(WindowInfo),
+    /// 対象の矩形の中に別のウィンドウ (`cover`) が上にある。矩形の規則はまだ通していない
+    /// (隠れの 7 を矩形の規則より先に出す)。`point` は隠れを見つけた点、`rect` は画面で切り詰めた撮る矩形
+    /// (どちらも隠れの 7 の `error.detail` に使う。D-135)
+    Occluded {
+        cover: WindowInfo,
+        point: Point,
+        rect: Rect,
+    },
 }
 
 /// 撮る対象の表示 (`process=..., title=...`)。message に使う
@@ -285,16 +294,32 @@ fn capture_target_shown(target: &WindowTarget) -> String {
 }
 
 /// 対象が別のウィンドウ `cover` に隠れているときの 7 (D-053 の追記)。`waited` は操作列の `grab` が猶予を使い切った
-/// ときの待った時間 (D-082)。message の末尾に添えるだけで、kind と hint は同じ
+/// ときの待った時間 (D-082)。message の末尾に添えるだけで、kind と hint は同じ。
+/// `error.detail` に、覆う窓の `window` (題名なし) と隠れを見つけた `point` を入れる。重なりの一覧
+/// (`stack_windows`) をこの失敗のときだけ 1 回読み (deny の有無によらない)、覆う窓が一覧にあれば `see_through`
+/// (deny の窓の判定で覆いに数えない窓か。隠れの判定はこの値を見ない) を、見えている部分が残れば
+/// その外接矩形の `visible` (機密の 7 と同じ定義) を足す。読めなければ省き、7 のまま (D-135)
 fn occluded_error(
+    desktop: &dyn Desktop,
     target: &WindowTarget,
     cover: &WindowInfo,
+    point: Point,
+    rect: &Rect,
     surface: Surface,
     waited: Option<u64>,
 ) -> AppError {
     let waited = waited
         .map(|ms| format!(" ({ms} ms 待っても隠れたまま)"))
         .unwrap_or_default();
+    let mut detail = serde_json::json!({ "window": window_detail(cover), "point": point });
+    if let Ok(stack) = desktop.stack_windows()
+        && let Some(i) = stack.iter().position(|s| s.info.hwnd == cover.hwnd)
+    {
+        detail["see_through"] = serde_json::json!(stack[i].see_through);
+        if let Some(visible) = visible_in_stack(&stack, i, rect) {
+            detail["visible"] = serde_json::json!(visible);
+        }
+    }
     AppError::new(
         ErrorKind::ForegroundGuard,
         format!(
@@ -304,6 +329,7 @@ fn occluded_error(
         ),
     )
     .with_hint(hint(Hint::CaptureOccluded, surface))
+    .with_detail(detail)
 }
 
 /// `resolve_capture_window` の本体。隠れの判定までを行い、隠れていれば `Resolved::Occluded` を返す (D-082)。
@@ -355,8 +381,10 @@ fn resolve_capture_window_parts(
         )
     })?;
     // 隠れている部分には別のウィンドウの中身が写り込むので、撮らない (前面にしてから撮る)
-    if let Some(cover) = occluding_window(desktop, &rect, w.info.hwnd).map_err(backend_error)? {
-        return Ok(Resolved::Occluded(cover));
+    if let Some((cover, point)) =
+        occluding_window(desktop, &rect, w.info.hwnd).map_err(backend_error)?
+    {
+        return Ok(Resolved::Occluded { cover, point, rect });
     }
     policy
         .check_capture_rect(&rect)
@@ -430,15 +458,7 @@ fn sensitive_window_hit(
                 _ => continue,
             },
         };
-        let Some(overlap) = w.rect.intersection(rect) else {
-            continue;
-        };
-        let covers: Vec<Rect> = stack[..i]
-            .iter()
-            .filter(|c| !c.see_through)
-            .map(|c| c.rect)
-            .collect();
-        if let Some(visible) = bounding(&visible_parts(overlap, &covers)) {
+        if let Some(visible) = visible_in_stack(stack, i, rect) {
             return Some(SensitiveHit {
                 window: w.info.clone(),
                 visible,
@@ -448,6 +468,19 @@ fn sensitive_window_hit(
         }
     }
     None
+}
+
+/// `stack[index]` の窓の、撮る矩形 `rect` に見えている部分の外接矩形 (D-077、D-135)。枠と `rect` の重なりから、
+/// それより前面の窓のうち覆いとみなすもの (`see_through` でない) の矩形を引く。重ならない、または残らなければ None。
+/// 機密の 7 (`sensitive_window_hit`) と隠れの 7 (`occluded_error`) の `visible` が共有する
+fn visible_in_stack(stack: &[StackWindow], index: usize, rect: &Rect) -> Option<Rect> {
+    let overlap = stack.get(index)?.rect.intersection(rect)?;
+    let covers: Vec<Rect> = stack[..index]
+        .iter()
+        .filter(|c| !c.see_through)
+        .map(|c| c.rect)
+        .collect();
+    bounding(&visible_parts(overlap, &covers))
 }
 
 /// 撮る直前の、機密のウィンドウの判定 (D-077)。どの層にも deny のプロセスかクラスが無ければ窓を列挙しない。
@@ -2262,11 +2295,20 @@ impl Executor<'_> {
                 ctx.surface,
             )? {
                 Resolved::Clear(r, w) => break (r, Some(w)),
-                Resolved::Occluded(cover) => {
+                Resolved::Occluded { cover, point, rect } => {
                     let now = self.clock.now_ms();
                     let waited = now.saturating_sub(*occluded_since.get_or_insert(now));
                     if waited >= OCCLUDED_GRACE_MS {
-                        return Err(occluded_error(t, &cover, ctx.surface, Some(waited)));
+                        // 重なりの一覧は猶予を使い切ったこの 1 回だけ読む (周回ごとには読まない。D-135)
+                        return Err(occluded_error(
+                            self.desktop,
+                            t,
+                            &cover,
+                            point,
+                            &rect,
+                            ctx.surface,
+                            Some(waited),
+                        ));
                     }
                     self.sleep(STOP_POLL_MS.min(OCCLUDED_GRACE_MS - waited), state, ctx)?;
                 }
@@ -4346,6 +4388,8 @@ mod tests {
         let w = world.borrow();
         assert_eq!(w.capture_calls, 1);
         assert!((120..OCCLUDED_GRACE_MS).contains(&w.now_ms), "{}", w.now_ms);
+        // 隠れが解けて撮れたときは、deny の無い設定で重なりの一覧を読まない (D-077、D-135)
+        assert_eq!(w.stack_calls, 0);
     }
 
     /// 猶予の間に窓が消えれば (閉じかけの窓に次の窓が重なっていた)、隠れの 7 ではなく 12。撮らない
@@ -4385,6 +4429,12 @@ mod tests {
         assert!(e.message.contains("隠れている"), "{}", e.message);
         assert!(e.message.contains("ms 待っても隠れたまま"), "{}", e.message);
         assert_eq!(e.hint.as_deref(), Some(CAPTURE_OCCLUDED_HINT));
+        // 隠れを見つけた点 (メモ帳の矩形の内側 8 の左上。D-135)
+        assert_eq!(
+            detail(&e)["point"],
+            serde_json::json!({ "x": 108, "y": 108 })
+        );
+        assert_eq!(detail(&e)["window"]["process"], "chrome.exe");
         assert!(images.written.is_empty());
         let w = world.borrow();
         assert_eq!(w.capture_calls, 0);
@@ -4393,6 +4443,9 @@ mod tests {
             "{}",
             w.now_ms
         );
+        // 重なりの一覧は猶予を使い切った 1 回だけ読む (周回ごとには読まない。D-135)
+        assert!(w.find_window_calls > 1, "{}", w.find_window_calls);
+        assert_eq!(w.stack_calls, 1);
     }
 
     /// 隠れ以外の 12 / 4 / 7 は待たずに返す (解き直さない): 見つからない、許可の外れ (deny のクラス)、
@@ -4502,6 +4555,137 @@ mod tests {
         assert_eq!(w.capture_calls, 0);
         assert_eq!(w.find_window_calls, 2);
         assert_eq!(w.now_ms, 2 * STOP_POLL_MS);
+    }
+
+    // --- 隠れの 7 の error.detail (D-135) ---
+
+    /// 撮る矩形 (メモ帳の枠)
+    const OCC_RECT: Rect = Rect::new(100, 50, 640, 480);
+    /// 覆う窓 (chrome、0x11) の枠
+    const OCC_COVER: Rect = Rect::new(500, 300, 400, 400);
+
+    /// 撮る矩形 `OCC_RECT` のメモ帳 (0x20) の右下を、枠 `OCC_COVER` の chrome (0x11) が覆う世界。重なりの一覧は `stack`
+    fn occluded_world(stack: Vec<StackWindow>) -> World {
+        let mut np = top(0x20, "Notepad.exe", "a.txt - メモ帳");
+        np.rect = Some(OCC_RECT);
+        let mut w = World::new();
+        w.default_window = Some(np.info.clone());
+        w.top = vec![np];
+        w.windows_at = vec![(OCC_COVER, chrome())];
+        w.stack = stack;
+        w
+    }
+
+    /// `resolve_capture_window` を直接呼び、隠れの 7 を返す (kind も確かめる)
+    fn resolve_occluded(world: &Rc<RefCell<World>>) -> AppError {
+        let desktop = MockDesktop(world.clone());
+        let screen = world.borrow().screen;
+        let target = WindowTarget {
+            process: "notepad.exe".into(),
+            title: None,
+        };
+        let e = resolve_capture_window(
+            &desktop,
+            &notepad_policy(),
+            screen,
+            &target,
+            &[],
+            Surface::Cli,
+        )
+        .unwrap_err();
+        assert_eq!(e.kind, ErrorKind::ForegroundGuard, "{e}");
+        assert_eq!(e.hint.as_deref(), Some(CAPTURE_OCCLUDED_HINT));
+        e
+    }
+
+    /// 撮る矩形の外の別の窓 (一覧の先頭に置き、hwnd の照合を確かめる)
+    fn elsewhere(rect: Rect) -> StackWindow {
+        stacked(other("explorer.exe", 0x30, 5), rect, false)
+    }
+
+    /// 隠れの 7 の detail: 覆う窓 (題名なし)、見つけた点、見えている部分の外接矩形、see_through。
+    /// 点は間引きの内側 8、間隔 64 で最初に覆いに当たる (108 + 64 * 7, 58 + 64 * 4)
+    #[test]
+    fn occluded_detail_names_cover_point_visible_and_see_through() {
+        let world = occluded_world(vec![
+            elsewhere(Rect::new(2000, 2000, 100, 100)),
+            stacked(chrome(), OCC_COVER, true),
+        ])
+        .shared();
+        let e = resolve_occluded(&world);
+        let d = detail(&e);
+        assert_eq!(d["window"]["process"], "chrome.exe");
+        assert_eq!(d["window"]["class"], "Chrome_WidgetWin_1");
+        assert_eq!(d["window"]["pid"], 2);
+        assert_eq!(d["window"]["hwnd"], 0x11);
+        assert!(d["window"].get("title").is_none(), "{d}");
+        assert_no_title(&e);
+        assert_eq!(d["point"], serde_json::json!({ "x": 556, "y": 314 }));
+        assert_eq!(
+            d["visible"],
+            serde_json::json!({ "x": 500, "y": 300, "w": 240, "h": 230 })
+        );
+        assert_eq!(d["see_through"], true);
+        assert_eq!(world.borrow().stack_calls, 1);
+    }
+
+    /// 覆う窓の手前の不透明な窓は visible から引く (機密の 7 と同じ定義)。see_through は偽で入る
+    #[test]
+    fn occluded_detail_visible_subtracts_opaque_windows_in_front() {
+        let world = occluded_world(vec![
+            elsewhere(Rect::new(700, 300, 200, 400)),
+            stacked(chrome(), OCC_COVER, false),
+        ])
+        .shared();
+        let e = resolve_occluded(&world);
+        let d = detail(&e);
+        assert_eq!(
+            d["visible"],
+            serde_json::json!({ "x": 500, "y": 300, "w": 200, "h": 230 })
+        );
+        assert_eq!(d["see_through"], false);
+    }
+
+    /// 覆う窓が一覧に無ければ visible と see_through を省く (window と point はある。7 のまま)
+    #[test]
+    fn occluded_detail_omits_visible_when_cover_is_not_in_stack() {
+        let world = occluded_world(vec![elsewhere(OCC_COVER)]).shared();
+        let e = resolve_occluded(&world);
+        let d = detail(&e);
+        assert_eq!(d["window"]["hwnd"], 0x11);
+        assert_eq!(d["point"], serde_json::json!({ "x": 556, "y": 314 }));
+        assert!(d.get("visible").is_none(), "{d}");
+        assert!(d.get("see_through").is_none(), "{d}");
+    }
+
+    /// 一覧が読めなくても 7 のまま (8 にしない)。visible と see_through を省く
+    #[test]
+    fn occluded_detail_omits_visible_when_stack_read_fails() {
+        let mut w = occluded_world(vec![stacked(chrome(), OCC_COVER, false)]);
+        w.stack_err = true;
+        let world = w.shared();
+        let e = resolve_occluded(&world);
+        let d = detail(&e);
+        assert_eq!(d["window"]["process"], "chrome.exe");
+        assert_eq!(d["point"], serde_json::json!({ "x": 556, "y": 314 }));
+        assert!(d.get("visible").is_none(), "{d}");
+        assert!(d.get("see_through").is_none(), "{d}");
+        assert_eq!(world.borrow().stack_calls, 1);
+    }
+
+    /// 覆う窓の枠が撮る矩形と交わらなければ visible だけを省く (see_through はある)
+    #[test]
+    fn occluded_detail_omits_only_visible_when_frame_does_not_meet_rect() {
+        let world = occluded_world(vec![stacked(
+            chrome(),
+            Rect::new(2000, 2000, 100, 100),
+            false,
+        )])
+        .shared();
+        let e = resolve_occluded(&world);
+        let d = detail(&e);
+        assert!(d.get("visible").is_none(), "{d}");
+        assert_eq!(d["see_through"], false);
     }
 
     /// Z 順の窓 1 つ (D-077)。`stack_windows` と同じく題名は空にする

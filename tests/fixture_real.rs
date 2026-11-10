@@ -1861,6 +1861,36 @@ fn fixture_real_stack_windows_report_fixture_frame_untitled() {
     );
 }
 
+/// 隠れの 7 の detail (D-135) の前提: 隠れの点で `at_point` が返す窓 (根) を、重なりの一覧 (`stack_windows`) で
+/// hwnd で引け、その矩形が `describe` の枠の矩形と一致する。読み取りだけ (入力も撮影もしない)
+#[test]
+#[ignore = "実機のフィクスチャ限定。cargo test -- --ignored --test-threads=1"]
+fn fixture_real_at_point_root_is_listed_in_stack_windows() {
+    let f = Fixture::open("at-point-stack");
+    let hwnd = f.win.hwnd();
+    let frame = window::describe(hwnd)
+        .and_then(|d| d.rect)
+        .expect("フィクスチャの枠の矩形");
+    let center = frame.center();
+    let at = window::at_point(center).expect("中央の点の窓");
+    assert_eq!(at.hwnd, hwnd, "中央の点の窓はフィクスチャ");
+    let stack = window::stack_windows();
+    let listed = stack
+        .iter()
+        .find(|w| w.info.hwnd == at.hwnd)
+        .expect("点の窓が重なりの一覧に出る");
+    assert_eq!(listed.rect, frame, "一覧の矩形が describe の枠と一致する");
+    println!(
+        "FIXTURE at_point_stack point={},{} hwnd={:#x} rect={} see_through={} stack={}",
+        center.x,
+        center.y,
+        at.hwnd,
+        listed.rect,
+        listed.see_through,
+        stack.len()
+    );
+}
+
 /// 撮影から外れる窓 (D-077): 層付きでないフィクスチャでも `GetWindowDisplayAffinity` が成功して値を返すこと
 /// (文書には「層付きの窓でだけ成功する」とあり、失敗すると外れた窓を覆いに数えて奥の deny の窓が写る) と、
 /// `WDA_EXCLUDEFROMCAPTURE` を付けると重なりの一覧で覆いとみなさないことを確かめる。付けるのは自分の窓だけで、

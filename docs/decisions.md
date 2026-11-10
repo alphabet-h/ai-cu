@@ -889,7 +889,7 @@
 - 判断: A (○) と D (○)。最上位には `partial` (失敗した操作の副作用 (入力、実際に切り替わった前面、WM_CLOSE) を一部でも起こしたか) も足す。`error.detail` の意味は「理由の補足」から「理由の補足と、ガード・停止・無操作の状況」に広げる。載せるのは実行器が操作に入った後の失敗だけで、`executed` が無い失敗は「操作に入る前で、何も送っていない」と定義する。`executed >= 1` か `partial` なら hint の頭に「actions[0]〜actions[k-1] は実行済み。操作ごと打ち直さない。残りは、以下の hint に従い、状態を見直してから送る。以下は失敗した actions[i] について:」の形の一文を足す (CLI と MCP で文を分ける。D-056。元の hint の「繰り返さない」と食い違わないよう、終了コードに依らない中立の文にする)。題名は `detail` に入れない。既に `detail` がある失敗 (focus の 11) は変えない
 - 根拠: A は成功と同じ読み方で済み、`detail` の「理由ごとの補足」(D-056) と意味が混ざらない。操作は複数のバッチと待ちに展開されるので、失敗した操作そのものが途中まで届きうる (`partial`)。既存の hint の多くは「何も送っていない」で始まるので、数だけでは実行済みの操作まで否定して読まれうる。検証などは `runner::execute` が実行器より先に行うので、その層の失敗に 0 を付けると形が層で変わる。D は失敗の経路に新しい OS の読み取り (失敗の種) を増やさない。題名は個人情報になりうるので、伏せる条件を足すより入れないほうが漏れない
 - 覆る条件: 呼び出し側が `ok:false` の最上位を読まない前提で壊れたとき (A を C に)。読んでいない値 (前面のウィンドウなど) が要る失敗の事例が出たとき (E を足す)。題名が無いと取り違えに気づけない事例が出たとき
-- 状態: 採用
+- 状態: 採用 (撮影の隠れの 7 では、D-135 で失敗の経路の読み (重なりの一覧を 1 回) を足した)
 - 追記 (2026-10-28): partial が真のときの前置きの最後の文を『以下は actions[i] の止まった所から先について (それより前に起こしたことはそのまま): 』に改めた。続く個々の hint の『何も送っていない』は止まった束から先の話で、type の途中で断ったとき (パスワード欄の 4、前面が変わった 7、キーのガードの 7) と食い違わないように。partial になるほかの失敗 (停止の 6、OS の失敗の 8、focus の後の 7、close の途中) にも同じ文が付くので、『断った』『送った』ではなく中立の語にした (独立レビューの指摘)。OS の失敗 (8) では止まった束が一部だけ届いていることがあり、境目はきれいでない (README に書いた)
 
 ### D-066 ロック・セーバーは入力の前に終了コード 14 `desktop_unavailable` で断り、押されたままのキーとボタンは 10 (`reason: keys_held`) で断る
@@ -1037,7 +1037,7 @@
 - 覆る条件: 今まで通っていた撮影が断られて困る事例が出たとき (鍵を足す)。枠の矩形と描画のずれ、片方だけの層付きの窓、判定と撮影の間の競合で写り込んだ事例が出たとき
 - 追記 (2026-10-24、実装のステップ 5、まとめ): 変えた所は `geometry` (`Rect::subtract`、`visible_parts`、`bounding`)、`policy` (`window_deny`、`Policy::check_window_deny`、`Policy::has_window_deny`)、`device` と `win32::window` (`StackWindow`、`Desktop::stack_windows`、`see_through` を `GetLayeredWindowAttributes` で決める `layered_attributes`、閉じられた窓を落とす `info_untitled`)、`backend` (門)、`run` (`sensitive_window`、`check_sensitive_capture`。`Executor::capture` と `cli::shot` から呼ぶ)、`hint` (`Hint::CaptureSensitive`)、MCP の `shot` の説明。テストは `rect_subtract_covers_disjoint_contained_corner_and_hole`、`visible_parts_leaves_one_pixel_strip`、`bounding_of_parts`、`check_window_deny_ignores_allow_lists_and_hits_any_layer`、`has_window_deny_reports_any_layer`、`check_window_keeps_layer_order_after_window_deny_split`、`see_through_by_layered_attributes`、`sensitive_window_passes_covered_and_refuses_one_pixel_visible`、`sensitive_window_ignores_see_through_covers_and_windows_behind`、`sensitive_window_skips_rects_outside_allowed_and_host_windows`、`sensitive_window_judges_unnamed_window_by_class`、`run_screenshot_region_refuses_visible_denied_window_with_detail`、`run_screenshot_without_deny_lists_does_not_enumerate`、`run_screenshot_window_refuses_small_denied_window_over_target`、`run_screenshot_skips_self_window_in_tui`、`shot_cli_refuses_full_screen_and_region_showing_denied_window`、`shot_cli_window_refuses_small_denied_window_over_target`、`click_cli_shot_refuses_visible_denied_window`、`capture_sensitive_hint_offers_region_and_focus_and_never_asks_to_loosen`、`mcp_shot_refuses_visible_denied_window_with_mcp_hint`、`mcp_run_screenshot_refuses_visible_denied_window_with_mcp_hint`、実機 (`#[ignore]`) は `fixture_real_stack_windows_report_fixture_frame_untitled` と `fixture_real_sensitive_window_check_refuses_rect_touching_denied_fixture`。文書は README (終了コード 7 の行、`error.detail` の `visible`、設定の deny が撮影にも効くこと、安全機能の「機密のウィンドウを撮らない」と限界)、手引き (`--region` の 7、7 の行と `visible`。30000 バイトに収めるため、focus の 11 と MCP の節の重なる言い回しを詰めた)、design-notes (Windows の入力の節の判定と限界、`EnumWindows` の順への依存)。手動確認は CHECKLIST の手順 23 (文字コード表を `--config=` の上書き層で deny にし、メモ帳に重ねた region で 7、`focus notepad.exe` の後に同じ region が通る)。D-053 の状態を、追記の「`region` の撮影は確かめない」を締めた形に更新した
 - 追記 (2026-10-24、Phase 5 の win32-reviewer の 2 回目): 撮影から外れる窓 (`WDA_EXCLUDEFROMCAPTURE`。撮った画像に写らないので奥の deny の窓が写る) と、DWM の枠が取れず `GetWindowRect` の予備しか無い窓 (見えない縁の分だけ大きい) も覆いに数えない (`win32::window::not_a_cover`、`display_affinity`、`frame_rect_with_source`)。`GetWindowDisplayAffinity` が失敗したら外れていないとみなす (失敗を外れる側に倒すと、普通の窓まで覆いでなくなり撮影がほぼ断られる)。文書は「層付きの窓でだけ成功する」と書くが、この PC では層付きでない窓でも成功した (3 回目のレビューの指摘で実機テスト `fixture_real_capture_excluded_fixture_is_not_a_cover` を足して測った。値は design-notes)。失敗する古い環境では漏れうる (覆る条件: その環境で使う事例が出たとき)。テストは `not_a_cover_adds_capture_exclusion_and_inexact_frame` で、対照 (外れる窓の項を無効にする) で落ちることを確かめた。ゴーストの窓 (応答しない deny のアプリの代わりに OS が出す) は限界として README に書いた。実機の値: `cargo test -- --ignored --nocapture --test-threads=1` が `FIXTURE sensitive ... visible=1599,740,1,10 ... hit=true miss=false` を出した (design-notes に全文)
-- 状態: 採用 (2026-10-24。窓のリージョンの扱いは D-112、応答しない deny の窓のゴーストの窓は D-115 で補った)
+- 状態: 採用 (2026-10-24。窓のリージョンの扱いは D-112、応答しない deny の窓のゴーストの窓は D-115 で補った。deny が無ければ列挙しないのは機密の判定の門のことで、隠れの 7 の detail のための失敗の経路の読みは D-135)
 - 追記 (2026-11-03、D-101): ホストの窓の除外は維持する。ただし「起動元として選んだ」と「画面を見せてよい」は別の許可なので、覆る条件に足す: ホストの窓 (端末の別タブ、ホストのアプリの別の会話) に AI に見せたくない内容が写った事例か、撮影だけを禁じたい要望が出たとき (入力の deny と別の、撮影専用の deny のキーを足す)。`window` 指定の撮影はホストを断る (Hint::HostCapture) が、region と全画面には写る (README の「起動した側の除外」に書いた)
 
 ### D-078 設定の `[mcp] require_approval` に書いた道具に、`tools/list` で `anthropic/requiresUserInteraction` の印を付け、客に毎回の承認を求めさせる
@@ -1905,4 +1905,23 @@
   - 人の操作で止まらない待ちの手段が足されたとき (次の手に待ちを書くか見直す)
   - 12 の経路で次の手に迷った事例が出たとき (手引きの 12 の行を見直す)
   - 理由を縮めても要点版の上限に収まらないとき (上限を見直す)
+- 状態: 採用 (2026-11-10)
+
+### D-135 撮影の隠れの 7 に `error.detail` (覆う窓、点、見えている部分、`see_through`) を足し、focus が通っても続くときの次の手を MCP の hint と手引きに書く (判定は変えない)
+- 日付: 2026-11-10
+- 場面: 別のプロジェクトからの起票。`shot` の `window` が「別のウィンドウに隠れている」の 7 (`foreground_guard`) を返したが、`error.detail` が無く、何が覆っているかが読めなかった。`focus` が通った後も同じ 7 が続き、次の手も読めなかった (報告者は IME の表示を疑ったが確かめられなかった)。手引きの 7 の節は撮影の detail を `window` と `visible` と書いていて、報告者もそれを期待した。撮影の対象の解決の他の経路 (起動した側の 7、最小化と画面外の 12) にも `window` が無かった
+- 選択肢: A 隠れの 7 に detail を足し、hint と手引きに次の手を書く (判定は変えない) / B 透けうる窓などを隠れの判定から外す / C `region` で撮り直すよう勧める
+- 判断: A (○。利用者が /autopilot の候補の選択で、外に見える結果 (`error.detail`) が増えることを示されて選んだ)。細部は次のとおり
+  - 隠れの 7 の `error.detail` のキーは `window` (`process`、`class`、`pid`、`hwnd`。題名は入れない。D-065)、`point` (`x`、`y`。隠れを見つけた点)、`visible` (`x`、`y`、`w`、`h`)、`see_through` (真偽)。CLI の `shot --window` (即 7) と操作列の `screenshot` (猶予の後の 7。D-082) の両方
+  - `visible` の定義は機密の 7 (D-077) と同じ「見えている部分の外接矩形」(覆う窓の枠と撮る矩形の重なりから、手前の `see_through` でない窓の枠を引く)。計算は `run::visible_in_stack` 1 つを機密の判定と共有する。同じ終了コードの同じキーに 2 つの定義を作らない
+  - 重なりの一覧 (`stack_windows`) は隠れの 7 の失敗の経路でだけ 1 回読む。操作列の猶予の周回ごとには読まない。D-077 の「deny が無ければ列挙しない」は機密の判定の門のことで変えないが、隠れの 7 の失敗の経路だけは deny の有無によらず読む。隠れが解けて撮れたときは読まない
+  - 一覧が読めない (失敗、一覧の門) か、覆う窓が一覧に無ければ `visible` と `see_through` を省く。枠と撮る矩形が交わらないか、手前の覆いを引いて残らなければ `visible` だけを省く。どれも 7 のままで、8 にしない (読みの失敗で結果を変えない)
+  - `see_through` は「deny の窓の判定 (D-077) で覆いに数えない窓か」(透けうる、撮影から外れる、枠が不確か、リージョンが枠を覆わない、のどれか。条件の正は docs/reference/safety.md)。隠れの判定 (`WindowFromPoint` の間引き) はこの値を見ないので、真でも今までどおり 7。AI の次の手は変えないが、人に伝えるときに「透けうる窓などが居座っている」と言え、居座る窓の正体を後で調べる材料になる
+  - 判定は変えない。原因 (何の窓が居座ったか) は未確認のまま残す。`see_through` で当たりは付くが、原因を 1 つには絞れない (限界)
+  - MCP の隠れの hint に、detail の読み方と「focus が通っても同じ 7 が続くなら、focus を繰り返さず find と text で読む。画像が要るならその窓を片付けてもらうよう人間に頼む」を足す。CLI の hint は変えない (D-056 の固定。利用者の決定)。`region` を勧めない (`region` には隠れの確認が無く、勧めると写り込みの守り (D-053) の迂回になる。server の instructions の「別の手段で突破しない」)。IME の名を書かない (原因は未確認)
+  - 撮影の対象の解決の残りの経路: 起動した側の 7 と画面の外の 12 に `window` を足す。最小化の 12 は許可された窓 (`policy.check_window` が通る) のときだけ足す (最小化の 12 は許可の判定の前で返る経路で、message は呼び出しの引数しか出していなかったので、許可の外の窓の情報を増やさない)。見つからない 12 は足さない (材料は呼び出し側が渡した引数だけ)
+  - 要点版の手引きの上限は増やさない (D-097、D-114。D-134 と同じく文を詰める)。キーの細かい意味、12 の `window`、focus が通っても続くときの次の手は、手引きの全文と docs/reference/ に置く
+  - 実機の手動確認 (CHECKLIST) は足さない。detail はモックの全経路のテストで撃ち、実の一覧で点の窓を引ける前提は `#[ignore]` のフィクスチャのテスト `fixture_real_at_point_root_is_listed_in_stack_windows` で確かめる。判定と入力は変えない
+- 根拠: B は原因が未確認のまま隠れの判定を緩め、写り込みの守り (D-053) を根拠なく弱める。C は守りの迂回になる。A は判定を変えずに、AI が結果だけで覆う窓と次の手を読める。失敗の経路の読みは D-065 の覆る条件「読んでいない値が要る失敗の事例が出たとき」に当たる
+- 覆る条件: 別の名前のキーが要る読み手の事例 (キー名を見直す)。列挙が重くて 7 の応答が遅れた事例 (読みをやめるか軽くする)。detail の値で、害のない窓が 7 を起こしていると確かめられたとき (判定を見直す)。`region` にも隠れの確認が入り、守りの迂回にならなくなったとき (hint で勧めてよい)。許可の外の窓の class や hwnd を出すことが問題になった事例、または最小化の許可の外の窓の情報が要る事例。実の窓で detail が欠ける事例 (手動確認を足す)。IME が原因と測って確かめたとき (hint に書く)
 - 状態: 採用 (2026-11-10)

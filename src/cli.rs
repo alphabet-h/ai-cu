@@ -4579,6 +4579,10 @@ mod tests {
                     value["error"]["hint"],
                     crate::hint::hint(crate::hint::Hint::CaptureOccluded, Surface::Cli)
                 );
+                // 覆う窓と、隠れを見つけた点 (撮る矩形の内側 8 の左上。D-135)
+                let detail = &value["error"]["detail"];
+                assert_eq!(detail["window"]["class"], "Chrome_WidgetWin_1", "{value}");
+                assert_eq!(detail["point"], serde_json::json!({ "x": 108, "y": 58 }));
             }
             other => panic!("{other:?}"),
         }
