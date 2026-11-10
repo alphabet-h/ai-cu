@@ -1641,7 +1641,10 @@ impl<'a> Server<'a> {
             }
         };
         // 既定の次の手 (CLI の書き方を含む) は道具の名前で書いた文にする (D-056)
-        let outcome = mcp_default_hint(outcome);
+        let mut outcome = mcp_default_hint(outcome);
+        // 失敗の結果に mcp:inline の画像を入れるなら、捨てるクライアントがあることを hint に足す (D-136)。
+        // 既定の文の置き換えの後に置く (前だと hint が既定の文と一致しなくなり、置き換えが効かない)
+        note_inline_images_on_failure(&mut outcome, &images.taken, inline);
         // 人か停止の仕組みが止めた (6) か、予告の間に人の入力があった (10 の lead_input)。判定は error.rs の 1 か所 (D-093)
         let stopped_by_user = matches!(
             &outcome,
@@ -1965,11 +1968,40 @@ fn run_tool(name: &str, args: &Value, paths: &ConfigPaths, ctx: &mut Context) ->
     }
 }
 
+/// 結果が MCP の失敗 (`isError: true`) になるか。`tool_output` と、失敗の結果の画像の但し書き (D-136) が共有する
+fn outcome_is_error(outcome: &Outcome) -> bool {
+    match outcome {
+        Outcome::Text(_) => false,
+        Outcome::Json { code, .. } => *code != 0,
+        Outcome::Tui { .. } | Outcome::Mcp { .. } => true,
+    }
+}
+
+/// 失敗の結果に撮った mcp:inline の画像を入れるとき、hint の末尾に但し書きを足す (D-136)。
+/// 失敗の結果 (isError) の image を捨てるクライアント (Claude Code) があるため。`inline` が偽なら画像は
+/// content に入らないので足さない。path を書いた画像はファイルに残るので数えない
+fn note_inline_images_on_failure(outcome: &mut Outcome, taken: &[(String, Image)], inline: bool) {
+    if !inline || !outcome_is_error(outcome) || !taken.iter().any(|(path, _)| path == INLINE_PATH) {
+        return;
+    }
+    let note = crate::hint::MCP_INLINE_IMAGE_ON_FAILURE_NOTE;
+    if let Outcome::Json { value, .. } = outcome
+        && let Some(error) = value.get_mut("error").and_then(Value::as_object_mut)
+    {
+        let hint = match error.get("hint").and_then(Value::as_str) {
+            Some(h) => format!("{h}。{note}"),
+            None => note.to_string(),
+        };
+        error.insert("hint".into(), json!(hint));
+    }
+}
+
 fn tool_output(outcome: Outcome) -> ToolOutput {
+    let is_error = outcome_is_error(&outcome);
     match outcome {
         Outcome::Text(t) => ToolOutput {
             content: vec![json!({ "type": "text", "text": t })],
-            is_error: false,
+            is_error,
             code: "ok".into(),
         },
         Outcome::Json { code, value, .. } => {
@@ -1982,7 +2014,7 @@ fn tool_output(outcome: Outcome) -> ToolOutput {
             };
             ToolOutput {
                 content: vec![json!({ "type": "text", "text": value.to_string() })],
-                is_error: code != 0,
+                is_error,
                 code: name,
             }
         }
@@ -1991,7 +2023,7 @@ fn tool_output(outcome: Outcome) -> ToolOutput {
             let e = AppError::new(ErrorKind::Internal, "この結果は MCP から返せない");
             ToolOutput {
                 content: vec![json!({ "type": "text", "text": e.to_json().to_string() })],
-                is_error: true,
+                is_error,
                 code: ErrorKind::Internal.code().into(),
             }
         }
@@ -4460,6 +4492,162 @@ mod tests {
         );
         assert!(!hint.contains("ai-cu "), "{hint}");
         assert_eq!(world.borrow().sent.len(), 1, "click は送られている");
+    }
+
+    /// run の途中の撮影が失敗しても、その前に撮れた mcp:inline の画像は content に入る (サーバーは捨てない)。
+    /// 失敗の結果の image を捨てるクライアントがあるので、hint の末尾に但し書きが付く (D-136)
+    #[test]
+    fn mcp_run_failure_keeps_inline_image_and_notes_it_in_hint() {
+        let dir = unique_temp_dir("mcp-run-fail-inline");
+        let floor = floor_file(&dir, ENABLED);
+        let mut f = Fixture::new(MapEnv::default());
+        let mut s = f.server(paths(&floor));
+        let r = reply(
+            &mut s,
+            &call(
+                1,
+                "run",
+                json!({ "actions": [
+            { "type": "screenshot", "path": "mcp:inline", "region": { "x": 0, "y": 0, "w": 2, "h": 2 } },
+            { "type": "screenshot", "path": "b.png", "window": { "process": "nothing.exe" } }
+        ] }),
+            ),
+        );
+        assert_eq!(r["result"]["isError"], true, "{r}");
+        let v = text_json(&r);
+        assert_eq!(v["error"]["code"], "window_not_found", "{v}");
+        assert_eq!(v["executed"], 1, "{v}");
+        assert_eq!(r["result"]["content"][1]["type"], "image", "{r}");
+        let hint = v["error"]["hint"].as_str().unwrap();
+        assert!(hint.starts_with("actions[0] は実行済み"), "{hint}");
+        assert!(
+            hint.contains(crate::hint::MCP_INLINE_IMAGE_ON_FAILURE_NOTE),
+            "{hint}"
+        );
+    }
+
+    /// 失敗の前に撮れた画像がファイル (path) だけなら、但し書きは付かない (D-136)
+    #[test]
+    fn mcp_run_failure_with_only_file_images_has_no_inline_note() {
+        let dir = unique_temp_dir("mcp-run-fail-file");
+        let floor = floor_file(&dir, ENABLED);
+        let mut f = Fixture::new(MapEnv::default());
+        let mut s = f.server(paths(&floor));
+        let r = reply(
+            &mut s,
+            &call(
+                1,
+                "run",
+                json!({ "actions": [
+            { "type": "screenshot", "path": "a.png", "region": { "x": 0, "y": 0, "w": 2, "h": 2 } },
+            { "type": "screenshot", "path": "b.png", "window": { "process": "nothing.exe" } }
+        ] }),
+            ),
+        );
+        drop(s);
+        assert_eq!(r["result"]["isError"], true, "{r}");
+        let v = text_json(&r);
+        assert_eq!(v["error"]["code"], "window_not_found", "{v}");
+        assert_eq!(v["executed"], 1, "{v}");
+        assert!(
+            f.disk.written.iter().any(|(p, _)| p == "a.png"),
+            "a.png は書かれている"
+        );
+        let hint = v["error"]["hint"].as_str().unwrap();
+        assert!(
+            !hint.contains(crate::hint::MCP_INLINE_IMAGE_ON_FAILURE_NOTE),
+            "{hint}"
+        );
+    }
+
+    /// 成功の run は、mcp:inline の画像があっても但し書きを付けない (D-136)
+    #[test]
+    fn mcp_run_success_with_inline_image_has_no_note() {
+        let dir = unique_temp_dir("mcp-run-ok-inline");
+        let floor = floor_file(&dir, ENABLED);
+        let mut f = Fixture::new(MapEnv::default());
+        let mut s = f.server(paths(&floor));
+        let r = reply(
+            &mut s,
+            &call(
+                1,
+                "run",
+                json!({ "actions": [
+            { "type": "screenshot", "path": "mcp:inline", "region": { "x": 0, "y": 0, "w": 2, "h": 2 } }
+        ] }),
+            ),
+        );
+        assert_eq!(r["result"]["isError"], false, "{r}");
+        assert_eq!(r["result"]["content"][1]["type"], "image", "{r}");
+        let text = r["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(
+            !text.contains(crate::hint::MCP_INLINE_IMAGE_ON_FAILURE_NOTE),
+            "{text}"
+        );
+    }
+
+    /// 但し書きの判定 (D-136): 失敗で、inline が真で、mcp:inline の画像があるときだけ hint に足す
+    #[test]
+    fn note_inline_images_on_failure_adds_note_only_with_inline_image_and_error() {
+        let note = crate::hint::MCP_INLINE_IMAGE_ON_FAILURE_NOTE;
+        let img = || Image {
+            width: 1,
+            height: 1,
+            rgba: vec![0; 4],
+        };
+        let inline_taken = vec![(INLINE_PATH.to_string(), img())];
+        let file_taken = vec![("a.png".to_string(), img())];
+        let failed = |value: Value| Outcome::Json {
+            code: 12,
+            value,
+            stderr: None,
+        };
+        let with_hint =
+            || failed(json!({ "ok": false, "error": { "code": "window_not_found", "hint": "x" } }));
+        let hint_of = |o: &Outcome| match o {
+            Outcome::Json { value, .. } => value["error"]["hint"].clone(),
+            _ => Value::Null,
+        };
+        // hint あり: 末尾に空白を挟んで足す
+        let mut o = with_hint();
+        note_inline_images_on_failure(&mut o, &inline_taken, true);
+        assert_eq!(hint_of(&o), json!(format!("x。{note}")));
+        // hint なし: 文が入る
+        let mut o = failed(json!({ "ok": false, "error": { "code": "window_not_found" } }));
+        note_inline_images_on_failure(&mut o, &inline_taken, true);
+        assert_eq!(hint_of(&o), json!(note));
+        // 画像が無いか、ファイルだけ: 変わらない
+        for taken in [&Vec::new(), &file_taken] {
+            let mut o = with_hint();
+            note_inline_images_on_failure(&mut o, taken, true);
+            assert_eq!(o, with_hint());
+        }
+        // 成功 (code 0) は error.hint を持っていても変わらない
+        let ok = || Outcome::Json {
+            code: 0,
+            value: json!({ "ok": true, "error": { "hint": "x" } }),
+            stderr: None,
+        };
+        let mut o = ok();
+        note_inline_images_on_failure(&mut o, &inline_taken, true);
+        assert_eq!(o, ok());
+        // inline が偽 (画像は content に入らない): 変わらない
+        let mut o = with_hint();
+        note_inline_images_on_failure(&mut o, &inline_taken, false);
+        assert_eq!(o, with_hint());
+    }
+
+    /// isError の判定 (D-136 で tool_output から出した)
+    #[test]
+    fn outcome_is_error_follows_exit_code() {
+        assert!(!outcome_is_error(&Outcome::Text("x".into())));
+        let json_with = |code| Outcome::Json {
+            code,
+            value: json!({}),
+            stderr: None,
+        };
+        assert!(!outcome_is_error(&json_with(0)));
+        assert!(outcome_is_error(&json_with(12)));
     }
 
     #[test]

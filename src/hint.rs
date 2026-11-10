@@ -147,6 +147,10 @@ pub const KEYS_HELD_HINT: &str = "何も送っていない。キー (Shift、Ctr
 /// 押されたままのキーの MCP の再試行の手順 (D-073)。10 の `keys_held` の MCP の次の手と、`status` の `note` が共有する
 pub const MCP_KEYS_HELD_RETRY: &str = "少し後に status の道具の keys_held を読み直し、空になってから 1 回だけ再試行する。空にならなければ、キーが押されたままになっていないか人間に確かめてもらう";
 
+/// MCP の失敗の結果に、撮った mcp:inline の画像を入れたときに hint の末尾に足す文 (D-136)。
+/// 失敗の結果 (isError) の image を捨てるクライアントがあるので、届かない恐れと回り道を伝える
+pub const MCP_INLINE_IMAGE_ON_FAILURE_NOTE: &str = "撮った mcp:inline の画像は結果の image に入れたが、失敗の結果 (isError) では image を捨てるクライアントがある (Claude Code など)。見えていなければ、その画像は戻らない。撮り直せない画面は、screenshot の path にファイルの保存先を書くか、失敗しうる操作の前で run を分ける";
+
 /// focus: 前面は ai-cu を起動した側なのに断られた (CLI)
 pub const FOCUS_HOST_FRONT_HINT: &str = "何も送っていない。前面は ai-cu を起動した側 (エージェント、シェル、端末) だが、Windows が前面の切り替えを断った (この ai-cu には前面化の権利が無い。起動の後に人が操作した、など)。繰り返さず、人間に対象を前面に出してもらう。タスクバーや Alt+Tab、他のツールで前面にしようとしない";
 /// focus: 断られ、前面を確かめられない (CLI)
