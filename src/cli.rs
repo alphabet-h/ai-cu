@@ -2015,6 +2015,50 @@ mod tests {
         assert!(!line.contains("wait_for"), "{line}");
     }
 
+    /// 要点版の `error.detail` の状況の行は、撮影の 7 の隠れの覆う窓と `see_through`、起動した側の窓を挙げる (D-135)
+    #[test]
+    fn guide_summary_mentions_occluded_detail_keys() {
+        let s = guide_summary();
+        let lines: Vec<&str> = s
+            .lines()
+            .filter(|l| l.starts_with("`error.detail` の状況"))
+            .collect();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        let line = lines[0];
+        assert!(line.contains("隠れなら覆う窓"), "{line}");
+        assert!(line.contains("see_through"), "{line}");
+        assert!(line.contains("起動した側"), "{line}");
+    }
+
+    /// 全文の撮影の節は、`focus` が通っても隠れの 7 が続くときの次の手を書き、`region` を勧めない (D-135)
+    #[test]
+    fn guide_says_what_to_do_when_focus_does_not_clear_occlusion() {
+        let lines: Vec<&str> = GUIDE
+            .lines()
+            .filter(|l| l.contains("が通っても同じ 7 が続く"))
+            .collect();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        let line = lines[0];
+        assert!(line.contains("see_through"), "{line}");
+        assert!(!line.contains("region"), "{line}");
+        let (_, next) = line
+            .split_once("が通っても同じ 7 が続くなら")
+            .expect("次の手の句がある");
+        for word in ["繰り返さず", "`find`", "片付け", "人間"] {
+            assert!(next.contains(word), "{word}: {next}");
+        }
+    }
+
+    /// 全文の `find` の節は、起動の直後の空の結果を「無い」と決めず `wait_for` で待つよう書く (D-135)
+    #[test]
+    fn guide_says_find_empty_right_after_launch_is_not_absent() {
+        let lines: Vec<&str> = GUIDE.lines().filter(|l| l.contains("起動の直後")).collect();
+        assert!(!lines.is_empty(), "全文に「起動の直後」の行が無い");
+        for line in lines {
+            assert!(line.contains("wait_for"), "{line}");
+        }
+    }
+
     /// 手引きの前書きは、INSTRUCTIONS の困ったことの送り先の段落を一字一句そのまま含み、要点版にも入る (D-098)
     #[test]
     fn guide_tells_where_to_send_feedback() {
