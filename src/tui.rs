@@ -26,7 +26,7 @@ use crate::geometry::Rect;
 use crate::keys::KeyCombo;
 use crate::run::RunReport;
 use crate::runner::{FirstBatch, PreflightReport, ScriptRunner};
-use crate::script::{Action, ActionKind};
+use crate::script::{Action, ActionKind, ClickModifier};
 
 pub mod theme;
 pub use theme::{Theme, ThemeEnv};
@@ -2196,8 +2196,29 @@ impl App {
 pub fn action_summary(a: &Action) -> String {
     let kind = a.kind().name();
     match a {
-        Action::Click { x, y, button } | Action::DoubleClick { x, y, button } => {
-            format!("{kind} ({x}, {y}) {button:?}").to_lowercase()
+        Action::Click {
+            x,
+            y,
+            button,
+            modifiers,
+        }
+        | Action::DoubleClick {
+            x,
+            y,
+            button,
+            modifiers,
+        } => {
+            let mut line = format!("{kind} ({x}, {y}) {button:?}").to_lowercase();
+            if !modifiers.is_empty() {
+                // 失敗した操作の表示から修飾キーを落とさない。正規の順 (ctrl、alt、shift) で + でつなぐ (D-137)
+                let names: Vec<&str> = ClickModifier::canonical(modifiers)
+                    .iter()
+                    .map(|m| m.modifier().name())
+                    .collect();
+                line.push(' ');
+                line.push_str(&names.join("+"));
+            }
+            line
         }
         Action::Drag { from, to, .. } => {
             format!("{kind} ({}, {}) → ({}, {})", from.x, from.y, to.x, to.y)
@@ -5946,6 +5967,32 @@ mod tests {
             assert!(has(&text, needle), "{needle}\n{text}");
         }
         assert_eq!(a.status_kind, StatusKind::Error);
+    }
+
+    /// クリックの 1 行要約に修飾キーを正規の順で + でつないで出す。修飾なしは今の文字列のまま (D-137)
+    #[test]
+    fn action_summary_shows_click_modifiers() {
+        use crate::script::{Button, ClickModifier};
+        let click = |modifiers: Vec<ClickModifier>| Action::Click {
+            x: 1,
+            y: 2,
+            button: Button::Left,
+            modifiers,
+        };
+        assert_eq!(
+            action_summary(&click(vec![ClickModifier::Shift, ClickModifier::Ctrl])),
+            "click (1, 2) left ctrl+shift"
+        );
+        assert_eq!(action_summary(&click(vec![])), "click (1, 2) left");
+        assert_eq!(
+            action_summary(&Action::DoubleClick {
+                x: 3,
+                y: 4,
+                button: Button::Right,
+                modifiers: vec![ClickModifier::Alt],
+            }),
+            "double_click (3, 4) right alt"
+        );
     }
 
     #[test]

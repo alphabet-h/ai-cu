@@ -17,7 +17,7 @@ use ai_cu::error::ErrorKind;
 use ai_cu::geometry::{Point, Rect};
 use ai_cu::keys::KeyCombo;
 use ai_cu::policy::Policy;
-use ai_cu::script::{Action, ActionKind, Button, Pos, Region, Script, WindowTarget};
+use ai_cu::script::{Action, ActionKind, Button, ClickModifier, Pos, Region, Script, WindowTarget};
 use ai_cu::validate::{Validation, validate};
 use proptest::bool::weighted;
 use proptest::collection::vec;
@@ -871,16 +871,27 @@ fn arb_wait_change() -> impl Strategy<Value = Action> {
 fn arb_action() -> BoxedStrategy<Action> {
     let text = prop_oneof![3 => "[a-zあ]{0,60}", 1 => "[a-zあ\n\t]{0,60}"];
     let clicks = prop_oneof![-3i32..=-1, 1i32..=3];
+    // 修飾キー (D-137) は空に寄せる (性質 9 と 11 の「P が通った」の件数を下限から遠ざけるため)
+    let mods = || {
+        prop_oneof![
+            3 => Just(Vec::<ClickModifier>::new()),
+            1 => Just(vec![ClickModifier::Ctrl]),
+            1 => Just(vec![ClickModifier::Shift, ClickModifier::Alt]),
+            1 => Just(vec![ClickModifier::Ctrl, ClickModifier::Alt]),
+        ]
+    };
     prop_oneof![
-        arb_point().prop_map(|p| Action::Click {
+        (arb_point(), mods()).prop_map(|(p, modifiers)| Action::Click {
             x: p.x,
             y: p.y,
-            button: Button::Left
+            button: Button::Left,
+            modifiers,
         }),
-        arb_point().prop_map(|p| Action::DoubleClick {
+        (arb_point(), mods()).prop_map(|(p, modifiers)| Action::DoubleClick {
             x: p.x,
             y: p.y,
-            button: Button::Left
+            button: Button::Left,
+            modifiers,
         }),
         arb_point().prop_map(|p| Action::Move { x: p.x, y: p.y }),
         (arb_point(), arb_point(), 1u32..=4, 0u64..=200).prop_map(|(a, b, steps, duration_ms)| {

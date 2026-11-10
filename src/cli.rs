@@ -562,11 +562,13 @@ pub fn step_script(cmd: &Command, stdin: &mut dyn Read) -> Result<Script, AppErr
             x: *x,
             y: *y,
             button: *button,
+            modifiers: Vec::new(),
         },
         Command::DoubleClick { x, y, button, .. } => Action::DoubleClick {
             x: *x,
             y: *y,
             button: *button,
+            modifiers: Vec::new(),
         },
         Command::Drag {
             x1,
@@ -2557,6 +2559,7 @@ mod tests {
             x: 1,
             y: 2,
             button: Button::Left,
+            modifiers: vec![],
         };
         let s = step_with_shot(click.clone(), None);
         assert_eq!(s.version, SCRIPT_VERSION);

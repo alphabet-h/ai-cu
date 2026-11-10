@@ -1868,12 +1868,14 @@ fn run_tool(name: &str, args: &Value, paths: &ConfigPaths, ctx: &mut Context) ->
                         x: a.x,
                         y: a.y,
                         button: a.button,
+                        modifiers: Vec::new(),
                     }
                 } else {
                     Action::DoubleClick {
                         x: a.x,
                         y: a.y,
                         button: a.button,
+                        modifiers: Vec::new(),
                     }
                 };
                 step(action, a.shot, a.dry_run, ctx)

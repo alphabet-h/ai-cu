@@ -354,7 +354,7 @@
   - 未知の操作名、解析できないキーや領域は、設定エラーとして終了する
 - 根拠: 実際の誤爆は「どのアプリに」「どこを」「どのキーで」で起きる。リストだけの書式なら、TUI で一様に編集できる。条件式は人間が読み違えやすく、検証も難しい
 - 覆る条件: 利用者が、ウィンドウタイトルでの絞り込みを必要としたとき (deny 側にだけ足す)
-- 状態: 採用
+- 状態: 採用 (一部追記 (修飾キーつきの click / double_click は前面も見る。操作の種類 key にも通し、allow.keys が空でない層があれば断る。組み込みの拒否の Ctrl+Alt はクリックの ctrl+alt にも効く。D-137))
 - 追記 (2026-11-03、D-101): プロセスは実行ファイル名 (basename) で比べ、パスや署名は見ない。python.exe、java.exe、Electron 系のような汎用の宿主を allow に書くと、その名前のどの窓も対象になる (classes で絞る)。同名の別の実行ファイルとも見分けない。パスや署名での固定は、汎用の宿主で困った事例か要望が出たら検討する
 
 ### D-029 設定の場所の解決と、層の合成
@@ -414,7 +414,7 @@
 - 判断: 後者 (◎)。マウスの各点について座標の下のウィンドウ (ルートの親) を、キーと文字の入力では前面のウィンドウを、毎回のバッチの直前に取り直してポリシーに通す。対象のプロセスが管理者権限で、自分がそうでなければ拒否する (UIPI で入力が届かず、失敗も検出できないため)。プロセス情報を取れないときも拒否する
 - 根拠: 入力が実際に届く先は、マウスなら座標の下、キーなら前面 (docs/design-notes.md)。届く先を見るのが正しい
 - 覆る条件: 座標の下のウィンドウの取得が、特定のアプリ (透明な重ね合わせのウィンドウなど) で誤るとき
-- 状態: 採用
+- 状態: 採用 (一部追記 (修飾キーつきの click / double_click は前面も見る。D-137))
 
 ### D-034 画面キャプチャ方式は GDI の BitBlt と png
 - 日付: 2026-10-07
@@ -1051,6 +1051,7 @@
 - 追記 (2026-10-25、実装のステップ 4、まとめ): 変えた所は `config` (`Mcp` の節、`MCP_TOOL_NAMES`、`normalized_mcp_tools`、`Layer::mcp_require_approval`、雛形 `TEMPLATE` の `[mcp]`、`render_edit`)、`policy` (`Policy::mcp_require_approval`)、`mcp` (`META_REQUIRES_USER_INTERACTION`、`tools_with_approval`、`tools/list` の `listed_tools` と `cacheScope` の `private`、読めない設定のときの `guide` を除く印と標準エラーの 1 行)、`cli` (`config show` の各層の `mcp.require_approval`)、`tui` (`Field::McpRequireApproval`、`split_mcp_tools`、`widening_changes` の外した道具)。テストは `mcp_require_approval_normalizes_case_space_and_duplicates`、`mcp_require_approval_rejects_unknown_and_empty_names`、`mcp_section_rejects_unknown_key`、`template_and_missing_mcp_section_mean_no_tools`、`render_edit_round_trips_mcp_require_approval`、`mcp_require_approval_is_union_of_layers`、`prop_overlays_only_tighten_limits` (床の分が追加の層で外れない性質を足した。性質 2)、`mcp_tool_names_match_config_list`、`tools_list_marks_only_configured_tools_with_true`、`legacy_tools_list_also_marks_tools`、`tools_list_with_broken_config_marks_every_tool_but_guide_and_succeeds`、`tools_list_without_floor_marks_nothing`、`tools_list_rereads_config_on_every_call`、`config_cli_show_lists_layers` (層の `mcp.require_approval`)、tests/cli_child.rs の `cacheScope` の照合 (`tools/list` は `private`、`server/discover` は `public`)、`tui_edits_mcp_require_approval_as_comma_list`、`widening_changes_reports_removed_approval_tools`。文書は README (設定の雛形と判定の規則、MCP の節の毎回の承認の項と「層は呼び出しごとに読み直す」の例外、推奨の権限と auto モードの項への書き添え、安全機能の「毎回の承認 (MCP)」と限界)、手引き (MCP の節で、終了コードの無い拒否を auto モードのルールの欠けと dontAsk モードの `mcp.require_approval` の道具の 2 つにまとめた 1 文にした。30000 バイトに収めるため、同じ節の「ai-cu を起動した側 (エージェントの端末など)」の括弧を消した。同じ節の前面化の段落に「あなたの端末 (ai-cu を起動した側)」がある)、design-notes (MCP の節に Claude Code の印の仕様と一覧を取り直す契機、`cacheScope` の `private`)。手動確認は CHECKLIST の手順 24 (上書き層 `s24.toml` で `windows` だけに印を付け、絶対パスの `--config=` で登録し直し、allow にした `windows` に毎回確認が出て `status` には出ない)。D-055 の状態に、`mcp.require_approval` が「層は呼び出しごとに読み直す」の例外であることを書いた
 - 状態: 採用 (2026-10-25)
 - 追記 (2026-11-03、D-101): 印は道具の名前ごとなので、`click` だけ書いても同じクリックを `run` で呼べば印は付かず、`shot` も一手ずつの道具の撮影や `wait_stable` には及ばない。README の限界に書いた。自動で伝播させるのは、この判断の A (名前だけ) を覆すので、まとめの名前の要望として扱う。TUI の保存で入力の道具を書いたのに `run` が無いときに注意を出す案は別の課題に回した
+- 追記 (2026-11-10、D-137): `key` を書いても、`click` / `double_click` の `modifiers` で押す修飾キーには印が付かない (確認を求めるなら click・double_click・run も書く。止めるなら deny.actions の key)
 
 ### D-079 拒否に `error.rule` (設定のキー) と `error.fix` (人間向けの直し方) を添え、導入の文例を `ai-cu guide --setup` で出す
 - 日付: 2026-10-25
@@ -1059,7 +1060,7 @@
 - 判断: A (利用者が決めた)、D (○)、E (利用者が決めた)。`rule` は設定のキーそのもの (TUI の項目名と同じ)、組み込みの拒否は `builtin`、設定で緩められない保存先の規則は `save_path` (この 2 つは `fix` なし)。撮る矩形に deny の窓が見えている 7 も `rule` だけで `fix` を付けない (D-077 の「設定を緩めるよう頼ませない」を保つ)。`fix` は人間に宛てた「許可してよければ、<どこで> <キー> に <値> を足す」の形で、層の役割 (床 / 床なし / 場所を引けない / 追加の層。`Layer::role` を足す) で <どこで> を変え、床なし (床のファイルが無い) では、どの層で断っても「設定がまだ無い。TUI で作る (手順は guide --setup)」の別の文にし、場所を引けない閉じた層では `fix` を付けない。TUI の失敗の表示にも fix を出す。既定の hint (4) に「`error.fix` をそのまま人間に伝える。設定は書き換えない」を足す。`guide --setup` は自分の実行ファイルのパスと床の設定の場所 (中身は読まない) を埋めた Markdown (TUI の初期設定、MCP の登録、CLAUDE.md の文例、Claude Code の権限の例) を出し、何も書かない。コマンドの行のパスは二重引用符で囲み、権限の例の設定のフォルダは床のパスから作る (ホームのフォルダは引かず、依存を足さない)。
 - 根拠: 最も多い詰まり (許可に無いプロセス) は 7 で返るので、C では目的の半分しか果たさない。設定のキーなら TUI と設定ファイルのどちらでも同じ名前で探せる。「許可してよければ」で人の判断の余地を残し、AI に設定を書き換えさせない (guide の禁止事項)。ガード hook はサブコマンドの名前だけを見るので、E なら読み取り専用の一覧 (D-048) を変えずに済み、G は .claude/ の編集が要る。MCP で繋がっている客は登録を済ませているので F の効果は薄い
 - 覆る条件: 7 の fix が紛らわしいという声が出たとき (D を C に狭める)。fix の文を AI が要約して人に伝わらなかった事例が出たとき。設定のキーの名前を変えるとき (rule の値は変えない約束なので、別名を足す)。AI に導入を代行させたい要望が出たとき (F)
-- 状態: 採用 (床の `fix` の文は D-080 で TUI の表示名を添える形に更新)
+- 状態: 採用 (床の `fix` の文は D-080 で TUI の表示名を添える形に更新。一部追記 (allow.keys で修飾キーつきのクリックを断る fix の <変え方> は「を空にする」。D-137))
 - 追記 (2026-10-25、実装のステップ 4、まとめ): 判断の本文の層の役割は 4 値 (床 `Floor` / 床なし `NoFloor` / 場所を引けない `Unresolved` / 追加の層 `Overlay`) のまま実装した。変えた所は `config` (`LayerRole`、`Layer::role`、`load_layers` が床のファイルの無い閉じた層を `NoFloor` に、追加の層を `Overlay` にする)、`policy` (`CONFIG_RULES`、`RULE_BUILTIN`、`RULE_SAVE_PATH`、`Denied` の `rule` と `fix`、`Denied::is_builtin` (`builtin` の真偽の項目を置き換えた)、`Denied::into_error`、各 `check_*` の作り方を寄せた `Policy::denied`、上限の層を床から順に選ぶ `check_text_len`、`check_action_count`、`check_duration`)、`validate` (`SaveRefusal` の `rule` と `fix`、`Issue` の `rule` と `fix`、`Issue::denied`、`Validation::first_issue`)、`error` (`DenyRule`、`AppError::deny` (Box 1 つ)、`with_deny`、`fix`、`to_json` の `error.rule` と `error.fix`)、`run` (`first_issue_error` と `validation_error`、`check_window` の 7 の message の頭、`sensitive_window_hit` で機密の窓の 7 に `rule` だけを写す)、`cli` (`validation_outcome`、`windows` と撮影の許可の専用の hint、`Command::Guide` の `--setup`、`setup_guide`、`roaming_edit_rule`)、`hint` と `mcp` (既定の次の手 (4) と `INSTRUCTIONS` に `error.fix` の扱い)、`tui` (実行の失敗と事前検査の行の下の「直し方:」)。テストは `denied_carries_config_key_as_rule`、`fix_names_floor_overlay_and_missing_floor`、`builtin_key_has_rule_but_no_fix`、`missing_floor_overrides_fix_of_any_layer`、`limit_fix_points_at_first_short_layer`、`load_layers_marks_missing_floor_file_and_overlays`、`config_rules_are_tui_field_keys`、`save_refusal_rules`、`to_json_has_rule_and_fix_only_when_set`、`validate_issues_carry_rule_and_fix`、`validation_error_copies_first_issue_rule_and_fix`、`sensitive_capture_refusal_has_rule_but_no_fix`、`click_on_unlisted_process_reports_rule_and_fix`、`shot_without_floor_reports_missing_floor_fix`、`validate_and_run_report_top_level_rule_and_fix`、`windows_denied_hint_mentions_fix`、`mcp_run_denied_carries_rule_and_fix`、`run_failure_shows_fix_line`、`setup_guide_absent_floor_has_no_tui_steps`、`setup_guide_embeds_exe_in_mcp_lines_and_json`、`setup_guide_tells_tui_steps_when_floor_missing`、`setup_guide_warns_for_target_path`、`setup_guide_denies_edit_of_roaming_floor_dir`、tests/cli_child.rs の `guide_setup_prints_own_exe_path`。tests/policy_props.rs は `d.builtin` を `d.is_builtin()` にしただけで、性質は変えていない (D-071)。文書は README (使い方の表の `guide --setup`、「AI に使わせるときは」の段落、出力の形の段落に `error.rule` の値の一覧と `error.fix` の文の形、終了コードの表の直後の段落、MCP の節の失敗の形と推奨の権限、TUI の「直し方:」の行)、手引き (失敗の項目の説明に `error.rule` と `error.fix`、終了コードの表の 4 と 7 の行、表の下の「人間に許可を頼むとき」を `error.fix` が無いときに限った。30000 バイトに収めるため、同じ表の 7 の「(送る前に判定する)」、`host_unknown` と撮影の 7 の 2 文を詰めた (`host_unknown` は「`focus` や再試行で変わらない」、撮影の 7 は `hint` に従うだけにし、`--window` の重なりなら `focus` で直る場合を言い切らない)、10 の「含む」、11 の理由の列挙 (上の「ウィンドウを前面にする」の節を指す)、12 と 15 の `executed` の括弧、14 の「(`executed` が無ければ何も送っていない)」(表の下の段落と重なる)、許可の頼み方の「大文字小文字と `.exe` の有無は問わない」を詰めた)。手動確認は CHECKLIST の手順 25 (release の `guide --setup` の出力を目で見る。許可に無いプロセスへの `focus` を 1 つだけ書いた操作列を `validate` に通し、`rule` と `fix` を読んで TUI の項目名を人が探す。装置に触れない)
 
 ### D-080 床の `error.fix` と `guide --setup` の TUI の手順に、TUI の左の一覧での場所「<節> > <項目>」を添える
@@ -1940,4 +1941,32 @@
   - 手引きは全文だけの「操作列 JSON」の節に書き、要点版には足さない (要点版は上限 21000 バイトのほぼ上限。読み手には失敗のときの hint で届く)。既存の「撮った画像はそのまま見える」の言い切り (手引きの MCP の節、参照、設計メモ) は「成功なら」に限る (新しい但し書きと同じ文書の中で食い違わせない)
 - 根拠: 形を変える案 (B、C) は外に見える結果の形を変える。A は形を変えずに、画像が見えないときの理由と回り道 (path にも保存する、失敗しうる操作の前で run を分ける) を、結果だけで読めるようにする。サーバー側が画像を捨てていないことはモックのテストで固定する
 - 覆る条件: Claude Code が `isError` の結果の画像を出すようになったとき (文を外す)。他のクライアントで困った報告が来たとき。path の画像でも困った報告が来たとき。形を変えてよいと利用者が決めたとき (B を見直す)。一手ずつの道具に撮影の後の段が増えたとき。要点版に余裕ができたとき (要点版にも書く)
+- 状態: 採用 (2026-11-10)
+
+### D-137 `click` / `double_click` に `modifiers` (ctrl、shift、alt) を足し、修飾キーを押したままのクリックを 1 回の SendInput で送る
+- 日付: 2026-11-10
+- 場面: 別のプロジェクトからの起票。GPUI のアプリの検証で、複数選択の Ctrl クリック (出し入れ) と Shift クリック (範囲選択) を ai-cu で打てなかった。`key` は押して離すまでを 1 操作で送るので、押したままのクリックを組めない
+- 選択肢: A `click` / `double_click` に `modifiers` を足す (操作列、MCP の道具、CLI の表面を変える) / B 任意のキーを押したままにする操作 (key_down・key_up) を足す / C 何もせず人の手に残す
+- 判断: A (○。利用者が決めた)。B は押したままの状態が操作をまたぎ、後始末とガードの判断が大きくなるので採らない。利用者が決めた細部は次の 3 つ
+  - 使える修飾キーは `ctrl`、`shift`、`alt` の 3 つ。`win` は入れない (推奨は ctrl と shift だけだったが、Alt クリックも打てる方を利用者が選んだ)
+  - `modifiers` が空でないときは、`click` / `double_click` の許可に加えて操作の種類 `key` (`allow.actions` / `deny.actions`) にも通す。`deny.actions = ["key"]` の設定をくぐらない (D-028 を広げる)
+  - どの層でも `allow.keys` が空でなければ、修飾つきのクリックを断る (4、rule は `allow.keys`)。`fix` は人間向けの直し方 (D-079) なので <変え方> は「を空にする」だけにし、「modifiers なしなら打てる」は message (AI 向け) に分ける。許可リストに修飾キーだけは書けないので、許可を広げない側に倒す。`deny.keys` は見ない (修飾キーだけの組み合わせは keys の書式で書けないので当たる値が無い。止めたい人は `deny.actions` の `key` で止まる)
+  - ここから下は自分で決めた細部 (spec の「自分で決めたこと」の表)
+  - 修飾キーの押下、クリック、逆順の離しを 1 つのマウスの束 (1 回の `SendInput`) で送る。届く先の点はクリックの点 1 つ。`key` の組み合わせ (`plan::key_events`) と同じく、間に人の入力が割り込まない。押下の記録と後始末は束の中のキーの押下も数えるので、途中で止まっても離す。押して離す形は `plan::key_events` と共有する関数 (`hold_modifiers`) 1 つで作る
+  - 押す順は正規の順 (ctrl、alt、shift。`ClickModifier` の宣言の順で、keys.rs の正規の順と同じ)、離す順はその逆。書いた順に依らず同じイベント列になる。名前と仮想キーは `keys::Modifier` から引く (対応表を 2 つ作らない)
+  - 修飾キーがあれば、離し始める前 (最初の修飾キーの up の前) に未割り当ての仮想キー 0xE8 (`plan::MENU_MASK_VK`) を 1 回押して離す (抑え)。Alt を押して離す間に他のキーが無いと前面の窓がメニュー (SC_KEYMENU) に入りうる。また、修飾キーだけの押して離す列は入力言語・配列の切り替えのホットキー (左 Alt+Shift、Ctrl+Shift) とも同じ形になる。間に別のキーを 1 回挟めば、どちらも「修飾キーだけ」ではなくなる (推定。言語の切り替えは実機で測っていない。クリックがそれを打ち消すかも確かめていない)。規則を「修飾キーがあれば常に」にして組み合わせごとの場合分けを作らない。0xE8 は Microsoft の仮想キーの表で未割り当てで、AutoHotkey が同じ目的 (#MenuMaskKey の既定) に使う。抑えの列を作るのは `plan::menu_mask_events` だけ。`key` の組み合わせには入れない (主のキーが間に入るので要らない)
+  - 同じ修飾キーの重複は形の検査で断る (3 `invalid_script`。CLI・MCP のどの入口でも)。黙って畳むと書き手の誤りを隠す。空の配列は修飾なしと同じ。未知の名前は、CLI の `--modifiers`、MCP の一手ずつの click / double_click、MCP の `run` では引数の誤りで 2、CLI の `run` (操作列の JSON) では 3 (既存の未知のフィールドと同じ扱い)。操作列の JSON と MCP は小文字だけ、CLI の `--modifiers` は `parse_button` と同じく大文字小文字を区別しない (カンマ区切り、繰り返しも可)
+  - `ctrl` と `alt` を両方書いたクリックは、組み込みの拒否 (Ctrl+Alt 系。D-019、D-028) で断る (4 `policy_denied`、何も送らない)。設定で緩められない組み込みの拒否を押したままのクリックでくぐらせない。判定は keys.rs の 1 か所 (修飾キーの集合を見る関数を切り出し、`KeyCombo::builtin_denied` からも呼ぶ)
+  - 修飾キーつきのクリックは、座標の下の窓に加えて前面の窓もガード (キーの束と同じ判定) に通す (D-033 の届く先の判定を広げる)。修飾キーのイベントは前面の窓に届くので、マウスのガードだけだと許可の外の前面の窓 (端末など) に Ctrl / Alt の押下が届く。前面の結果は pinned_pid とパスワード欄の判定には使わない (文字を送らないため)
+  - 後始末 (失敗や停止の後に押したままを離す) は変えない。Alt の抑えは送らず、離す方向だけを送る (D-019、D-036、D-039 の「後始末は離す方向だけ」の約束を保つ)。後始末に押下を送らせると、前面のガード・停止の確認・人の停止の扱いを後始末の側に足すことになる。限界: 修飾つきのクリックの束の SendInput が OS の誤りで途中まで入ったときだけ、抑えなしの離しで前面の窓がメニューや入力言語の切り替えに入りうる (害はメニューに入る (Esc で戻る) まで)
+  - `mcp.require_approval` は広げない (`key` の確認を求めていても、`click` の道具の修飾つきは確認なし)。確認は道具の名前の単位で効く (run の中の key も key の確認を受けない) 今の意味 (D-078、D-101) に合わせる。D-078 の追記と safety.md の毎回の承認の限界の列に書く
+  - 実装のステップ 1 では modifiers が空でない操作を形の検査で仮に断り、ステップ 2 で許可と前面のガードを入れるときに外す。途中のコミットに、許可もガードも通らずに修飾キーを送る穴を作らない
+  - TUI の試し実行の確認の「最初の操作」の分類で、キーのイベントを含むマウスの束はキーボード扱い (前面にしないと 7 の案内) にする。判定 (`plan::has_key_events`) をガードと共有し、判定と案内を食い違わせない
+  - TUI の結果の 1 行要約に修飾キーを出す (`click (1, 2) left ctrl+shift`)。失敗した操作の表示から修飾キーが落ちない
+  - 押されたままのキーの事前の判定 (keys_held、D-066) は変えない (実行の最初に 1 回だけ見るので、自分の押下に引っかからない)
+  - `drag`・`move`・`scroll` には足さない。要望はクリックで、Ctrl ドラッグ (コピー) は束が分かれ、押したままの間のガードの扱いが別の判断になる
+  - 手引きの要点版には足さず、全文の操作列の節と参照と道具の説明に書く (要点版は上限 21000 バイトのほぼ上限。D-136)
+  - 実機の手動確認 (CHECKLIST) は足さない。フィクスチャの実入力テストで、修飾キーの状態がクリックの時点で立っていること、終わった後に押されたままでないこと、Alt の抑えを確かめる
+- 根拠: A は要望 (Ctrl / Shift クリック) を 1 操作で満たし、押したままの状態が操作をまたがないので、後始末とガードの約束を広げずに済む。許可とガードは「修飾キーは前面に届くキーの入力でもある」として、キーの側の判定 (操作の種類 key、前面のガード、組み込みの拒否) に通し、許可を広げない側に倒す
+- 覆る条件: 1 回で送るとアプリが修飾キーを読み落とす事例が出たとき (押下の後に待ちを挟む)。組み込みの拒否の規則を変えるとき。後始末の抑えなしの Alt でメニューに入って困った事例が出たとき。システムメニューを持つ実のアプリの窓で、抑えなしでも Alt クリックでメニューに入らないと分かったとき (抑えを外してよい。フィクスチャはシステムメニューを持たないので、フィクスチャの結果だけでは外さない)。0xE8 に反応するアプリの事例が出たとき。修飾つきのクリックで入力言語が切り替わった事例が出たとき (抑えが効いていない)。修飾つきクリックで確認を求めたい要望が出たとき (`require_approval` を見直す)。利用者が「Ctrl クリックだけを止めたい」と言ったとき (`deny.keys` の照合を見直す)。Ctrl / Shift ドラッグの要望が来たとき。要点版に余裕ができたとき。実のアプリ (エクスプローラーの複数選択など) で効かない事例が出たとき (手動確認を足す)
 - 状態: 採用 (2026-11-10)
