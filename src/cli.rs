@@ -2048,6 +2048,21 @@ mod tests {
         assert!(GUIDE.contains("送った文字は未確定に入る"), "{GUIDE}");
     }
 
+    /// 手引きの全文の操作列の節に、修飾キーを押したままのクリック (`modifiers`) の 1 文がある。
+    /// 要点版は上限 (21000 バイト) のほぼ上限なので、その行は要点版には入れない (D-137)
+    #[test]
+    fn guide_full_mentions_click_modifiers() {
+        let line = GUIDE
+            .lines()
+            .find(|l| l.contains("`modifiers`") && l.contains("押したまま"))
+            .expect("全文に modifiers と「押したまま」の行がある");
+        assert!(line.contains("前面の窓も許可"), "{line}");
+        assert!(
+            !guide_summary().lines().any(|l| l == line),
+            "要点版に入っている: {line}"
+        );
+    }
+
     /// 要点版の `focus` の最小化の行は、復元しない理由と次の手 (`windows` で確かめて `focus` し直す) を書き、
     /// 人のマウスの移動で止まる `wait_for` を勧めない (D-134)
     #[test]

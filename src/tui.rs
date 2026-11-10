@@ -3550,7 +3550,7 @@ fn help_lines() -> Vec<String> {
         "",
         "判定の規則: 組み込みの拒否 > 拒否リスト > 許可リスト",
         "許可リストが空 = その次元は制限なし。1 件でもあれば一致したものだけ",
-        "組み込みの拒否: Win を含む組み合わせ、Alt+F4、Ctrl+Alt+、Ctrl+Shift+Esc、Ctrl+Esc",
+        "組み込みの拒否: Win を含む組み合わせ、Alt+F4、Ctrl+Alt+ (修飾キーつきのクリックも)、Ctrl+Shift+Esc、Ctrl+Esc",
         "--config と AI_CU_CONFIG の層は、基本の層 (既定の場所) より許可を広げられない",
     ]
     .iter()
@@ -4238,6 +4238,24 @@ mod tests {
         assert!(help.contains("u・Ctrl+Z 元に戻す"), "{help}");
         assert!(help.contains("?・F1 ヘルプ"), "{help}");
         assert!(help.contains("q 終了 (主画面では Esc も)"), "{help}");
+    }
+
+    /// ヘルプの組み込みの拒否の行は修飾キーつきのクリックの Ctrl+Alt にも触れ (D-137)、
+    /// 120x32 のヘルプで折られずに 1 行に収まり、最後の行まで省略されずに出る
+    #[test]
+    fn help_builtin_deny_line_mentions_click_modifiers_and_fits() {
+        let lines = help_lines();
+        let builtin = lines
+            .iter()
+            .find(|l| l.starts_with("組み込みの拒否:"))
+            .expect("組み込みの拒否の行がある");
+        assert!(builtin.contains("修飾キーつきのクリック"), "{builtin}");
+        let mut a = app();
+        a.update(&press(KeyCode::F(1)));
+        let text = draw(&a, 120, 32);
+        assert!(has(&text, builtin), "{text}");
+        assert!(has(&text, lines.last().unwrap()), "{text}");
+        assert!(!text.contains("…(省略)"), "{text}");
     }
 
     #[test]
