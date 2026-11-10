@@ -1306,6 +1306,20 @@ impl Executor<'_> {
                 match step {
                     Step::Batch { target, events } => {
                         let mid_drag = !state.held_buttons.is_empty();
+                        // 修飾キーつきのクリック (D-137): マウスの束でもキーのイベントを含めば、修飾キーは前面の
+                        // 窓に届くため、座標の下の窓より先に前面の窓も確かめる (D-033 の届く先の判定を広げる)。
+                        // 前面の窓は捨てる (文字を送らないので、pinned_pid とパスワード欄の判定には使わない)
+                        if matches!(target, Target::Mouse { .. })
+                            && crate::plan::has_key_events(events)
+                        {
+                            self.guard(&Target::Keyboard, ctx).map_err(|mut e| {
+                                e.message = format!(
+                                    "修飾キーつきのクリックは前面の窓にも修飾キーが届くので前面も確かめる: {}",
+                                    e.message
+                                );
+                                mid_drag_hint(e, mid_drag, target, ctx.surface).at(i)
+                            })?;
+                        }
                         let fg = self
                             .guard(target, ctx)
                             .map_err(|e| mid_drag_hint(e, mid_drag, target, ctx.surface).at(i))?;
@@ -2940,6 +2954,126 @@ mod tests {
         assert!(
             world.borrow().sent.is_empty(),
             "前面が対象でなければキーを 1 つも送らない"
+        );
+    }
+
+    /// 修飾キーつきのクリックの場: 座標の下は許可の窓 (target)、前面は許可の外の窓 (cmd) (D-137)
+    fn modifier_click_world(foreground_allowed: bool) -> (Rc<RefCell<World>>, Policy) {
+        let mut w = World::new();
+        if !foreground_allowed {
+            w.foreground = Some(other("cmd.exe", 0x20, 99));
+        }
+        let p = policy(&format!("{ENABLED}[allow]\nprocesses=[\"target\"]\n"));
+        (w.shared(), p)
+    }
+
+    /// 前面が許可の外なら、修飾キーつきのクリックは何も送らずに 7。文に修飾キーの理由、detail は前面の窓 (D-137)
+    #[test]
+    fn modifier_click_refuses_when_foreground_is_not_allowed() {
+        for json in [
+            r#"{"type":"click","x":10,"y":10,"modifiers":["ctrl"]}"#,
+            r#"{"type":"double_click","x":10,"y":10,"modifiers":["shift"]}"#,
+        ] {
+            let (world, p) = modifier_click_world(false);
+            let (r, _) = exec(&world, &p, &mut StopSet::new(), &script(json));
+            let e = r.unwrap_err();
+            assert_eq!(e.kind, ErrorKind::ForegroundGuard, "{e}");
+            assert!(e.message.contains("修飾キー"), "{}", e.message);
+            assert_eq!(e.action_index, Some(0));
+            let detail = e.detail.as_deref().expect("detail");
+            assert_eq!(detail["window"]["process"], "cmd.exe", "{detail}");
+            assert!(detail.get("point").is_none(), "{detail}");
+            assert!(world.borrow().sent.is_empty(), "{:?}", world.borrow().sent);
+        }
+    }
+
+    /// 同じ場で修飾なしのクリックは前面を見ずに通る (マウスは座標の下の窓に届く。D-033)
+    #[test]
+    fn plain_click_does_not_check_foreground() {
+        let (world, p) = modifier_click_world(false);
+        let (r, _) = exec(
+            &world,
+            &p,
+            &mut StopSet::new(),
+            &script(r#"{"type":"click","x":10,"y":10}"#),
+        );
+        assert!(r.is_ok(), "{r:?}");
+        assert_eq!(world.borrow().sent.len(), 1);
+    }
+
+    /// 前面も許可の窓なら、修飾キーつきのクリックは計画のイベント列をそのまま 1 つの束で送る (D-137)
+    #[test]
+    fn modifier_click_passes_with_allowed_foreground() {
+        let json = r#"{"type":"click","x":10,"y":10,"modifiers":["shift","ctrl"]}"#;
+        let (world, p) = modifier_click_world(true);
+        let (r, _) = exec(&world, &p, &mut StopSet::new(), &script(json));
+        assert!(r.is_ok(), "{r:?}");
+        let s = script(json);
+        let planned: Vec<Vec<InputEvent>> = crate::plan::plan(&s.actions[0])
+            .unwrap()
+            .into_iter()
+            .filter_map(|st| match st {
+                Step::Batch { events, .. } => Some(events),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(planned.len(), 1);
+        assert!(crate::plan::has_key_events(&planned[0]));
+        assert_eq!(world.borrow().sent, planned);
+    }
+
+    /// 修飾キーつきのクリックの束の送信が OS の誤りで失敗しても、後始末は修飾キーを離す。後始末は離す方向だけで、
+    /// 押下 (抑えの 0xE8 も) を送らない (D-019、D-137)
+    #[test]
+    fn modifier_click_releases_modifiers_after_send_failure() {
+        let world = World::new().shared();
+        let p = policy(ENABLED);
+        let mut sink = FailOnce {
+            world: world.clone(),
+            fail_at: 1,
+            calls: 0,
+        };
+        let desktop = MockDesktop(world.clone());
+        let mut clock = MockClock(world.clone());
+        let mut images = MemoryImages::default();
+        let r = Executor {
+            policy: &p,
+            sink: &mut sink,
+            desktop: &desktop,
+            clock: &mut clock,
+            stops: &mut StopSet::new(),
+            images: &mut images,
+            indicator: &mut MockIndicator(world.clone()),
+            input_lock: &mut MockInputLock(world.clone()),
+        }
+        .execute(&script(
+            r#"{"type":"click","x":30,"y":40,"modifiers":["alt","shift"]}"#,
+        ));
+        assert_eq!(r.unwrap_err().kind, ErrorKind::OsError);
+        let w = world.borrow();
+        let key_up = |vk: u16| InputEvent::Key {
+            vk,
+            down: false,
+            extended: false,
+        };
+        assert_eq!(w.sent.len(), 3, "{:?}", w.sent);
+        // (1) キーを離す束 (離す方向だけ。抑えの 0xE8 の離しが入るのは許す)
+        assert!(w.sent[0].iter().all(|e| e.is_release()), "{:?}", w.sent[0]);
+        assert!(w.sent[0].contains(&key_up(0x12)), "{:?}", w.sent[0]);
+        assert!(w.sent[0].contains(&key_up(0x10)), "{:?}", w.sent[0]);
+        // (2) クリックの点への移動 (3) ボタンを離す
+        assert_eq!(w.sent[1], vec![InputEvent::MoveTo { x: 30, y: 40 }]);
+        assert!(
+            matches!(w.sent[2][..], [InputEvent::Button { down: false, .. }]),
+            "{:?}",
+            w.sent[2]
+        );
+        assert!(
+            !w.all_events()
+                .iter()
+                .any(|e| matches!(e, InputEvent::Key { down: true, .. })),
+            "後始末に押下は無い: {:?}",
+            w.sent
         );
     }
 

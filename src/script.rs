@@ -672,11 +672,6 @@ fn click_modifiers_issue(name: &str, modifiers: &[ClickModifier]) -> Option<Stri
             ));
         }
     }
-    if !modifiers.is_empty() {
-        // 許可 (操作の種類 key、allow.keys) と前面のガードが入るまでの仮の断り。途中のコミットに、
-        // 許可もガードも通らずに修飾キーを送る穴を作らない (D-137)
-        return Some(format!("{name} の modifiers はまだ使えない (D-137)"));
-    }
     None
 }
 
@@ -886,16 +881,14 @@ mod tests {
         );
     }
 
-    /// 許可と前面のガードが入るまで (D-137 の実装のステップ 2)、修飾つきのクリックは形の検査で断る。修飾なしは通る
+    /// 重複の無い修飾キーは形の検査を通る (許可と前面のガードは validate と実行器が見る。D-137)
     #[test]
-    fn click_modifiers_are_refused_until_guarded() {
+    fn click_modifiers_pass_shape_check() {
         for json in [
+            r#"{"type":"click","x":1,"y":2,"modifiers":["ctrl","shift"]}"#,
             r#"{"type":"click","x":1,"y":2,"modifiers":["ctrl"]}"#,
             r#"{"type":"double_click","x":1,"y":2,"modifiers":["shift"]}"#,
-        ] {
-            assert!(shape_issue(&one_action(json).unwrap()).is_some(), "{json}");
-        }
-        for json in [
+            r#"{"type":"double_click","x":1,"y":2,"modifiers":["alt","shift","ctrl"]}"#,
             r#"{"type":"click","x":1,"y":2}"#,
             r#"{"type":"click","x":1,"y":2,"modifiers":[]}"#,
             r#"{"type":"double_click","x":1,"y":2}"#,

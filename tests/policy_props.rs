@@ -529,6 +529,75 @@ fn prop_overlays_never_widen_checks() {
     }
 }
 
+/// 修飾キーつきのクリックの修飾キー (D-137)。空は無条件に通るので生成しない。ctrl と alt の組は組み込みの拒否
+fn arb_click_modifiers() -> impl Strategy<Value = Vec<ClickModifier>> {
+    prop_oneof![
+        2 => Just(vec![ClickModifier::Ctrl]),
+        2 => Just(vec![ClickModifier::Shift, ClickModifier::Alt]),
+        1 => Just(vec![ClickModifier::Ctrl, ClickModifier::Alt]),
+    ]
+}
+
+/// 修飾キーつきのクリックが通りやすい形に寄せる (この性質の中だけ。D-137): 実入力を有効にし、allow.actions が
+/// 空でなければ key を足し、deny.actions から key を外す。allow.keys を空にするのは追加の層だけ
+/// (床は生成のまま残し、「床は空でなく追加の層は空」の反例が残るようにする)
+fn steer_for_click_modifiers(cfg: &mut Config, overlay: bool) {
+    let is_key = |s: &String| ActionKind::parse(s).is_some_and(|k| k == ActionKind::Key);
+    cfg.general.input_enabled = true;
+    if !cfg.allow.actions.is_empty() && !cfg.allow.actions.iter().any(is_key) {
+        cfg.allow.actions.push("key".to_string());
+    }
+    cfg.deny.actions.retain(|s| !is_key(s));
+    if overlay {
+        cfg.allow.keys.clear();
+    }
+}
+
+/// 性質 1 の修飾キーつきのクリックの版 (D-137): 追加の層は `check_click_modifiers` を広げない。
+/// `P` (床 + 追加の層) で通るものは `Pf` (床だけ) でも通る
+#[test]
+fn prop_click_modifiers_overlay_never_widens() {
+    let passed = Cell::new(0u32);
+    let strategy = (
+        (arb_config(), vec(arb_config(), 0..=3)),
+        arb_click_modifiers(),
+        any::<bool>(),
+    );
+    check(
+        CASES,
+        strategy,
+        |((mut floor, mut overlays), mods, steer)| {
+            if steer {
+                steer_for_click_modifiers(&mut floor, false);
+                for o in &mut overlays {
+                    steer_for_click_modifiers(o, true);
+                }
+            }
+            let overlays: Vec<Layer> = overlays.iter().map(layer).collect();
+            let (p, pf) = policies(&layer(&floor), &overlays);
+            let rp = p.check_click_modifiers(&mods).is_ok();
+            if rp {
+                passed.set(passed.get() + 1);
+            }
+            prop_assert!(
+                !rp || pf.check_click_modifiers(&mods).is_ok(),
+                "check_click_modifiers が追加の層で広がった: {mods:?}"
+            );
+            Ok(())
+        },
+    );
+    eprintln!(
+        "PROPS click_modifiers: P が通った {} / {CASES}",
+        passed.get()
+    );
+    assert!(
+        passed.get() >= CASES / 10,
+        "click_modifiers で P が通った件数 {} が下限 {} に届かない (生成の分布を直す)",
+        passed.get(),
+        CASES / 10
+    );
+}
+
 /// 1/2 で「制限しない形」(実入力が有効で、allow のプロセス、クラス、領域が空) にした設定
 fn arb_maybe_unrestricted_layer() -> impl Strategy<Value = Layer> {
     (any::<bool>(), arb_config()).prop_map(|(open, mut c)| {
@@ -742,8 +811,15 @@ fn prop_builtin_key_denial_is_absolute() {
     let strategy = (vec(arb_layer(), 1..=4), arb_key_from(&BUILTIN_KEYS));
     check(CASES, strategy, |(layers, key)| {
         let k: KeyCombo = key.parse().expect("組み込みの拒否のキーは解析できる");
-        let d = Policy::new(layers).check_key(&k);
+        let p = Policy::new(layers);
+        let d = p.check_key(&k);
         prop_assert!(matches!(&d, Err(d) if d.is_builtin()), "{key}: {d:?}");
+        // 修飾キーつきのクリックの ctrl と alt の組も同じ (D-137)
+        let d = p.check_click_modifiers(&[ClickModifier::Ctrl, ClickModifier::Alt]);
+        prop_assert!(
+            matches!(&d, Err(d) if d.is_builtin()),
+            "ctrl+alt のクリック: {d:?}"
+        );
         Ok(())
     });
 }
