@@ -352,13 +352,22 @@ fn resolve_capture_window_parts(
                 format!("撮る対象のウィンドウが見つからない ({shown})"),
             )
         })?;
+    // 許可の判定は 1 回だけ評価する。最小化の 12 の detail は許可された窓のときだけ足し、返すエラーの順は
+    // 従来のまま (最小化、起動した側、許可) にする (D-135)
+    let allowed = policy.check_window(&w.info);
+    let found = || serde_json::json!({ "window": window_detail(&w.info) });
     let rect = match (w.minimized, w.rect) {
         (false, Some(r)) => r,
         _ => {
-            return Err(AppError::new(
+            let err = AppError::new(
                 ErrorKind::WindowNotFound,
                 format!("撮る対象のウィンドウは最小化されている ({shown})。ai-cu は復元しない"),
-            ));
+            );
+            return Err(if allowed.is_ok() {
+                err.with_detail(found())
+            } else {
+                err
+            });
         }
     };
     if host_pids.contains(&w.info.pid) {
@@ -369,16 +378,16 @@ fn resolve_capture_window_parts(
                 w.info.process, w.info.pid
             ),
         )
-        .with_hint(hint(Hint::HostCapture, surface)));
+        .with_hint(hint(Hint::HostCapture, surface))
+        .with_detail(found()));
     }
-    policy
-        .check_window(&w.info)
-        .map_err(|d| d.into_error(ErrorKind::PolicyDenied))?;
+    allowed.map_err(|d| d.into_error(ErrorKind::PolicyDenied))?;
     let rect = rect.intersection(&screen).ok_or_else(|| {
         AppError::new(
             ErrorKind::WindowNotFound,
             format!("撮る対象のウィンドウ {rect} が画面 {screen} の外にある ({shown})"),
         )
+        .with_detail(found())
     })?;
     // 隠れている部分には別のウィンドウの中身が写り込むので、撮らない (前面にしてから撮る)
     if let Some((cover, point)) =
@@ -4686,6 +4695,113 @@ mod tests {
         let d = detail(&e);
         assert!(d.get("visible").is_none(), "{d}");
         assert_eq!(d["see_through"], false);
+    }
+
+    // --- 撮影の対象の 7 と 12 の error.detail.window (D-135) ---
+
+    /// メモ帳 (0x20、pid 4242) だけがある世界。`edit` で窓を変える
+    fn capture_world(edit: impl FnOnce(&mut TopWindow)) -> Rc<RefCell<World>> {
+        let mut np = top(0x20, "Notepad.exe", "a.txt - メモ帳");
+        edit(&mut np);
+        let mut w = World::new();
+        w.top = vec![np];
+        w.shared()
+    }
+
+    /// `resolve_capture_window` を直接呼び、失敗を返す
+    fn resolve_capture_err(
+        world: &Rc<RefCell<World>>,
+        policy: &Policy,
+        process: &str,
+        host_pids: &[u32],
+    ) -> AppError {
+        let desktop = MockDesktop(world.clone());
+        let screen = world.borrow().screen;
+        let target = WindowTarget {
+            process: process.into(),
+            title: None,
+        };
+        resolve_capture_window(&desktop, policy, screen, &target, host_pids, Surface::Cli)
+            .unwrap_err()
+    }
+
+    /// 見つけた窓の window (題名なし)
+    fn assert_found_window(e: &AppError) {
+        let d = detail(e);
+        assert_eq!(d["window"]["process"], "Notepad.exe");
+        assert_eq!(d["window"]["class"], "TargetClass");
+        assert_eq!(d["window"]["pid"], 4242);
+        assert_eq!(d["window"]["hwnd"], 0x20);
+        assert!(d["window"].get("title").is_none(), "{d}");
+        assert_no_title(e);
+    }
+
+    /// 起動した側の窓の 7 は、その窓の window を持つ
+    #[test]
+    fn capture_host_window_detail_has_window() {
+        let world = capture_world(|_| {});
+        let e = resolve_capture_err(&world, &notepad_policy(), "notepad.exe", &[4242]);
+        assert_eq!(e.kind, ErrorKind::ForegroundGuard, "{e}");
+        assert_eq!(e.hint.as_deref(), Some(HOST_CAPTURE_HINT));
+        assert_found_window(&e);
+    }
+
+    /// 起動した側の 7 は許可で絞らない。deny の窓でも 7 のままで、window を持つ
+    #[test]
+    fn capture_host_denied_window_still_has_window() {
+        let world = capture_world(|_| {});
+        let p = policy(&format!("{ENABLED}[deny]\nprocesses=[\"notepad\"]\n"));
+        let e = resolve_capture_err(&world, &p, "notepad.exe", &[4242]);
+        assert_eq!(e.kind, ErrorKind::ForegroundGuard, "{e}");
+        assert_eq!(e.hint.as_deref(), Some(HOST_CAPTURE_HINT));
+        assert_found_window(&e);
+    }
+
+    /// 許可された窓が最小化なら 12 で、その窓の window を持つ
+    #[test]
+    fn capture_minimized_detail_has_window() {
+        let world = capture_world(|np| {
+            np.minimized = true;
+            np.rect = None;
+        });
+        let e = resolve_capture_err(&world, &notepad_policy(), "notepad.exe", &[]);
+        assert_eq!(e.kind, ErrorKind::WindowNotFound, "{e}");
+        assert!(e.message.contains("最小化"), "{}", e.message);
+        assert_found_window(&e);
+    }
+
+    /// 画面の外の 12 は、その窓の window を持つ
+    #[test]
+    fn capture_offscreen_detail_has_window() {
+        let world = capture_world(|np| np.rect = Some(Rect::new(-900, 0, 800, 600)));
+        let e = resolve_capture_err(&world, &notepad_policy(), "notepad.exe", &[]);
+        assert_eq!(e.kind, ErrorKind::WindowNotFound, "{e}");
+        assert!(e.message.contains("の外にある"), "{}", e.message);
+        assert_found_window(&e);
+    }
+
+    /// deny の窓が最小化なら、12 のまま detail を持たない (許可の外の窓の情報を増やさない)
+    #[test]
+    fn capture_minimized_denied_window_has_no_detail() {
+        let world = capture_world(|np| {
+            np.minimized = true;
+            np.rect = None;
+        });
+        let p = policy(&format!("{ENABLED}[deny]\nprocesses=[\"notepad\"]\n"));
+        let e = resolve_capture_err(&world, &p, "notepad.exe", &[]);
+        assert_eq!(e.kind, ErrorKind::WindowNotFound, "{e}");
+        assert!(e.message.contains("最小化"), "{}", e.message);
+        assert!(e.detail.is_none(), "{:?}", e.detail);
+    }
+
+    /// 見つからない 12 は detail を持たない (足す情報が無い)
+    #[test]
+    fn capture_not_found_has_no_detail() {
+        let world = capture_world(|_| {});
+        let e = resolve_capture_err(&world, &notepad_policy(), "absent.exe", &[]);
+        assert_eq!(e.kind, ErrorKind::WindowNotFound, "{e}");
+        assert!(e.message.contains("見つからない"), "{}", e.message);
+        assert!(e.detail.is_none(), "{:?}", e.detail);
     }
 
     /// Z 順の窓 1 つ (D-077)。`stack_windows` と同じく題名は空にする
