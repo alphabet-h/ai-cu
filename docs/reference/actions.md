@@ -8,8 +8,8 @@ README の「操作列 JSON」の詳細。[README に戻る](../../README.md#操
 
 | type | フィールド | 説明 |
 |------|------------|------|
-| `click` | `x`, `y`, `button` (`left` / `right` / `middle`、既定 `left`) | 移動して押して離す (1 回の `SendInput`)。操作列で次が `type` か `key` なら、その前に 200 ミリ秒待つ (`double_click` も同じ) |
-| `double_click` | `x`, `y`, `button` | ダブルクリック |
+| `click` | `x`, `y`, `button` (`left` / `right` / `middle`、既定 `left`), `modifiers` (省略可。`ctrl` / `shift` / `alt` の配列) | 移動して押して離す (1 回の `SendInput`)。操作列で次が `type` か `key` なら、その前に 200 ミリ秒待つ (`double_click` も同じ)。`modifiers` があれば修飾キーを押したままクリックする: 修飾キーを正規の順 (ctrl、alt、shift) に押し、クリックし、逆順に離すまでを 1 回の `SendInput` で送る (書いた順に依らない)。修飾キーは前面の窓に届くので、座標の下の窓に加えて前面の窓も許可された窓であること (違えば 7)。操作の種類 `key` の許可にも通し、どの層かの `allow.keys` が空でない設定と、`ctrl` と `alt` の組は断る (4)。同じ値の重複は 3。修飾キーを離し始める前に抑えのキー (未割り当ての仮想キー 0xE8) を押して離す (前面の窓がメニューや入力言語の切り替えに入らないように。D-137) |
+| `double_click` | `x`, `y`, `button`, `modifiers` | ダブルクリック。`modifiers` も `click` と同じ |
 | `drag` | `from: {x, y}`, `to: {x, y}`, `button`, `steps` (1 から 1000、既定 20), `duration_ms` (既定 300、最大 60000) | 始点で押し、`steps` 回に補間して移動し、終点で離す。各点の下の窓を確かめるので、窓のタイトルバーの drag は、窓がカーソルの後から動く分を見て、1 歩を掴んだ点から進む向きの窓の端までの距離の半分以下にする (1 歩 50 ms ほど。D-132) |
 | `move` | `x`, `y` | カーソルの移動 |
 | `scroll` | `clicks` (0 以外。正で上または右), `horizontal` (既定 false), `x` と `y` (省略可。組で指定すると先に移動) | 1 クリック = 1 ノッチ (WHEEL_DELTA = 120)。本物のホイールと同じく 1 ノッチずつ、間を 20 ミリ秒空けて送る (100 ノッチで約 2 秒。D-063) |

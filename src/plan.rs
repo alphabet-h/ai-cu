@@ -5,7 +5,7 @@ use serde::Serialize;
 use crate::device::InputEvent;
 use crate::geometry::{Point, Rect};
 use crate::keys::KeyCombo;
-use crate::script::{Action, Button, ElementFilter, Settle, WindowTarget};
+use crate::script::{Action, Button, ClickModifier, ElementFilter, Settle, WindowTarget};
 
 const VK_RETURN: u16 = 0x0D;
 const VK_TAB: u16 = 0x09;
@@ -134,34 +134,79 @@ pub fn interpolate(from: Point, to: Point, steps: u32) -> Vec<Point> {
         .collect()
 }
 
+/// 修飾キーを離し始める前に押して離す、未割り当ての仮想キー (D-137)。修飾キーだけの押して離しにならないように
+/// して、前面の窓のメニュー (Alt の SC_KEYMENU) や入力言語の切り替えに入るのを抑える
+pub const MENU_MASK_VK: u16 = 0xE8;
+
+/// 修飾キー (`mod_vks` の順) を押し、`inner` を挟んで、逆順に離す列。`key_events` と修飾つきのクリック (D-137)
+/// が共有する
+fn hold_modifiers(mod_vks: &[u16], inner: impl IntoIterator<Item = InputEvent>) -> Vec<InputEvent> {
+    let key = |vk: u16, down: bool| InputEvent::Key {
+        vk,
+        down,
+        extended: false,
+    };
+    let mut ev: Vec<InputEvent> = mod_vks.iter().map(|vk| key(*vk, true)).collect();
+    ev.extend(inner);
+    ev.extend(mod_vks.iter().rev().map(|vk| key(*vk, false)));
+    ev
+}
+
 /// キーの組み合わせを、押す・離すの列にする。修飾キーは先に押して後で逆順に離す。1 回で送る (D-019)。
 pub fn key_events(combo: &KeyCombo) -> Vec<InputEvent> {
-    let mut ev = Vec::new();
-    for m in &combo.modifiers {
-        ev.push(InputEvent::Key {
-            vk: m.vk(),
-            down: true,
-            extended: false,
-        });
-    }
+    let mod_vks: Vec<u16> = combo.modifiers.iter().map(|m| m.vk()).collect();
     let extended = combo.key.is_extended();
-    ev.push(InputEvent::Key {
-        vk: combo.key.vk,
-        down: true,
-        extended,
-    });
-    ev.push(InputEvent::Key {
-        vk: combo.key.vk,
-        down: false,
-        extended,
-    });
-    for m in combo.modifiers.iter().rev() {
-        ev.push(InputEvent::Key {
-            vk: m.vk(),
-            down: false,
-            extended: false,
-        });
+    hold_modifiers(
+        &mod_vks,
+        [
+            InputEvent::Key {
+                vk: combo.key.vk,
+                down: true,
+                extended,
+            },
+            InputEvent::Key {
+                vk: combo.key.vk,
+                down: false,
+                extended,
+            },
+        ],
+    )
+}
+
+/// 抑えのキー (`MENU_MASK_VK`) の押下と離し (D-137)。抑えの列を作るのはこの関数だけ
+pub fn menu_mask_events() -> [InputEvent; 2] {
+    let mut ev = Vec::with_capacity(2);
+    tap_vk(MENU_MASK_VK, &mut ev);
+    [ev[0], ev[1]]
+}
+
+/// イベント列にキーボードのイベントがあるか (修飾つきのクリックの束は、マウスの束でも前面の窓にキーが届く。D-137)
+pub fn has_key_events(events: &[InputEvent]) -> bool {
+    events.iter().any(InputEvent::is_keyboard)
+}
+
+/// クリック (`clicks` 回) の束のイベント列。修飾キーがあれば、正規の順に押してからクリックし、抑えのキーを
+/// 押して離してから逆順に離す (D-137)。修飾が無ければ移動とボタンだけ
+fn click_events(
+    p: Point,
+    b: Button,
+    clicks: usize,
+    modifiers: &[ClickModifier],
+) -> Vec<InputEvent> {
+    let mod_vks: Vec<u16> = ClickModifier::canonical(modifiers)
+        .iter()
+        .map(|m| m.modifier().vk())
+        .collect();
+    let mut inner = Vec::with_capacity(clicks * 2 + 2);
+    for _ in 0..clicks {
+        inner.push(button(b, true));
+        inner.push(button(b, false));
     }
+    if !mod_vks.is_empty() {
+        inner.extend(menu_mask_events());
+    }
+    let mut ev = vec![InputEvent::move_to(p)];
+    ev.extend(hold_modifiers(&mod_vks, inner));
     ev
 }
 
@@ -218,25 +263,23 @@ pub fn text_events(text: &str) -> Vec<Vec<InputEvent>> {
 /// 操作を手順に展開する。形の検査 (`script::shape_issue`) を通った操作を前提にする。
 pub fn plan(action: &Action) -> Result<Vec<Step>, String> {
     Ok(match action {
-        Action::Click { x, y, button: b } => {
+        Action::Click {
+            x,
+            y,
+            button: b,
+            modifiers,
+        } => {
             let p = Point::new(*x, *y);
-            vec![mouse(
-                vec![p],
-                vec![InputEvent::move_to(p), button(*b, true), button(*b, false)],
-            )]
+            vec![mouse(vec![p], click_events(p, *b, 1, modifiers))]
         }
-        Action::DoubleClick { x, y, button: b } => {
+        Action::DoubleClick {
+            x,
+            y,
+            button: b,
+            modifiers,
+        } => {
             let p = Point::new(*x, *y);
-            vec![mouse(
-                vec![p],
-                vec![
-                    InputEvent::move_to(p),
-                    button(*b, true),
-                    button(*b, false),
-                    button(*b, true),
-                    button(*b, false),
-                ],
-            )]
+            vec![mouse(vec![p], click_events(p, *b, 2, modifiers))]
         }
         Action::Drag {
             from,
@@ -453,6 +496,7 @@ mod tests {
             x: 5,
             y: 6,
             button: Button::Left,
+            modifiers: vec![],
         })
         .unwrap();
         assert_eq!(steps.len(), 1);
@@ -469,6 +513,148 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    const VK_CTRL: u16 = 0x11;
+    const VK_ALT: u16 = 0x12;
+    const VK_SHIFT: u16 = 0x10;
+
+    fn k(vk: u16, down: bool) -> InputEvent {
+        InputEvent::Key {
+            vk,
+            down,
+            extended: false,
+        }
+    }
+
+    fn l(down: bool) -> InputEvent {
+        button(Button::Left, down)
+    }
+
+    /// 修飾つきの click / double_click を 1 つの束に計画し、その束のイベント列を返す
+    fn modifier_click_events(double: bool, modifiers: Vec<ClickModifier>) -> Vec<InputEvent> {
+        let (x, y, button) = (7, 8, Button::Left);
+        let a = if double {
+            Action::DoubleClick {
+                x,
+                y,
+                button,
+                modifiers,
+            }
+        } else {
+            Action::Click {
+                x,
+                y,
+                button,
+                modifiers,
+            }
+        };
+        let steps = plan(&a).unwrap();
+        assert_eq!(steps.len(), 1, "束は 1 つ: {steps:?}");
+        match &steps[0] {
+            Step::Batch { target, events } => {
+                assert_eq!(
+                    target,
+                    &Target::Mouse {
+                        points: vec![Point::new(7, 8)]
+                    },
+                    "届く先の点はクリックの点 1 つ"
+                );
+                events.clone()
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// 修飾キーは書いた順に依らず正規の順 (ctrl、alt、shift) で押し、逆順に離す。離し始める前に抑えを押して離す (D-137)
+    #[test]
+    fn click_with_modifiers_presses_in_order_and_releases_in_reverse() {
+        let ev = modifier_click_events(false, vec![ClickModifier::Shift, ClickModifier::Ctrl]);
+        assert_eq!(
+            ev,
+            vec![
+                InputEvent::move_to(Point::new(7, 8)),
+                k(VK_CTRL, true),
+                k(VK_SHIFT, true),
+                l(true),
+                l(false),
+                k(MENU_MASK_VK, true),
+                k(MENU_MASK_VK, false),
+                k(VK_SHIFT, false),
+                k(VK_CTRL, false),
+            ]
+        );
+        assert!(has_key_events(&ev));
+    }
+
+    /// 抑えは Alt に限らず、修飾があれば最初の修飾の離しの前に 1 回 (D-137)
+    #[test]
+    fn modifier_click_taps_mask_before_first_release() {
+        let ev = modifier_click_events(false, vec![ClickModifier::Alt]);
+        assert_eq!(
+            ev[3..],
+            [
+                l(false),
+                k(MENU_MASK_VK, true),
+                k(MENU_MASK_VK, false),
+                k(VK_ALT, false)
+            ]
+        );
+        let ev = modifier_click_events(false, vec![ClickModifier::Shift, ClickModifier::Alt]);
+        assert_eq!(
+            ev[4..],
+            [
+                l(false),
+                k(MENU_MASK_VK, true),
+                k(MENU_MASK_VK, false),
+                k(VK_SHIFT, false),
+                k(VK_ALT, false)
+            ]
+        );
+        assert_eq!(&ev[1..3], &[k(VK_ALT, true), k(VK_SHIFT, true)]);
+        assert_eq!(menu_mask_events(), [k(0xE8, true), k(0xE8, false)]);
+    }
+
+    /// double_click は 2 回のクリックの間も押したまま。修飾の離しは最後で、その直前に抑え (D-137)
+    #[test]
+    fn double_click_with_modifier_holds_across_both_clicks() {
+        let ev = modifier_click_events(true, vec![ClickModifier::Ctrl]);
+        assert_eq!(
+            ev,
+            vec![
+                InputEvent::move_to(Point::new(7, 8)),
+                k(VK_CTRL, true),
+                l(true),
+                l(false),
+                l(true),
+                l(false),
+                k(MENU_MASK_VK, true),
+                k(MENU_MASK_VK, false),
+                k(VK_CTRL, false),
+            ]
+        );
+    }
+
+    /// 修飾なしのクリックは今までの列のまま (抑えもキーのイベントも無い)
+    #[test]
+    fn plain_click_has_no_mask() {
+        let ev = modifier_click_events(false, vec![]);
+        assert_eq!(
+            ev,
+            vec![InputEvent::move_to(Point::new(7, 8)), l(true), l(false)]
+        );
+        assert!(!has_key_events(&ev));
+        let ev = modifier_click_events(true, vec![]);
+        assert_eq!(
+            ev,
+            vec![
+                InputEvent::move_to(Point::new(7, 8)),
+                l(true),
+                l(false),
+                l(true),
+                l(false)
+            ]
+        );
     }
 
     #[test]
@@ -590,11 +776,13 @@ mod tests {
             x: 1,
             y: 2,
             button: Button::Left,
+            modifiers: vec![],
         };
         let double = Action::DoubleClick {
             x: 1,
             y: 2,
             button: Button::Left,
+            modifiers: vec![],
         };
         let text = Action::Type {
             text: "a".into(),

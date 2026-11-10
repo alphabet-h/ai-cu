@@ -175,8 +175,18 @@ pub fn validate(script: &Script, policy: &Policy, screen: Option<Rect>) -> Valid
                 continue;
             }
         };
-        if let Err(d) = policy.check_action_kind(action.kind()) {
-            issues.push(Issue::denied(Some(i), d));
+        match policy.check_action_kind(action.kind()) {
+            Err(d) => issues.push(Issue::denied(Some(i), d)),
+            // 修飾キーつきのクリック (D-137): 操作の種類が通ったときだけ見る (input_enabled が偽の設定で、
+            // 同じ理由の issue を 2 つ出さない)
+            Ok(()) => {
+                if let Action::Click { modifiers, .. } | Action::DoubleClick { modifiers, .. } =
+                    action
+                    && let Err(d) = policy.check_click_modifiers(modifiers)
+                {
+                    issues.push(Issue::denied(Some(i), d));
+                }
+            }
         }
         check_action_policy(i, action, &steps, policy, screen, &mut issues);
         // 撮影の保存先 (D-075): region / window / 全画面のどれでも、撮る前に判定する
@@ -403,6 +413,84 @@ mod tests {
         let limit = |ms: u64| policy(&format!("{ENABLED}[limits]\nmax_duration_ms = {ms}\n"));
         assert!(validate(&s, &limit(1250), None).ok());
         assert!(!validate(&s, &limit(1249), None).ok());
+    }
+
+    /// 修飾キーつきのクリック (D-137) は、操作の種類 key の許可にも通し、allow.keys を使う設定では断り、
+    /// ctrl と alt の組は組み込みの拒否で断る。deny.keys は見ない
+    #[test]
+    fn validate_click_modifiers_checks_key_kind_allow_keys_and_builtin() {
+        let ctrl = script(r#"{"type":"click","x":1,"y":1,"modifiers":["ctrl"]}"#);
+        let ctrl_dbl = script(r#"{"type":"double_click","x":1,"y":1,"modifiers":["ctrl"]}"#);
+        let plain = script(r#"{"type":"click","x":1,"y":1}"#);
+        let ctrl_alt = script(r#"{"type":"click","x":1,"y":1,"modifiers":["ctrl","alt"]}"#);
+        let ctrl_shift = script(r#"{"type":"click","x":1,"y":1,"modifiers":["ctrl","shift"]}"#);
+        let only = |v: &Validation| -> Issue {
+            assert_eq!(v.issues.len(), 1, "{:?}", v.issues);
+            assert_eq!(v.error_kind(), Some(ErrorKind::PolicyDenied));
+            v.issues[0].clone()
+        };
+
+        // 操作の種類 key を断る設定: 修飾つきは 4、修飾なしは通る
+        let deny_key = policy(&format!("{ENABLED}[deny]\nactions = [\"key\"]\n"));
+        for s in [&ctrl, &ctrl_dbl] {
+            let issue = only(&validate(s, &deny_key, None));
+            assert_eq!(issue.rule, Some("deny.actions"));
+            assert!(issue.message.contains("修飾キー"), "{}", issue.message);
+        }
+        assert!(validate(&plain, &deny_key, None).ok());
+
+        // allow.actions に key が無い設定: 修飾つきは 4、修飾なしは通る
+        let click_only = policy(&format!("{ENABLED}[allow]\nactions = [\"click\"]\n"));
+        assert_eq!(
+            only(&validate(&ctrl, &click_only, None)).rule,
+            Some("allow.actions")
+        );
+        assert!(validate(&plain, &click_only, None).ok());
+
+        // allow.keys を使う設定: 修飾つきは 4 (rule は allow.keys、fix は「を空にする」)
+        let allow_keys = policy(&format!("{ENABLED}[allow]\nkeys = [\"ctrl+s\"]\n"));
+        let issue = only(&validate(&ctrl, &allow_keys, None));
+        assert_eq!(issue.rule, Some("allow.keys"));
+        assert!(
+            issue
+                .fix
+                .as_deref()
+                .is_some_and(|f| f.contains("allow.keys を空にする")),
+            "{:?}",
+            issue.fix
+        );
+        assert!(
+            issue.message.contains("modifiers なし"),
+            "{}",
+            issue.message
+        );
+        assert!(validate(&plain, &allow_keys, None).ok());
+
+        // input_enabled が偽: 同じ理由の issue は 1 つだけ
+        let disabled = policy("[general]\ninput_enabled = false\n");
+        assert_eq!(
+            only(&validate(&ctrl, &disabled, None)).rule,
+            Some("general.input_enabled")
+        );
+
+        // deny.keys だけなら見ない
+        let deny_keys = policy(&format!("{ENABLED}[deny]\nkeys = [\"ctrl+s\"]\n"));
+        assert!(validate(&ctrl, &deny_keys, None).ok());
+
+        // ctrl と alt の組は、設定によらず組み込みの拒否 (rule は builtin、fix なし、組み込みの次の手)
+        let allow_click_key = policy(&format!(
+            "{ENABLED}[allow]\nactions = [\"click\", \"key\"]\n"
+        ));
+        for p in [&policy(ENABLED), &allow_click_key, &deny_key, &allow_keys] {
+            let issue = only(&validate(&ctrl_alt, p, None));
+            assert_eq!(issue.rule, Some(crate::policy::RULE_BUILTIN), "{issue:?}");
+            assert_eq!(issue.fix, None);
+            assert_eq!(issue.hint.as_deref(), Some(crate::policy::BUILTIN_HINT));
+        }
+
+        // click と key を許す設定なら ctrl+shift は通る
+        assert!(validate(&ctrl_shift, &allow_click_key, None).ok());
+        assert!(validate(&ctrl_shift, &policy(ENABLED), None).ok());
     }
 
     #[test]

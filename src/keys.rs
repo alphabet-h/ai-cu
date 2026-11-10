@@ -172,14 +172,12 @@ impl KeyCombo {
     }
 
     /// 設定で緩められない組み込みの拒否 (D-019、D-028)。拒否の理由を返す。
+    /// 修飾キーだけで決まる規則は `builtin_denied_modifiers` が持つ (修飾キーつきのクリックと共有する。D-137)
     pub fn builtin_denied(&self) -> Option<&'static str> {
         const F4: u16 = 0x73;
         const ESC: u16 = 0x1B;
-        if self.has(Modifier::Win) {
-            return Some("Win キーを含む組み合わせは組み込みで拒否する");
-        }
-        if self.has(Modifier::Ctrl) && self.has(Modifier::Alt) {
-            return Some("Ctrl+Alt+ 系は組み込みで拒否する");
+        if let Some(reason) = builtin_denied_modifiers(&self.modifiers) {
+            return Some(reason);
         }
         if self.has(Modifier::Alt) && self.key.vk == F4 {
             return Some("Alt+F4 は組み込みで拒否する");
@@ -192,6 +190,19 @@ impl KeyCombo {
         }
         None
     }
+}
+
+/// 組み込みの拒否 (D-019、D-028) のうち、修飾キーの集合だけで決まる規則 (Win を含む、Ctrl と Alt の両方)。
+/// `KeyCombo::builtin_denied` と、修飾キーつきのクリック (`policy::Policy::check_click_modifiers`) が共有する。
+/// 規則を 2 か所に書かない (D-137)
+pub fn builtin_denied_modifiers(mods: &[Modifier]) -> Option<&'static str> {
+    if mods.contains(&Modifier::Win) {
+        return Some("Win キーを含む組み合わせは組み込みで拒否する");
+    }
+    if mods.contains(&Modifier::Ctrl) && mods.contains(&Modifier::Alt) {
+        return Some("Ctrl+Alt+ 系は組み込みで拒否する");
+    }
+    None
 }
 
 impl FromStr for KeyCombo {
@@ -307,6 +318,36 @@ mod tests {
         for ok in ["ctrl+s", "alt+tab", "shift+f4", "esc", "ctrl+shift+t"] {
             assert!(combo(ok).builtin_denied().is_none(), "{ok}");
         }
+    }
+
+    /// 修飾キーだけの規則は Ctrl と Alt の両方と Win を断り、他の組は通す (D-137)
+    #[test]
+    fn builtin_denied_modifiers_covers_ctrl_alt_and_win() {
+        use Modifier::{Alt, Ctrl, Shift, Win};
+        for denied in [
+            &[Ctrl, Alt][..],
+            &[Alt, Ctrl],
+            &[Win],
+            &[Shift, Win],
+            &[Ctrl, Alt, Shift],
+        ] {
+            assert!(builtin_denied_modifiers(denied).is_some(), "{denied:?}");
+        }
+        for ok in [
+            &[Ctrl, Shift][..],
+            &[Alt, Shift],
+            &[Ctrl],
+            &[Alt],
+            &[Shift],
+            &[],
+        ] {
+            assert!(builtin_denied_modifiers(ok).is_none(), "{ok:?}");
+        }
+        assert_eq!(
+            builtin_denied_modifiers(&[Ctrl, Alt]),
+            combo("ctrl+alt+t").builtin_denied(),
+            "文は組み合わせの拒否と同じ"
+        );
     }
 
     /// IME のキーの仮想キーコード。どれも拡張キーではない (D-131)

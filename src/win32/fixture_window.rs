@@ -17,6 +17,9 @@
 //!
 //! `open_with_caption` は窓の上端の帯 (`FIXTURE_CAPTION_HEIGHT`) を `WM_NCHITTEST` で `HTCAPTION` にして、タイトルバーの
 //! 代わりに窓を動かせるようにする (drag の途中のガードの実機テスト用。D-132)。
+//!
+//! 修飾キーつきのクリックの実機テスト用に、左ボタンの押下の時点の修飾キーの状態、キーの離し、`SC_KEYMENU` を記録する。
+//! `SC_KEYMENU` は既定の処理に渡さず捨てる (メニューのモードに残らないように。D-137)。
 
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -35,19 +38,21 @@ use windows_sys::Win32::UI::Input::Ime::{
     GCS_COMPSTR, GCS_RESULTSTR, ImmAssociateContextEx, ImmGetContext, ImmGetOpenStatus,
     ImmReleaseContext, ImmSetOpenStatus,
 };
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::SetFocus;
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+    GetKeyState, SetFocus, VK_CONTROL, VK_MENU, VK_SHIFT,
+};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     BS_PUSHBUTTON, CS_DBLCLKS, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
     ES_AUTOHSCROLL, ES_MULTILINE, ES_PASSWORD, ES_READONLY, GetClientRect, GetDlgItem, GetMessageW,
     GetWindowRect, GetWindowThreadProcessId, HMENU, HTCAPTION, IDC_ARROW, IsWindowVisible,
-    LoadCursorW, MSG, PostMessageW, PostQuitMessage, RegisterClassExW, SMTO_ABORTIFHUNG, SW_HIDE,
-    SendMessageTimeoutW, SendMessageW, SetForegroundWindow, SetWindowDisplayAffinity, ShowWindow,
-    ShowWindowAsync, TranslateMessage, WINDOW_STYLE, WM_APP, WM_CHAR, WM_CLOSE, WM_DESTROY,
-    WM_ERASEBKGND, WM_GETTEXT, WM_GETTEXTLENGTH, WM_IME_COMPOSITION, WM_IME_ENDCOMPOSITION,
-    WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCHITTEST, WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP,
-    WM_SYSKEYDOWN, WNDCLASSEXW, WS_BORDER, WS_CHILD, WS_CLIPCHILDREN, WS_EX_TOOLWINDOW,
-    WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
+    LoadCursorW, MSG, PostMessageW, PostQuitMessage, RegisterClassExW, SC_KEYMENU,
+    SMTO_ABORTIFHUNG, SW_HIDE, SendMessageTimeoutW, SendMessageW, SetForegroundWindow,
+    SetWindowDisplayAffinity, ShowWindow, ShowWindowAsync, TranslateMessage, WINDOW_STYLE, WM_APP,
+    WM_CHAR, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND, WM_GETTEXT, WM_GETTEXTLENGTH, WM_IME_COMPOSITION,
+    WM_IME_ENDCOMPOSITION, WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDBLCLK,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCHITTEST, WM_PAINT,
+    WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSCOMMAND, WM_SYSKEYDOWN, WM_SYSKEYUP, WNDCLASSEXW,
+    WS_BORDER, WS_CHILD, WS_CLIPCHILDREN, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
 };
 
 use crate::geometry::{Point, Rect};
@@ -133,6 +138,20 @@ pub enum FixtureEvent {
     },
     /// `WM_IME_ENDCOMPOSITION` (D-133)
     ImeEnd,
+    /// `WM_LBUTTONDOWN` の時点で押されていた修飾キー (`GetKeyState`)。どれかが押されていたときだけ、その
+    /// `ButtonDown` の直前に記録する (修飾キーつきのクリックの実機テスト用。D-137)
+    Modifiers {
+        ctrl: bool,
+        shift: bool,
+        alt: bool,
+    },
+    /// `WM_KEYUP` / `WM_SYSKEYUP` (D-137)
+    KeyUp {
+        vk: u16,
+    },
+    /// `WM_SYSCOMMAND` の `SC_KEYMENU` (Alt を押して離したときなどのメニューに入る合図)。既定の処理に渡さず捨てる
+    /// (フィクスチャがメニューのモードに残らないように。D-137)
+    KeyMenu,
 }
 
 static EVENTS: Mutex<Vec<(usize, FixtureEvent)>> = Mutex::new(Vec::new());
@@ -210,6 +229,20 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 //         SetFocus はそのスレッドの窓にフォーカスを移すだけ。
                 unsafe { SetFocus(hwnd) };
             }
+            // 修飾キーつきのクリック (D-137) の測定: 修飾キーの状態を読む。GetKeyState が返すのは、このスレッドが
+            // 読み終えたキーのメッセージまでの状態 (Microsoft Learn の GetKeyState の Remarks)。キーとマウスの
+            // メッセージが同じスレッドのキューに順に積まれるときだけ、この押下の時点の状態と一致する。修飾キーの
+            // メッセージはキーボードのフォーカスのスレッドに届くので、それが成り立つのはフィクスチャが前面のときだけ
+            // (実機テストは前面にしてから送る)
+            // SAFETY: 値の引数 (仮想キーコード) を 1 つ取り、このスレッドのキーの状態を返すだけ。書き込みは無い。
+            let ctrl = unsafe { GetKeyState(i32::from(VK_CONTROL)) } < 0;
+            // SAFETY: 上と同じ。
+            let shift = unsafe { GetKeyState(i32::from(VK_SHIFT)) } < 0;
+            // SAFETY: 上と同じ。
+            let alt = unsafe { GetKeyState(i32::from(VK_MENU)) } < 0;
+            if ctrl || shift || alt {
+                record(hwnd, FixtureEvent::Modifiers { ctrl, shift, alt });
+            }
             record(
                 hwnd,
                 FixtureEvent::ButtonDown {
@@ -260,6 +293,25 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 vk: (wparam & 0xFFFF) as u16,
             },
         ),
+        // 離しは先に既定の処理に渡し (Alt の離しでメニューに入るかは既定の処理が決め、SC_KEYMENU はその中で同期に
+        // 送られてくる)、その後に記録する。KeyUp が見えた時点で、同期の KeyMenu は記録済みになる (D-137)
+        WM_KEYUP | WM_SYSKEYUP => {
+            // SAFETY: ウィンドウプロシージャが受け取った引数をそのまま既定の処理に渡す。
+            let r = unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
+            record(
+                hwnd,
+                FixtureEvent::KeyUp {
+                    vk: (wparam & 0xFFFF) as u16,
+                },
+            );
+            return r;
+        }
+        // 下位 4 ビットはシステムが使うので 0xFFF0 で落としてから比べる (Microsoft Learn の WM_SYSCOMMAND)。
+        // SC_KEYMENU は記録して 0 を返し、既定の処理に渡さない。他の SC_ は下の既定の処理へ (D-137)
+        WM_SYSCOMMAND if (wparam & 0xFFF0) as u32 == SC_KEYMENU => {
+            record(hwnd, FixtureEvent::KeyMenu);
+            return 0;
+        }
         WM_CHAR => record(
             hwnd,
             FixtureEvent::Char {

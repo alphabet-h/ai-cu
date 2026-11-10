@@ -22,9 +22,9 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::cli::{
-    ConfigCmd, Context, DEFAULT_STEP_SETTLE_MS, GUIDE, Outcome, SettleOpt, ShotSpec, TYPE_IME_NOTE,
-    config_cmd, find_cmd, guide_summary, run_script, shot, step_with_shot, text_cmd, tree_cmd,
-    window_allowed, windows_cmd, with_policy,
+    CLICK_MODIFIERS_NOTE, ConfigCmd, Context, DEFAULT_STEP_SETTLE_MS, GUIDE, Outcome, SettleOpt,
+    ShotSpec, TYPE_IME_NOTE, click_modifier_names, config_cmd, find_cmd, guide_summary, run_script,
+    shot, step_with_shot, text_cmd, tree_cmd, window_allowed, windows_cmd, with_policy,
 };
 use crate::config::{ConfigPaths, DefaultLocator, EnvLookup};
 use crate::device::{BackendError, FrameState, HeldInputs, Image, InputDesktop};
@@ -44,10 +44,10 @@ use crate::jsonrpc::{
 use crate::run::ImageWriter;
 use crate::runner::{DeviceFactory, load_policy, require_dpi, sentinel_paths};
 use crate::script::{
-    Action, ActionKind, Button, DEFAULT_DRAG_MS, DEFAULT_DRAG_STEPS, DEFAULT_SETTLE_TIMEOUT_MS,
-    DEFAULT_SHOT_SCALE, DEFAULT_STABLE_MS, DEFAULT_TYPE_INTERVAL_MS, DEFAULT_WAIT_FOR_TIMEOUT_MS,
-    ElementFilter, MAX_SCROLL_CLICKS, MAX_SINGLE_WAIT_MS, MAX_STABLE_MS, MIN_STABLE_MS, Pos,
-    Region, SCRIPT_VERSION, Script, WindowTarget,
+    Action, ActionKind, Button, ClickModifier, DEFAULT_DRAG_MS, DEFAULT_DRAG_STEPS,
+    DEFAULT_SETTLE_TIMEOUT_MS, DEFAULT_SHOT_SCALE, DEFAULT_STABLE_MS, DEFAULT_TYPE_INTERVAL_MS,
+    DEFAULT_WAIT_FOR_TIMEOUT_MS, ElementFilter, MAX_SCROLL_CLICKS, MAX_SINGLE_WAIT_MS,
+    MAX_STABLE_MS, MIN_STABLE_MS, Pos, Region, SCRIPT_VERSION, Script, WindowTarget,
 };
 
 pub const SERVER_NAME: &str = "ai-cu";
@@ -381,6 +381,16 @@ fn schema_button() -> Value {
     json!({ "type": "string", "enum": ["left", "right", "middle"], "description": "ボタン (既定 left)" })
 }
 
+/// click / double_click の `modifiers` (D-137)。名前の並びは `ClickModifier::ALL` の正規の順
+fn schema_modifiers() -> Value {
+    json!({
+        "type": "array",
+        "items": { "type": "string", "enum": click_modifier_names() },
+        "uniqueItems": true,
+        "description": format!("押したままクリックする修飾キー (省略可)。{CLICK_MODIFIERS_NOTE}"),
+    })
+}
+
 fn schema_region() -> Value {
     json!({
         "type": "object",
@@ -543,8 +553,8 @@ fn schema_action() -> Value {
         "type": "object",
         "description": "操作 (type で種類を選ぶ)。未知のフィールドは拒否",
         "oneOf": [
-            { "type": "object", "additionalProperties": false, "properties": { "type": t("click"), "x": schema_int("X"), "y": schema_int("Y"), "button": schema_button() }, "required": ["type", "x", "y"] },
-            { "type": "object", "additionalProperties": false, "properties": { "type": t("double_click"), "x": schema_int("X"), "y": schema_int("Y"), "button": schema_button() }, "required": ["type", "x", "y"] },
+            { "type": "object", "additionalProperties": false, "properties": { "type": t("click"), "x": schema_int("X"), "y": schema_int("Y"), "button": schema_button(), "modifiers": schema_modifiers() }, "required": ["type", "x", "y"] },
+            { "type": "object", "additionalProperties": false, "properties": { "type": t("double_click"), "x": schema_int("X"), "y": schema_int("Y"), "button": schema_button(), "modifiers": schema_modifiers() }, "required": ["type", "x", "y"] },
             { "type": "object", "additionalProperties": false, "properties": { "type": t("drag"), "from": point, "to": point, "button": schema_button(), "steps": { "type": "integer", "minimum": 1, "maximum": 1000, "description": "補間の回数 (既定 20)" }, "duration_ms": { "type": "integer", "minimum": 0, "maximum": 60000, "description": "全体の時間 (既定 300)" } }, "required": ["type", "from", "to"] },
             { "type": "object", "additionalProperties": false, "properties": { "type": t("move"), "x": schema_int("X"), "y": schema_int("Y") }, "required": ["type", "x", "y"] },
             { "type": "object", "additionalProperties": false, "properties": { "type": t("scroll"), "clicks": schema_scroll_clicks(), "x": schema_int("省略可 (y と組)"), "y": schema_int("省略可 (x と組)"), "horizontal": { "type": "boolean" } }, "required": ["type", "clicks"] },
@@ -688,16 +698,16 @@ pub fn tools() -> Vec<Value> {
             "click",
             "クリック",
             &format!(
-                "座標 (物理ピクセル) をクリックする。座標は find の center か windows の rect から取る。{STEP_NOTE}。{LEAD_NOTE}"
+                "座標 (物理ピクセル) をクリックする。座標は find の center か windows の rect から取る。Ctrl / Shift / Alt を押したままのクリックは modifiers。{STEP_NOTE}。{LEAD_NOTE}"
             ),
-            json!({ "type": "object", "additionalProperties": false, "properties": step_props(json!({ "x": schema_int("X (物理ピクセル。負でもよい)"), "y": schema_int("Y"), "button": schema_button() })), "required": ["x", "y"] }),
+            json!({ "type": "object", "additionalProperties": false, "properties": step_props(json!({ "x": schema_int("X (物理ピクセル。負でもよい)"), "y": schema_int("Y"), "button": schema_button(), "modifiers": schema_modifiers() })), "required": ["x", "y"] }),
             input_tool(false),
         ),
         tool(
             "double_click",
             "ダブルクリック",
             &format!("座標をダブルクリックする。{STEP_NOTE}。{LEAD_NOTE}"),
-            json!({ "type": "object", "additionalProperties": false, "properties": step_props(json!({ "x": schema_int("X"), "y": schema_int("Y"), "button": schema_button() })), "required": ["x", "y"] }),
+            json!({ "type": "object", "additionalProperties": false, "properties": step_props(json!({ "x": schema_int("X"), "y": schema_int("Y"), "button": schema_button(), "modifiers": schema_modifiers() })), "required": ["x", "y"] }),
             input_tool(false),
         ),
         tool(
@@ -860,6 +870,9 @@ struct ClickArgs {
     y: i32,
     #[serde(default)]
     button: Button,
+    /// 押したままクリックする修飾キー (D-137)。重複は形の検査 (3) が断る
+    #[serde(default)]
+    modifiers: Vec<ClickModifier>,
     shot: Option<ShotArgs>,
     #[serde(default)]
     dry_run: bool,
@@ -1868,12 +1881,14 @@ fn run_tool(name: &str, args: &Value, paths: &ConfigPaths, ctx: &mut Context) ->
                         x: a.x,
                         y: a.y,
                         button: a.button,
+                        modifiers: a.modifiers,
                     }
                 } else {
                     Action::DoubleClick {
                         x: a.x,
                         y: a.y,
                         button: a.button,
+                        modifiers: a.modifiers,
                     }
                 };
                 step(action, a.shot, a.dry_run, ctx)
@@ -3038,6 +3053,171 @@ mod tests {
         assert_eq!(v["ok"], true, "{v}");
         assert_eq!(v["dry_run"], true, "{v}");
         assert_eq!(v["screen"]["h"], 2160, "{v}");
+        assert!(world.borrow().sent.is_empty());
+    }
+
+    /// 道具 click の `modifiers` は Action に渡り、dry_run の計画に修飾キーのイベントが出る (D-137)
+    #[test]
+    fn mcp_click_with_modifiers_plans_modifier_events() {
+        let dir = unique_temp_dir("mcp-click-mods");
+        let floor = floor_file(&dir, ENABLED);
+        let env = MapEnv::default();
+        let locator = TripwireLocator;
+        let world = World::new().shared();
+        let mut devices = DesktopOnly(world.clone());
+        let mut disk = MemoryImages::default();
+        let mut s = Server::new(
+            paths(&floor),
+            &env,
+            &locator,
+            &mut devices,
+            &mut disk,
+            Ok(()),
+            Vec::new(),
+            Arc::new(Inbox::default()),
+        );
+        let ctrl = ClickModifier::Ctrl.modifier().vk();
+        for (id, tool) in [(1, "click"), (2, "double_click")] {
+            let r = reply(
+                &mut s,
+                &call(
+                    id,
+                    tool,
+                    json!({ "x": 10, "y": 10, "modifiers": ["ctrl"], "dry_run": true }),
+                ),
+            );
+            assert_eq!(exit_code(&r), 0, "{tool}");
+            let v = text_json(&r);
+            assert_eq!(v["dry_run"], true, "{v}");
+            let events = v["plan"][0]["steps"][0]["events"].as_array().unwrap();
+            let key = |down: bool| {
+                events
+                    .iter()
+                    .any(|e| e["event"] == "key" && e["vk"] == ctrl && e["down"] == down)
+            };
+            assert!(key(true) && key(false), "{tool}: {v}");
+        }
+        assert!(world.borrow().sent.is_empty());
+    }
+
+    /// click と double_click の道具と run の操作の `modifiers` の schema は同じ形で、名前は ALL の順 (D-137)
+    #[test]
+    fn mcp_click_modifiers_schema_lists_three() {
+        let check = |where_: &str, m: &Value| {
+            assert_eq!(m["type"], "array", "{where_}: {m}");
+            assert_eq!(m["items"]["type"], "string", "{where_}: {m}");
+            assert_eq!(m["uniqueItems"], true, "{where_}: {m}");
+            assert_eq!(
+                m["items"]["enum"],
+                json!(["ctrl", "alt", "shift"]),
+                "{where_}"
+            );
+            assert_eq!(
+                m["items"]["enum"],
+                json!(ClickModifier::ALL.map(|c| c.modifier().name())),
+                "{where_}"
+            );
+        };
+        let all = tools();
+        let tool = |name: &str| all.iter().find(|t| t["name"] == name).unwrap().clone();
+        for name in ["click", "double_click"] {
+            check(name, &tool(name)["inputSchema"]["properties"]["modifiers"]);
+        }
+        let run = tool("run");
+        let items = run["inputSchema"]["properties"]["actions"]["items"]["oneOf"]
+            .as_array()
+            .unwrap();
+        for kind in ["click", "double_click"] {
+            let item = items
+                .iter()
+                .find(|i| i["properties"]["type"]["const"] == kind)
+                .unwrap();
+            check(&format!("run.{kind}"), &item["properties"]["modifiers"]);
+        }
+    }
+
+    /// 未知の修飾キーは、一手ずつの道具でも run でも引数の誤り (2)。入力の装置は作らない (D-137)
+    #[test]
+    fn mcp_click_unknown_modifier_is_usage() {
+        let dir = unique_temp_dir("mcp-click-unknown");
+        let floor = floor_file(&dir, ENABLED);
+        let env = MapEnv::default();
+        let locator = TripwireLocator;
+        let world = World::new().shared();
+        let mut devices = DesktopOnly(world.clone());
+        let mut disk = MemoryImages::default();
+        let mut s = Server::new(
+            paths(&floor),
+            &env,
+            &locator,
+            &mut devices,
+            &mut disk,
+            Ok(()),
+            Vec::new(),
+            Arc::new(Inbox::default()),
+        );
+        let r = reply(
+            &mut s,
+            &call(1, "click", json!({ "x": 1, "y": 1, "modifiers": ["win"] })),
+        );
+        assert_eq!(exit_code(&r), 2, "{r}");
+        assert_eq!(text_json(&r)["error"]["code"], "usage");
+        let r = reply(
+            &mut s,
+            &call(
+                2,
+                "double_click",
+                json!({ "x": 1, "y": 1, "modifiers": ["Ctrl"] }),
+            ),
+        );
+        assert_eq!(exit_code(&r), 2, "{r}");
+        let r = reply(
+            &mut s,
+            &call(
+                3,
+                "run",
+                json!({ "actions": [{ "type": "click", "x": 1, "y": 1, "modifiers": ["win"] }] }),
+            ),
+        );
+        assert_eq!(exit_code(&r), 2, "{r}");
+        assert_eq!(text_json(&r)["error"]["code"], "usage");
+        assert!(world.borrow().sent.is_empty());
+    }
+
+    /// 同じ修飾キーの重複は入口では断らず、形の検査の 3 になる (D-137)
+    #[test]
+    fn mcp_click_duplicate_modifier_is_invalid_script() {
+        let dir = unique_temp_dir("mcp-click-dup");
+        let floor = floor_file(&dir, ENABLED);
+        let env = MapEnv::default();
+        let locator = TripwireLocator;
+        let world = World::new().shared();
+        let mut devices = DesktopOnly(world.clone());
+        let mut disk = MemoryImages::default();
+        let mut s = Server::new(
+            paths(&floor),
+            &env,
+            &locator,
+            &mut devices,
+            &mut disk,
+            Ok(()),
+            Vec::new(),
+            Arc::new(Inbox::default()),
+        );
+        for (id, tool) in [(1, "click"), (2, "double_click")] {
+            let r = reply(
+                &mut s,
+                &call(
+                    id,
+                    tool,
+                    json!({ "x": 10, "y": 10, "modifiers": ["ctrl", "ctrl"] }),
+                ),
+            );
+            assert_eq!(exit_code(&r), 3, "{tool}: {r}");
+            let v = text_json(&r);
+            assert_eq!(v["error"]["code"], "invalid_script", "{v}");
+            assert!(v["issues"].to_string().contains("重複"), "{v}");
+        }
         assert!(world.borrow().sent.is_empty());
     }
 

@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::geometry::{Point, Rect};
-use crate::keys::KeyCombo;
+use crate::keys::{KeyCombo, Modifier};
 
 pub const SCRIPT_VERSION: u32 = 1;
 pub const MAX_DRAG_STEPS: u32 = 1000;
@@ -28,6 +28,44 @@ pub enum Button {
     Left,
     Right,
     Middle,
+}
+
+/// `click` / `double_click` で押したままにする修飾キー (D-137)。宣言の順 (ctrl、alt、shift) が正規の押す順で、
+/// 離すのはその逆。名前と仮想キーは `keys::Modifier` から引く (対応表を 2 つ作らない)。`win` は入れない
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ClickModifier {
+    Ctrl,
+    Alt,
+    Shift,
+}
+
+impl ClickModifier {
+    /// 正規の順 (押す順)
+    pub const ALL: [ClickModifier; 3] = [
+        ClickModifier::Ctrl,
+        ClickModifier::Alt,
+        ClickModifier::Shift,
+    ];
+
+    /// キーの組み合わせの側の修飾キー (名前は `name()`、仮想キーは `vk()`)
+    pub fn modifier(self) -> Modifier {
+        match self {
+            ClickModifier::Ctrl => Modifier::Ctrl,
+            ClickModifier::Alt => Modifier::Alt,
+            ClickModifier::Shift => Modifier::Shift,
+        }
+    }
+
+    /// 正規の順 (ctrl、alt、shift) に並べ、重複を落とした列。計画 (押す順) と表示の両方がこれを使い、
+    /// 2 か所で並べ方が食い違わないようにする (D-137)。形の検査が重複を断るので、dedup は計画や表示を
+    /// 単独で呼んだときの保険
+    pub fn canonical(mods: &[ClickModifier]) -> Vec<ClickModifier> {
+        let mut out = mods.to_vec();
+        out.sort();
+        out.dedup();
+        out
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -168,12 +206,18 @@ pub enum Action {
         y: i32,
         #[serde(default)]
         button: Button,
+        /// 押したままクリックする修飾キー (D-137)。空なら修飾なし
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        modifiers: Vec<ClickModifier>,
     },
     DoubleClick {
         x: i32,
         y: i32,
         #[serde(default)]
         button: Button,
+        /// 押したままクリックする修飾キー (D-137)。2 回のクリックの間も押したまま
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        modifiers: Vec<ClickModifier>,
     },
     Drag {
         from: Pos,
@@ -464,6 +508,9 @@ impl Script {
 /// 設定に依存しない、個々の操作の形の検査。問題があれば説明を返す。
 pub fn shape_issue(action: &Action) -> Option<String> {
     match action {
+        Action::Click { modifiers, .. } | Action::DoubleClick { modifiers, .. } => {
+            click_modifiers_issue(action.kind().name(), modifiers)
+        }
         Action::Drag {
             steps, duration_ms, ..
         } => {
@@ -614,6 +661,20 @@ pub fn shape_issue(action: &Action) -> Option<String> {
     }
 }
 
+/// `click` / `double_click` の `modifiers` の形の検査 (D-137)。同じ修飾キーの重複は書き手の誤りとして断る
+/// (黙って畳まない)。空は修飾なしと同じ
+fn click_modifiers_issue(name: &str, modifiers: &[ClickModifier]) -> Option<String> {
+    for (i, m) in modifiers.iter().enumerate() {
+        if modifiers[..i].contains(m) {
+            return Some(format!(
+                "{name} の modifiers に {} が重複している",
+                m.modifier().name()
+            ));
+        }
+    }
+    None
+}
+
 /// 撮る対象 (`region` / `window`) の形の検査。`screenshot` と画面の待ち (D-081) が共有する。
 /// `name` は文の主語にする操作の名前 (screenshot の文は D-081 の前と同じ)
 fn capture_target_issue(
@@ -706,7 +767,8 @@ mod tests {
             Action::DoubleClick {
                 x: 1,
                 y: 2,
-                button: Button::Right
+                button: Button::Right,
+                modifiers: vec![],
             }
         );
         match &s.actions[2] {
@@ -752,6 +814,116 @@ mod tests {
             Script::from_json(nested),
             Err(ScriptError::Parse(_))
         ));
+    }
+
+    fn one_action(json: &str) -> Result<Action, ScriptError> {
+        Script::from_json(&format!(r#"{{"version":1,"actions":[{json}]}}"#))
+            .map(|s| s.actions.into_iter().next().expect("1 つの操作"))
+    }
+
+    /// click の modifiers (D-137): 読めて、省略は空、空は直列化でキーを出さない
+    #[test]
+    fn click_modifiers_parse_and_default_empty() {
+        let a = one_action(r#"{"type":"click","x":1,"y":2,"modifiers":["ctrl","shift"]}"#).unwrap();
+        assert_eq!(
+            a,
+            Action::Click {
+                x: 1,
+                y: 2,
+                button: Button::Left,
+                modifiers: vec![ClickModifier::Ctrl, ClickModifier::Shift],
+            }
+        );
+        let plain = one_action(r#"{"type":"click","x":1,"y":2}"#).unwrap();
+        match &plain {
+            Action::Click { modifiers, .. } => assert!(modifiers.is_empty()),
+            other => panic!("{other:?}"),
+        }
+        let v = serde_json::to_value(&plain).unwrap();
+        assert!(v.get("modifiers").is_none(), "空なら出さない: {v}");
+        let v = serde_json::to_value(&a).unwrap();
+        assert_eq!(v["modifiers"], serde_json::json!(["ctrl", "shift"]));
+        let d = one_action(r#"{"type":"double_click","x":1,"y":2,"modifiers":["alt"]}"#).unwrap();
+        assert!(
+            matches!(d, Action::DoubleClick { ref modifiers, .. } if modifiers == &[ClickModifier::Alt])
+        );
+    }
+
+    /// 未知の名前、win、大文字は serde の誤り (操作列の JSON は小文字だけ。D-137)
+    #[test]
+    fn click_modifiers_reject_unknown_and_win() {
+        for bad in [r#"["win"]"#, r#"["Ctrl"]"#, r#"["meta"]"#] {
+            let r = one_action(&format!(
+                r#"{{"type":"click","x":1,"y":2,"modifiers":{bad}}}"#
+            ));
+            assert!(matches!(r, Err(ScriptError::Parse(_))), "{bad}: {r:?}");
+        }
+    }
+
+    /// 同じ修飾キーの重複は形の検査の誤り (黙って畳まない。D-137)
+    #[test]
+    fn click_modifiers_reject_duplicate() {
+        for json in [
+            r#"{"type":"click","x":1,"y":2,"modifiers":["ctrl","ctrl"]}"#,
+            r#"{"type":"double_click","x":1,"y":2,"modifiers":["shift","alt","shift"]}"#,
+        ] {
+            let a = one_action(json).unwrap();
+            let issue = shape_issue(&a).expect("重複は誤り");
+            assert!(issue.contains("重複"), "{issue}");
+        }
+        let issue = shape_issue(
+            &one_action(r#"{"type":"click","x":1,"y":2,"modifiers":["ctrl","ctrl"]}"#).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            issue.contains("modifiers に ctrl が重複している"),
+            "{issue}"
+        );
+    }
+
+    /// 重複の無い修飾キーは形の検査を通る (許可と前面のガードは validate と実行器が見る。D-137)
+    #[test]
+    fn click_modifiers_pass_shape_check() {
+        for json in [
+            r#"{"type":"click","x":1,"y":2,"modifiers":["ctrl","shift"]}"#,
+            r#"{"type":"click","x":1,"y":2,"modifiers":["ctrl"]}"#,
+            r#"{"type":"double_click","x":1,"y":2,"modifiers":["shift"]}"#,
+            r#"{"type":"double_click","x":1,"y":2,"modifiers":["alt","shift","ctrl"]}"#,
+            r#"{"type":"click","x":1,"y":2}"#,
+            r#"{"type":"click","x":1,"y":2,"modifiers":[]}"#,
+            r#"{"type":"double_click","x":1,"y":2}"#,
+        ] {
+            assert_eq!(shape_issue(&one_action(json).unwrap()), None, "{json}");
+        }
+    }
+
+    /// 操作列の名前は keys の修飾キーの名前と同じ (対応表を 2 つ作らない。D-137)
+    #[test]
+    fn click_modifier_serde_names_match_keys_names() {
+        for m in ClickModifier::ALL {
+            assert_eq!(
+                serde_json::to_value(m).unwrap(),
+                serde_json::Value::String(m.modifier().name().into())
+            );
+        }
+        assert_eq!(
+            ClickModifier::ALL.map(|m| m.modifier().name()),
+            ["ctrl", "alt", "shift"]
+        );
+        let mut sorted = ClickModifier::ALL;
+        sorted.sort();
+        assert_eq!(sorted, ClickModifier::ALL, "宣言の順が正規の順");
+    }
+
+    /// 正規化は正規の順に並べて重複を落とす。計画と表示が同じ列を使う (D-137)
+    #[test]
+    fn click_modifier_canonical_sorts_and_dedups() {
+        use ClickModifier::{Alt, Ctrl, Shift};
+        assert_eq!(
+            ClickModifier::canonical(&[Shift, Ctrl, Shift, Alt]),
+            vec![Ctrl, Alt, Shift]
+        );
+        assert!(ClickModifier::canonical(&[]).is_empty());
     }
 
     /// focus (D-050): process は必須、title は省略可。空の process と空の title は形の誤り

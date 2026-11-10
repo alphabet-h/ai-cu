@@ -6,7 +6,8 @@
 //!   コンストラクタで作り、送る前にすべてのイベントについて「矩形の中」「座標の下がフィクスチャ」を確かめる
 //! - キーと文字は、前面がフィクスチャであることを確かめてから送る。前面にできなければ、キーを 1 つも送らずに失敗にする
 //! - 前面化は `SetForegroundWindow` を試し、だめならフィクスチャの矩形の中をクリックする。Alt の空打ちと
-//!   `SystemParametersInfo` の変更はしない。Win+、Alt+F4、Ctrl+Alt+ 系は送らない (組み込みの拒否でも止まる)
+//!   `SystemParametersInfo` の変更はしない (Alt を押して離すのは、D-137 の Alt クリックのテストと、前面にした
+//!   フィクスチャが SC_KEYMENU を出すかを測る対照のテストだけ)。Win+、Alt+F4、Ctrl+Alt+ 系は送らない (組み込みの拒否でも止まる)
 //! - 撮影はフィクスチャの領域だけ。画像は target/ の下に保存し、テストの中で画素を確かめる
 //! - 各テストにウォッチドッグを置き、期限を過ぎたらプロセスごと終わらせる
 //! - 予告の間 (D-093) のテストだけは、人の手の代わりに別スレッドからフィクスチャの中へ入力を送る (D-095)
@@ -542,7 +543,8 @@ fn fixture_real_drag_interpolates_between_endpoints() {
         .filter(|e| matches!(e, FixtureEvent::DragMove { .. }))
         .count();
     assert_eq!(
-        ev.first(),
+        ev.iter()
+            .find(|e| matches!(e, FixtureEvent::ButtonDown { .. })),
         Some(&FixtureEvent::ButtonDown {
             button: Button::Left,
             x: 60,
@@ -3293,6 +3295,214 @@ fn fixture_real_injected_shift_is_seen_by_keys_held_and_run_refuses() {
         "クリックは届いていない: {ev:?}"
     );
     println!("FIXTURE keys_held saw {held:?}, run refused with 10 keys_held");
+}
+
+// ---- 修飾キーつきのクリック (D-137) ----
+//
+// 修飾キーの押下・クリック・抑えのキー (0xE8) の押して離し・逆順の離しが 1 回の SendInput で届くことと、
+// Alt クリックで前面の窓がメニュー (SC_KEYMENU) に入らないことを測る。フィクスチャを前面にしてから送る
+// (修飾キーは前面の窓に届くので、実行器も前面のガードを通す)
+
+/// Alt の離しから `SC_KEYMENU` が来るのを待つ長さ (離しの記録を見てから)
+const KEYMENU_SETTLE_MS: u64 = 200;
+/// クリックの後に、押したままの修飾キーが消えるまで待つ上限 (keys_held は非同期のキーの状態を読む)
+const MODIFIERS_RELEASED_WITHIN_MS: u64 = 500;
+
+/// 注入した修飾キー (ctrl / shift / alt) を、どの経路で抜けても離す (`ShiftUp` と同じ考え。余計に離すのは無害)。
+/// 離した後も残っていれば人に知らせる
+struct ModifiersUp(FixtureScope);
+
+impl Drop for ModifiersUp {
+    fn drop(&mut self) {
+        let keys: Vec<InputEvent> = release_all()
+            .into_iter()
+            .filter(|e| matches!(e, InputEvent::Key { .. }))
+            .collect();
+        if let Err(e) = RealSink::for_fixture(self.0).send(&keys) {
+            eprintln!("FIXTURE 修飾キーを離す送信が失敗: {e}");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+        let still = Win32Desktop::for_fixture(self.0)
+            .keys_held()
+            .map(|h| {
+                h.keys
+                    .iter()
+                    .any(|k| matches!(*k, "ctrl" | "shift" | "alt"))
+            })
+            .unwrap_or(true);
+        if still {
+            eprintln!(
+                "FIXTURE 修飾キーが押されたままの可能性がある。手で Ctrl、Shift、Alt を 1 回ずつ押して離してください"
+            );
+        }
+    }
+}
+
+fn keymenu_count(events: &[FixtureEvent]) -> usize {
+    events
+        .iter()
+        .filter(|e| matches!(e, FixtureEvent::KeyMenu))
+        .count()
+}
+
+/// Alt (VK_MENU) の離しの記録を待ち、さらに `KEYMENU_SETTLE_MS` 待ってから記録を読む
+fn events_after_alt_up(f: &Fixture) -> Vec<FixtureEvent> {
+    let ev = f.events_until(|e| e.contains(&FixtureEvent::KeyUp { vk: 0x12 }));
+    assert!(
+        ev.contains(&FixtureEvent::KeyUp { vk: 0x12 }),
+        "Alt の離しが届かない: {ev:?}"
+    );
+    std::thread::sleep(Duration::from_millis(KEYMENU_SETTLE_MS));
+    f.win.events()
+}
+
+/// ctrl+shift のクリックで、左ボタンの押下の時点に Ctrl と Shift が立っていて (Alt は立たない)、実行の後に
+/// 押されたままの修飾キーが残らない (D-137)
+#[test]
+#[ignore = "実機のフィクスチャ限定。cargo test -- --ignored --test-threads=1"]
+fn fixture_real_click_with_modifiers_reaches_fixture() {
+    let f = Fixture::open("click-mods");
+    f.activate();
+    let _up = ModifiersUp(f.scope());
+    let p = f.at(200, 150);
+    f.execute(&format!(
+        r#"{{"type":"click","x":{},"y":{},"modifiers":["ctrl","shift"]}}"#,
+        p.x, p.y
+    ))
+    .expect("修飾キーつきのクリック");
+    let down = FixtureEvent::ButtonDown {
+        button: Button::Left,
+        x: 200,
+        y: 150,
+    };
+    let ev = f.events_until(|e| e.contains(&FixtureEvent::KeyUp { vk: 0x11 }));
+    let released = wait_until(Duration::from_millis(MODIFIERS_RELEASED_WITHIN_MS), || {
+        Win32Desktop::for_fixture(f.scope())
+            .keys_held()
+            .is_ok_and(|h| h.keys.is_empty())
+    });
+    let at = ev.iter().position(|e| *e == down);
+    let before = at.and_then(|i| i.checked_sub(1)).map(|i| &ev[i]);
+    println!(
+        "FIXTURE click_mods before_down={before:?} released={released} mask_down={} events={}",
+        ev.contains(&FixtureEvent::KeyDown { vk: 0xE8 }),
+        ev.len()
+    );
+    assert!(at.is_some(), "クリックが届かない: {ev:?}");
+    assert_eq!(
+        before,
+        Some(&FixtureEvent::Modifiers {
+            ctrl: true,
+            shift: true,
+            alt: false
+        }),
+        "押下の時点の修飾キー: {ev:?}"
+    );
+    assert!(
+        released,
+        "{MODIFIERS_RELEASED_WITHIN_MS} ms 待っても修飾キーが押されたまま"
+    );
+}
+
+/// alt のクリックで、押下の時点に Alt が立っていて、離した後にフィクスチャがメニュー (SC_KEYMENU) に入らない
+/// (離し始める前の抑えのキー 0xE8 が効いている。D-137)
+#[test]
+#[ignore = "実機のフィクスチャ限定。cargo test -- --ignored --test-threads=1"]
+fn fixture_real_alt_click_does_not_enter_menu() {
+    let f = Fixture::open("alt-click");
+    f.activate();
+    let _up = ModifiersUp(f.scope());
+    let p = f.at(200, 150);
+    f.execute(&format!(
+        r#"{{"type":"click","x":{},"y":{},"modifiers":["alt"]}}"#,
+        p.x, p.y
+    ))
+    .expect("Alt つきのクリック");
+    let ev = events_after_alt_up(&f);
+    let keymenu = keymenu_count(&ev);
+    println!("FIXTURE alt_click keymenu={keymenu}");
+    assert!(
+        ev.iter()
+            .any(|e| matches!(e, FixtureEvent::Modifiers { alt: true, .. })),
+        "押下の時点に Alt が立っていない: {ev:?}"
+    );
+    let mask = ev
+        .iter()
+        .position(|e| *e == FixtureEvent::KeyDown { vk: 0xE8 });
+    let alt_up = ev
+        .iter()
+        .position(|e| *e == FixtureEvent::KeyUp { vk: 0x12 });
+    assert!(
+        matches!((mask, alt_up), (Some(m), Some(u)) if m < u),
+        "抑えのキー (0xE8) の押下が Alt の離しより前に届いていない: {ev:?}"
+    );
+    assert_eq!(keymenu, 0, "Alt クリックでメニューに入った: {ev:?}");
+}
+
+/// 対照: 上の Alt クリックと同じ列から抑えのキー (0xE8) だけを抜いて (移動、Alt の押下、左の押下と離し、Alt の離し。
+/// 実行器の列 `plan::click_events` と同じ順)
+/// フィクスチャ専用の送り口で送り、SC_KEYMENU の数を `FIXTURE alt_click_nomask keymenu=<数>` に出す。断言はしない
+/// (1 以上なら、上のテストの 0 件は抑えが効いた証拠になる。0 なら、クリックを挟むだけでメニューに入らないか、
+/// このフィクスチャでは測れない。D-137)
+#[test]
+#[ignore = "実機のフィクスチャ限定。cargo test -- --ignored --test-threads=1"]
+fn fixture_real_alt_click_without_mask_measures_keymenu() {
+    let f = Fixture::open("alt-click-nomask");
+    f.activate();
+    let _up = ModifiersUp(f.scope());
+    let p = f.at(200, 150);
+    let alt = |down| InputEvent::Key {
+        vk: 0x12,
+        down,
+        extended: false,
+    };
+    let left = |down| InputEvent::Button {
+        button: Button::Left,
+        down,
+    };
+    RealSink::for_fixture(f.scope())
+        .send(&[
+            InputEvent::move_to(p),
+            alt(true),
+            left(true),
+            left(false),
+            alt(false),
+        ])
+        .expect("フィクスチャが前面のときだけ、抑えなしの Alt クリックを送る");
+    let ev = events_after_alt_up(&f);
+    println!(
+        "FIXTURE alt_click_nomask keymenu={} alt_at_down={}",
+        keymenu_count(&ev),
+        ev.iter()
+            .any(|e| matches!(e, FixtureEvent::Modifiers { alt: true, .. }))
+    );
+}
+
+/// 陽性の対照: Alt だけを押して離し (抑えなし)、このフィクスチャが SC_KEYMENU を出す窓かを測る。断言はしない
+/// (0 なら、このフィクスチャでは抑えの効き目を測れない。D-137)。前面化のための Alt の空打ちではなく、
+/// フィクスチャが前面のときだけ送る (フィクスチャ専用の送り口が前面を確かめる)
+#[test]
+#[ignore = "実機のフィクスチャ限定。cargo test -- --ignored --test-threads=1"]
+fn fixture_real_bare_alt_tap_measures_keymenu() {
+    let f = Fixture::open("bare-alt");
+    f.activate();
+    let _up = ModifiersUp(f.scope());
+    RealSink::for_fixture(f.scope())
+        .send(&[
+            InputEvent::Key {
+                vk: 0x12,
+                down: true,
+                extended: false,
+            },
+            InputEvent::Key {
+                vk: 0x12,
+                down: false,
+                extended: false,
+            },
+        ])
+        .expect("フィクスチャが前面のときだけ Alt を押して離す");
+    let ev = events_after_alt_up(&f);
+    println!("FIXTURE bare_alt keymenu={}", keymenu_count(&ev));
 }
 
 // ---- 操作の前の枠 (D-093、plan 2026-10-28-activity-overlay のステップ 2) ----

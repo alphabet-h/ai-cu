@@ -9,8 +9,8 @@ use crate::device::WindowInfo;
 use crate::error::{AppError, ErrorKind};
 use crate::geometry::{Point, Rect};
 use crate::image::path_within;
-use crate::keys::KeyCombo;
-use crate::script::ActionKind;
+use crate::keys::{KeyCombo, builtin_denied_modifiers};
+use crate::script::{ActionKind, ClickModifier};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Policy {
@@ -247,6 +247,50 @@ impl Policy {
                     format!("キー {combo} は allow.keys に無い: {}", l.source),
                 ));
             }
+        }
+        Ok(())
+    }
+
+    /// `click` / `double_click` の `modifiers` (修飾キーを押したままのクリック) の判定 (D-137)。空なら通す。
+    /// 順に (a) 修飾キーだけで決まる組み込みの拒否 (Ctrl と Alt の両方。設定で緩められない)、
+    /// (b) 操作の種類 `key` の許可 (`deny.actions = ["key"]` をくぐらせない)、
+    /// (c) どれかの層の `allow.keys` が空でなければ断る (修飾キーだけは allow.keys に書けないので、許可を広げない側)。
+    /// `deny.keys` は見ない (修飾キーだけの組み合わせは書けない。止めるなら deny.actions の key)
+    pub fn check_click_modifiers(&self, mods: &[ClickModifier]) -> Check {
+        if mods.is_empty() {
+            return Ok(());
+        }
+        let canonical = ClickModifier::canonical(mods);
+        let names = canonical
+            .iter()
+            .map(|m| m.modifier().name())
+            .collect::<Vec<_>>()
+            .join("+");
+        let key_mods: Vec<_> = canonical.iter().map(|m| m.modifier()).collect();
+        if let Some(why) = builtin_denied_modifiers(&key_mods) {
+            return Err(Denied {
+                message: format!("修飾キー {names} のクリック: {why}"),
+                rule: Some(RULE_BUILTIN),
+                fix: None,
+            });
+        }
+        if let Err(mut d) = self.check_action_kind(ActionKind::Key) {
+            d.message = format!(
+                "修飾キーつきのクリックは操作の種類 key の許可にも通す: {}",
+                d.message
+            );
+            return Err(d);
+        }
+        if let Some(l) = self.layers.iter().find(|l| !l.allow.keys.is_empty()) {
+            return Err(self.denied(
+                l,
+                "allow.keys",
+                "を空にする".into(),
+                format!(
+                    "修飾キーつきのクリックは allow.keys に書けないので、allow.keys を使う設定では断る (modifiers なしなら打てる): {}",
+                    l.source
+                ),
+            ));
         }
         Ok(())
     }

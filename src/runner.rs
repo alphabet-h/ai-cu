@@ -328,6 +328,12 @@ fn summarize(v: &Validation) -> (usize, Option<FirstBatch>, u64, usize) {
         .filter(|s| matches!(s, Step::Batch { .. }))
         .count();
     let first = steps.clone().find_map(|s| match s {
+        // 修飾キーつきのクリック (D-137) は前面の窓にも届くので、案内はキーボード (前面にしないと 7) にする。
+        // 判定は実行器の前面のガードと同じ `plan::has_key_events`
+        Step::Batch {
+            target: Target::Mouse { .. },
+            events,
+        } if crate::plan::has_key_events(events) => Some(FirstBatch::Keyboard),
         Step::Batch {
             target: Target::Mouse { .. },
             ..
@@ -673,5 +679,31 @@ mod tests {
             vec![PathBuf::from("C:\\a\\STOP"), PathBuf::from("C:\\b\\STOP")]
         );
         assert!(sentinel_paths(&policy, &MapEnv::default()).len() == 1);
+    }
+
+    /// 最初の操作が修飾キーつきのクリックなら、確認の案内はキーボード (前面にしないと 7)。修飾なしはマウス (D-137)
+    #[test]
+    fn summarize_classifies_modifier_click_as_keyboard() {
+        let cfg = crate::config::Config::parse(&format!("version = 1\n{ENABLED}")).unwrap();
+        let policy = Policy::new(vec![crate::config::Layer::from_config(&cfg, "t").unwrap()]);
+        let first = |actions: &str| {
+            let s =
+                Script::from_json(&format!(r#"{{"version":1,"actions":[{actions}]}}"#)).unwrap();
+            let v = validate(&s, &policy, None);
+            assert!(v.ok(), "{:?}", v.issues);
+            summarize(&v).1
+        };
+        for a in [
+            r#"{"type":"click","x":1,"y":2,"modifiers":["ctrl"]}"#,
+            r#"{"type":"double_click","x":1,"y":2,"modifiers":["shift"]}"#,
+        ] {
+            assert_eq!(first(a), Some(FirstBatch::Keyboard), "{a}");
+        }
+        for a in [
+            r#"{"type":"click","x":1,"y":2}"#,
+            r#"{"type":"double_click","x":1,"y":2}"#,
+        ] {
+            assert_eq!(first(a), Some(FirstBatch::Mouse), "{a}");
+        }
     }
 }

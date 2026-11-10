@@ -30,10 +30,10 @@ use crate::run::{
 pub use crate::runner::{DeviceFactory, RealDevices};
 use crate::runner::{RunOptions, read_script_file, require_dpi};
 use crate::script::{
-    Action, ActionKind, Button, DEFAULT_DRAG_MS, DEFAULT_DRAG_STEPS, DEFAULT_SETTLE_TIMEOUT_MS,
-    DEFAULT_SHOT_SCALE, DEFAULT_STABLE_MS, DEFAULT_TYPE_INTERVAL_MS, DEFAULT_WAIT_FOR_TIMEOUT_MS,
-    ElementFilter, MAX_SINGLE_WAIT_MS, MAX_STABLE_MS, MIN_STABLE_MS, Pos, Region, SCRIPT_VERSION,
-    Script, Settle, WindowTarget,
+    Action, ActionKind, Button, ClickModifier, DEFAULT_DRAG_MS, DEFAULT_DRAG_STEPS,
+    DEFAULT_SETTLE_TIMEOUT_MS, DEFAULT_SHOT_SCALE, DEFAULT_STABLE_MS, DEFAULT_TYPE_INTERVAL_MS,
+    DEFAULT_WAIT_FOR_TIMEOUT_MS, ElementFilter, MAX_SINGLE_WAIT_MS, MAX_STABLE_MS, MIN_STABLE_MS,
+    Pos, Region, SCRIPT_VERSION, Script, Settle, WindowTarget,
 };
 use crate::validate::{Validation, validate};
 
@@ -250,6 +250,9 @@ pub enum Command {
         /// left | right | middle
         #[arg(long, default_value = "left", value_name = "BUTTON", value_parser = parse_button)]
         button: Button,
+        /// 押したままクリックする修飾キー: ctrl, alt, shift (カンマ区切り)
+        #[arg(long, value_name = "MODS", value_delimiter = ',', value_parser = parse_click_modifier)]
+        modifiers: Vec<ClickModifier>,
         #[command(flatten)]
         step: StepOpts,
     },
@@ -264,6 +267,9 @@ pub enum Command {
         /// left | right | middle
         #[arg(long, default_value = "left", value_name = "BUTTON", value_parser = parse_button)]
         button: Button,
+        /// 押したままクリックする修飾キー: ctrl, alt, shift (カンマ区切り)
+        #[arg(long, value_name = "MODS", value_delimiter = ',', value_parser = parse_click_modifier)]
+        modifiers: Vec<ClickModifier>,
         #[command(flatten)]
         step: StepOpts,
     },
@@ -489,6 +495,25 @@ fn parse_button(s: &str) -> Result<Button, String> {
     }
 }
 
+/// `click` / `double_click` の修飾キーの名前 (正規の順。`ClickModifier::ALL` から組み、手で書き写さない。D-137)
+pub(crate) fn click_modifier_names() -> [&'static str; 3] {
+    ClickModifier::ALL.map(|m| m.modifier().name())
+}
+
+/// `--modifiers` の 1 つの値。`parse_button` と同じく大文字小文字を区別しない (操作列の JSON と MCP は小文字だけ。D-137)
+fn parse_click_modifier(s: &str) -> Result<ClickModifier, String> {
+    let t = s.trim().to_ascii_lowercase();
+    ClickModifier::ALL
+        .into_iter()
+        .find(|m| m.modifier().name() == t)
+        .ok_or_else(|| {
+            format!(
+                "modifiers は {} のどれか: {s:?}",
+                click_modifier_names().join(" / ")
+            )
+        })
+}
+
 fn parse_type_arg(s: &str) -> Result<String, String> {
     parse_control_type(s).map(str::to_string).ok_or_else(|| {
         format!(
@@ -558,15 +583,29 @@ pub fn step_opts(cmd: &Command) -> Option<&StepOpts> {
 pub fn step_script(cmd: &Command, stdin: &mut dyn Read) -> Result<Script, AppError> {
     let usage = |e: String| AppError::new(ErrorKind::Usage, e);
     let action = match cmd {
-        Command::Click { x, y, button, .. } => Action::Click {
+        Command::Click {
+            x,
+            y,
+            button,
+            modifiers,
+            ..
+        } => Action::Click {
             x: *x,
             y: *y,
             button: *button,
+            modifiers: modifiers.clone(),
         },
-        Command::DoubleClick { x, y, button, .. } => Action::DoubleClick {
+        Command::DoubleClick {
+            x,
+            y,
+            button,
+            modifiers,
+            ..
+        } => Action::DoubleClick {
             x: *x,
             y: *y,
             button: *button,
+            modifiers: modifiers.clone(),
         },
         Command::Drag {
             x1,
@@ -1874,9 +1913,17 @@ pub(crate) fn config_cmd(action: ConfigCmd, paths: &ConfigPaths) -> Outcome {
 /// `type` の文字と IME の 1 句 (D-133)。`ai-cu schema` と MCP の `type` と `run` の `type` の説明が使う
 pub(crate) const TYPE_IME_NOTE: &str = "文字は Unicode で送る。IME がオンだと受け手によっては順が乱れたり変換の窓が出たりするので、先に key の imeoff で切り、打った後に text か shot で確かめる (改行とタブはキーとして送る)";
 
+/// `click` / `double_click` の `modifiers` の但し書き (D-137)。`ai-cu schema` と MCP の `modifiers` の説明が使う (1 か所)
+pub(crate) const CLICK_MODIFIERS_NOTE: &str =
+    "修飾キーは前面の窓に届くので、前面も許可された窓であること。ctrl と alt の組は断る";
+
 /// 操作列 JSON の書式 (`ai-cu schema`)。
 pub fn schema() -> Value {
     let point = json!({ "x": "整数 (物理ピクセル)", "y": "整数 (物理ピクセル)" });
+    let modifiers = format!(
+        "[{}] (省略可。押したままクリックする。{CLICK_MODIFIERS_NOTE})",
+        click_modifier_names().join(" | ")
+    );
     json!({
         "ok": true,
         "version": SCRIPT_VERSION,
@@ -1884,8 +1931,8 @@ pub fn schema() -> Value {
         "coordinates": "物理ピクセルのスクリーン座標 (仮想デスクトップ。スクリーンショットと同じ)",
         "unknown_fields": "拒否する",
         "actions": {
-            "click": { "x": "整数", "y": "整数", "button": "left | right | middle (既定 left)" },
-            "double_click": { "x": "整数", "y": "整数", "button": "left | right | middle (既定 left)" },
+            "click": { "x": "整数", "y": "整数", "button": "left | right | middle (既定 left)", "modifiers": modifiers },
+            "double_click": { "x": "整数", "y": "整数", "button": "left | right | middle (既定 left)", "modifiers": modifiers },
             "drag": { "from": point, "to": point, "button": "既定 left", "steps": "補間の回数 1..=1000 (既定 20)", "duration_ms": "全体の時間 (既定 300、最大 60000)" },
             "move": { "x": "整数", "y": "整数" },
             "scroll": { "clicks": "0 以外で絶対値 100 以下の整数。正で上 / 右 (1 = 1 ノッチ。1 ノッチずつ 20 ミリ秒空けて送る)", "horizontal": "真偽 (既定 false)", "x": "省略可 (y と組で、先にそこへ移動)", "y": "省略可" },
@@ -1999,6 +2046,21 @@ mod tests {
         assert!(GUIDE.contains("順が乱れ"), "{GUIDE}");
         assert!(GUIDE.contains("kanji"), "{GUIDE}");
         assert!(GUIDE.contains("送った文字は未確定に入る"), "{GUIDE}");
+    }
+
+    /// 手引きの全文の操作列の節に、修飾キーを押したままのクリック (`modifiers`) の 1 文がある。
+    /// 要点版は上限 (21000 バイト) のほぼ上限なので、その行は要点版には入れない (D-137)
+    #[test]
+    fn guide_full_mentions_click_modifiers() {
+        let line = GUIDE
+            .lines()
+            .find(|l| l.contains("`modifiers`") && l.contains("押したまま"))
+            .expect("全文に modifiers と「押したまま」の行がある");
+        assert!(line.contains("前面の窓も許可"), "{line}");
+        assert!(
+            !guide_summary().lines().any(|l| l == line),
+            "要点版に入っている: {line}"
+        );
     }
 
     /// 要点版の `focus` の最小化の行は、復元しない理由と次の手 (`windows` で確かめて `focus` し直す) を書き、
@@ -2557,6 +2619,7 @@ mod tests {
             x: 1,
             y: 2,
             button: Button::Left,
+            modifiers: vec![],
         };
         let s = step_with_shot(click.clone(), None);
         assert_eq!(s.version, SCRIPT_VERSION);
@@ -4114,6 +4177,23 @@ mod tests {
                 &["double-click", "1", "2"],
                 r#"{"type":"double_click","x":1,"y":2}"#,
             ),
+            // modifiers (D-137): カンマ区切り。重複は畳まずに形の検査 (3) へ渡す。CLI は大文字小文字を区別しない
+            (
+                &["click", "10", "20", "--modifiers", "ctrl,shift"],
+                r#"{"type":"click","x":10,"y":20,"modifiers":["ctrl","shift"]}"#,
+            ),
+            (
+                &["double-click", "1", "2", "--modifiers", "alt"],
+                r#"{"type":"double_click","x":1,"y":2,"modifiers":["alt"]}"#,
+            ),
+            (
+                &["click", "1", "2", "--modifiers", "ctrl,ctrl"],
+                r#"{"type":"click","x":1,"y":2,"modifiers":["ctrl","ctrl"]}"#,
+            ),
+            (
+                &["click", "1", "2", "--modifiers", "CTRL"],
+                r#"{"type":"click","x":1,"y":2,"modifiers":["ctrl"]}"#,
+            ),
             (
                 &[
                     "drag",
@@ -4212,6 +4292,47 @@ mod tests {
             let want =
                 Script::from_json(&format!(r#"{{"version":1,"actions":[{want}]}}"#)).unwrap();
             assert_eq!(s, want, "{args:?}");
+        }
+    }
+
+    /// `--modifiers win` は使い方の誤り (2)。win は使えない修飾キー (D-137)
+    #[test]
+    fn click_modifiers_cli_rejects_win() {
+        for sub in ["click", "double-click"] {
+            let e =
+                Cli::try_parse_from(["ai-cu", sub, "1", "2", "--modifiers", "win"]).unwrap_err();
+            assert_eq!(e.kind(), clap::error::ErrorKind::ValueValidation, "{sub}");
+            let msg = e.to_string();
+            for name in click_modifier_names() {
+                assert!(msg.contains(name), "{sub}: {msg}");
+            }
+        }
+    }
+
+    /// click と double-click のヘルプに `--modifiers` が出る (D-137)
+    #[test]
+    fn click_help_lists_modifiers() {
+        let mut cmd = Cli::command();
+        for sub in ["click", "double-click"] {
+            let help = cmd
+                .find_subcommand_mut(sub)
+                .unwrap()
+                .render_help()
+                .to_string();
+            assert!(help.contains("--modifiers"), "{sub}: {help}");
+        }
+    }
+
+    /// `schema` の click と double_click の modifiers の文は `ClickModifier::ALL` の名前と但し書きの定数から組む (D-137)
+    #[test]
+    fn schema_click_lists_modifiers_from_all() {
+        let s = schema();
+        for action in ["click", "double_click"] {
+            let text = s["actions"][action]["modifiers"].as_str().unwrap();
+            for m in ClickModifier::ALL {
+                assert!(text.contains(m.modifier().name()), "{action}: {text}");
+            }
+            assert!(text.contains(CLICK_MODIFIERS_NOTE), "{action}: {text}");
         }
     }
 
