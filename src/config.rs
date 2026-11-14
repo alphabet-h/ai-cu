@@ -452,7 +452,7 @@ pub(crate) fn check_setting_abs_path(key: &str, s: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// `capture.save_dirs` の検査と正規化 (D-075)。要素ごとに、空文字 (trim 後)、`\\?\` と `\\.\` で始まるもの、
+/// `capture.save_dirs` の検査と正規化 (D-075)。要素ごとに、空文字 (trim 後)、`\\?\` と `\\.\` と `\??\` で始まるもの、
 /// 絶対パスでないものと `%` を含むものを断り、字面で `.` と `..` を畳んで返す。検査と正規化はここだけで行う (TUI も使う)。
 pub fn normalized_save_dirs(dirs: &[String]) -> Result<Vec<PathBuf>, String> {
     dirs.iter()
@@ -463,7 +463,8 @@ pub fn normalized_save_dirs(dirs: &[String]) -> Result<Vec<PathBuf>, String> {
             }
             if crate::image::is_verbatim_or_device(d) {
                 return Err(format!(
-                    "capture.save_dirs に \\\\?\\ や \\\\.\\ で始まるパスは使えない: {d:?}"
+                    "capture.save_dirs に {} で始まるパスは使えない: {d:?}",
+                    crate::image::DEVICE_PREFIXES_TEXT
                 ));
             }
             check_setting_abs_path("capture.save_dirs", d)?;
@@ -1486,6 +1487,10 @@ mod tests {
             let text = format!("version = 1\n[capture]\nsave_dirs = [\"{bad}\"]\n");
             assert!(Config::parse(&text).is_err(), "{text}");
         }
+        // \??\ の形は形の規則で断る (枝が無いと絶対パスの規則の文で断られる。D-140)
+        let text = "version = 1\n[capture]\nsave_dirs = [\"/??/UNC/s/x\"]\n";
+        let e = Config::parse(text).unwrap_err();
+        assert!(e.contains("で始まるパスは使えない"), "{e}");
     }
 
     fn mcp_config(names: &[&str]) -> Config {

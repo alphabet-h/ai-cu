@@ -120,8 +120,12 @@ fn mcp_default_hint(mut outcome: Outcome) -> Outcome {
 /// `--log PATH` の追記先 (D-061)。プロセスに 1 つ
 static LOG_FILE: OnceLock<Mutex<std::fs::File>> = OnceLock::new();
 
-/// 記録をファイルにも追記する (D-061)。開けなければ Err (呼び出し側は、ログなしで続ける)
+/// 記録をファイルにも追記する (D-061)。開けなければ Err (呼び出し側は、ログなしで続ける)。
+/// 開く前にパスの形を確かめ、拡張子 `.log` 以外、`\\?\` などで始まるもの、`:` を含むファイル名は
+/// 開かずに Err (InvalidInput) を返す (D-140)
 pub fn set_log_file(path: &Path) -> std::io::Result<()> {
+    crate::image::check_path_shape(&path.to_string_lossy(), "log", "ログのファイル")
+        .map_err(|msg| std::io::Error::new(std::io::ErrorKind::InvalidInput, msg))?;
     let file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
