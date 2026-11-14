@@ -526,6 +526,36 @@ fn mcp_child_log_file_records_start_cancel_and_eof() {
     );
 }
 
+/// clientInfo.name の改行はログの出口でエスケープされ、行を割らない (D-140)
+#[test]
+fn mcp_child_log_escapes_client_name() {
+    let dir = temp_dir("mcp-log-escape");
+    let log = dir.join("mcp.log");
+    let log_s = log.display().to_string();
+    let input = format!(
+        "{}\n",
+        serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18", "capabilities": {},
+                "clientInfo": { "name": "evil\nINJECT & calc", "version": "1" }
+            }
+        })
+    );
+    let (code, _, stderr) = run(&["mcp", "--log", &log_s], &[], input.as_bytes());
+    assert_eq!(code, 0, "stderr={stderr}");
+    let text = std::fs::read_to_string(&log).expect("ログのファイル");
+    let lines: Vec<&str> = text.lines().collect();
+    assert!(
+        lines
+            .iter()
+            .all(|l| l.contains("Z (") && l.contains("ai-cu mcp: ")),
+        "{text}"
+    );
+    assert!(!lines.iter().any(|l| l.starts_with("INJECT")), "{text}");
+    assert!(lines.iter().any(|l| l.contains("\\u{a}INJECT")), "{text}");
+}
+
 #[test]
 fn mcp_child_shot_in_dev_shell_is_refused_and_writes_no_file() {
     let dir = temp_dir("mcp-shot");
