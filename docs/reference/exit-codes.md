@@ -22,7 +22,7 @@ README の「終了コード」の詳細。[README に戻る](../../README.md#�
 
 ### `policy_denied`
 
-設定による拒否 (総スイッチ、allow / deny、組み込みの拒否、上限、撮影の保存先の規則、パスワード欄への入力。保存先の形と既存ファイルの規則は設定では緩められないので path を直す)
+設定による拒否 (総スイッチ、allow / deny、組み込みの拒否、上限、撮影の保存先の規則、パスワード欄への入力。保存先の形と既存ファイルの規則は設定では緩められないので path を直す)。窓の名指し (`find`、`tree`、`text`、`shot --window`、操作列の検証) で実行ファイル名が許可の外なら、窓が無くても 4 (名前だけの判定で、窓を探す前に断る。D-139)
 
 ### `config`
 
@@ -34,9 +34,9 @@ README の「終了コード」の詳細。[README に戻る](../../README.md#�
 
 ### `foreground_guard`
 
-フォアグラウンドガード (届く先のウィンドウが不許可、管理者権限、ウィンドウが無い、ai-cu を起動した側のウィンドウ。`focus` と `close` の対象の拒否、`window` で撮る対象が別のウィンドウに隠れているとき、撮る矩形に deny のウィンドウが見えているとき、パスワード欄かを確かめる間に前面のウィンドウが変わったときも同じ。修飾キーつき (`modifiers`) の `click` / `double_click` で、前面の窓が許可されていないときも同じで、`detail.window` は前面の窓で、`point` は無い。D-137)。`reason` が `target_changed` なら、1 つの操作 (`type`) の途中で前面が別のプロセスの窓に変わったので残りを送らずに止めた。それより前の文字は送ってある (`partial` が真。`detail` に変わった後の `window` と最初の `pinned_pid`。D-100)。drag の途中で断られたときも途中まで送ってあり (`partial` が真、`detail.point` が断った点)、押したボタンは離してある (D-132)
+フォアグラウンドガード (届く先のウィンドウが不許可、管理者権限、ウィンドウが無い、ai-cu を起動した側のウィンドウ。`focus` と `close` の対象の権限 (管理者) での拒否 (許可の外と起動した側の窓は名指しで探さないので 7 にならず、見つからない扱い。D-139)、`window` で撮る対象が別のウィンドウに隠れているとき、撮る矩形に deny のウィンドウが見えているとき、パスワード欄かを確かめる間に前面のウィンドウが変わったときも同じ。修飾キーつき (`modifiers`) の `click` / `double_click` で、前面の窓が許可されていないときも同じで、`detail.window` は前面の窓で、`point` は無い。D-137)。`reason` が `target_changed` なら、1 つの操作 (`type`) の途中で前面が別のプロセスの窓に変わったので残りを送らずに止めた。それより前の文字は送ってある (`partial` が真。`detail` に変わった後の `window` と最初の `pinned_pid`。D-100)。drag の途中で断られたときも途中まで送ってあり (`partial` が真、`detail.point` が断った点)、押したボタンは離してある (D-132)
 
-`window` で撮る対象が別のウィンドウに隠れていて断った 7 (撮影の隠れ) の `error.detail` は、覆っている窓の `window`、隠れを見つけた点の `point`、その窓の見えている部分の外接矩形の `visible`、`see_through` (その窓が deny の窓の判定 (D-077) で覆いに数えない窓か。透けうる窓などで、条件は [「安全機能」](safety.md) の機密のウィンドウを撮らない項。隠れの判定はこの値を見ないので、真でも 7)。`visible` と `see_through` は読めなければ省く (省く条件は [「使い方」](cli.md) の `error.detail` の一覧)。ai-cu を起動した側の窓を撮ろうとして断った 7 も、その窓の `window` を持つ。`focus` が通っても同じ 7 が続くなら、`focus` を繰り返さず `find` と `text` で読み、画像が要るならその窓 (`error.detail.window`) を片付けてもらうよう人間に頼む。`region` で撮り直さない (`region` には隠れの確認が無く、写り込みの守りの迂回になる。D-135)
+`window` で撮る対象が別のウィンドウに隠れていて断った 7 (撮影の隠れ) の `error.detail` は、覆っている窓の `window`、隠れを見つけた点の `point`、その窓の見えている部分の外接矩形の `visible`、`see_through` (その窓が deny の窓の判定 (D-077) で覆いに数えない窓か。透けうる窓などで、条件は [「安全機能」](safety.md) の機密のウィンドウを撮らない項。隠れの判定はこの値を見ないので、真でも 7)。`visible` と `see_through` は読めなければ省く (省く条件は [「使い方」](cli.md) の `error.detail` の一覧)。ai-cu を起動した側の窓は撮る対象として探さないので、名指しすると見つからない 12 で `error.detail` は無い (D-139。以前は 7)。`focus` が通っても同じ 7 が続くなら、`focus` を繰り返さず `find` と `text` で読み、画像が要るならその窓 (`error.detail.window`) を片付けてもらうよう人間に頼む。`region` で撮り直さない (`region` には隠れの確認が無く、写り込みの守りの迂回になる。D-135)
 
 ### `os_error`
 
@@ -58,6 +58,8 @@ OS の呼び出しの失敗 (`SendInput`、撮影、保存)。UIA の読み取�
 
 対象のウィンドウ (`screenshot` の `window`、`shot --window`、`find`、`tree`、`text`、`wait_stable` と `wait_change` の `window`) が見つからない、最小化されている、または画面の外。撮影も読み取りもしていない (操作の後の `--shot` や操作列の `screenshot` なら、どこまで済んだかは最上位の `executed` で分かる)。`close` の対象が見つからない、または `WM_CLOSE` を置けなかったときも 12 で、何も閉じていない
 
+名指しは `windows` に出る窓 (設定のプロセスとクラスの判定を通り、ai-cu を起動した側でない。操作列ではさらに TUI の端末でない) だけから探す。許可の外と起動した側の窓は、あっても見つからないときと同じ 12 で、message も同じ (末尾に「許可の外と ai-cu を起動した側の窓は探さない (windows に出る窓だけを名指しできる)」が付く)。`focus` の 11 の `not_found` も同じ (D-139)。`windows` に出ていない窓を名指ししていないかを確かめ、出ていなければ人間に許可を頼む
+
 `error.detail.window` (7 と同じ形) は、撮影の対象 (`screenshot`、`shot --window`、`wait_stable` と `wait_change` の `window`) のときだけ入る。最小化は許可された窓のときだけで、画面の外はいつも入り、見つからないときは無い (D-135)
 
 ### `element_not_found`
@@ -70,7 +72,7 @@ OS の呼び出しの失敗 (`SendInput`、撮影、保存)。UIA の読み取�
 
 ### `wait_timeout`
 
-`wait_for`、`wait_stable`、`wait_change` の条件が時間内に満たされなかった。何も送っていない (操作列なら、それより前の操作は済んでいて `executed` で分かる)。`error.detail` に `timeout_ms`、`checks` (確かめた回数)、`unmet` (`wait_for` は `window` / `element` / `text`、`wait_stable` は `stable`、`wait_change` は `change`)、`window` (最後の判定で見た対象。題名なし。無ければ null)。画面の待ちでは、最後に撮った矩形の `rect` と最後の比較の差の `last_changed_ratio` も入る。同じ条件で繰り返し待たない。`wait_for` なら `windows`、`find`、`text`、`shot` で状態と条件を見直す (D-068)。画面の待ちなら `shot` で今の画面を見て、動き続ける部分 (動画、スピナー、点滅) があれば `region` を狭めるか `threshold` を上げ、変わるのを待っていたなら待つ前に既に変わっていなかったか (待ち始めの画像が基準になる) を確かめる (D-081)
+`wait_for`、`wait_stable`、`wait_change` の条件が時間内に満たされなかった。何も送っていない (操作列なら、それより前の操作は済んでいて `executed` で分かる)。`error.detail` に `timeout_ms`、`checks` (確かめた回数)、`unmet` (`wait_for` は `window` / `element` / `text`、`wait_stable` は `stable`、`wait_change` は `change`)、`window` (最後の判定で見た対象。題名なし。無ければ null)。画面の待ちでは、最後に撮った矩形の `rect` と最後の比較の差の `last_changed_ratio` も入る。同じ条件で繰り返し待たない。`wait_for` なら `windows`、`find`、`text`、`shot` で状態と条件を見直す (D-068)。`wait_for` は許可の外と起動した側の窓を無いと数えるので、そうした窓を待つと時間切れの 15 になる (`unmet` が `window` の 15 は、message の末尾に 12 と同じ名指しの範囲の 1 文が付く。D-139)。画面の待ちなら `shot` で今の画面を見て、動き続ける部分 (動画、スピナー、点滅) があれば `region` を狭めるか `threshold` を上げ、変わるのを待っていたなら待つ前に既に変わっていなかったか (待ち始めの画像が基準になる) を確かめる (D-081)
 
 ### `input_busy`
 
@@ -78,4 +80,4 @@ OS の呼び出しの失敗 (`SendInput`、撮影、保存)。UIA の読み取�
 
 ## 設定による拒否の rule と fix
 
-4 と、許可の外れで断る 7 (入力の届く先、`focus` と `close` の対象) には、当たった設定のキーの `error.rule` と人間向けの直し方の `error.fix` が付く ([「使い方」](cli.md) の出力の形。D-079)。撮る矩形に deny のウィンドウが見えている 7 は `rule` だけで、`fix` は付かない。
+4 と、許可の外れで断る 7 (入力の届く先。`focus` と `close` の対象は許可の外なら名指しで探さないので 7 にならない。D-139) には、当たった設定のキーの `error.rule` と人間向けの直し方の `error.fix` が付く ([「使い方」](cli.md) の出力の形。D-079)。撮る矩形に deny のウィンドウが見えている 7 は `rule` だけで、`fix` は付かない。

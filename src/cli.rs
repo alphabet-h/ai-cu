@@ -2090,7 +2090,8 @@ mod tests {
         assert!(!line.contains("wait_for"), "{line}");
     }
 
-    /// 要点版の `error.detail` の状況の行は、撮影の 7 の隠れの覆う窓と `see_through`、起動した側の窓を挙げる (D-135)
+    /// 要点版の `error.detail` の状況の行は、撮影の 7 の隠れの覆う窓と `see_through` を挙げる (D-135)。起動した側の
+    /// 窓は名指しで探さず 12 になり、撮影の 7 の `window` には出ないので、その行に挙げない (D-139)
     #[test]
     fn guide_summary_mentions_occluded_detail_keys() {
         let s = guide_summary();
@@ -2102,7 +2103,7 @@ mod tests {
         let line = lines[0];
         assert!(line.contains("隠れなら覆う窓"), "{line}");
         assert!(line.contains("see_through"), "{line}");
-        assert!(line.contains("起動した側"), "{line}");
+        assert!(!line.contains("起動した側"), "{line}");
     }
 
     /// 全文の操作列 JSON の節は、run の途中の失敗で mcp:inline の画像が届かないことがあることと回り道を書き、
