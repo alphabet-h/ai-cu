@@ -989,6 +989,19 @@ mod tests {
         assert!(json[0].get("rule").is_none() && json[0].get("fix").is_none());
     }
 
+    /// allow.keys に printscreen を書いても、key printscreen は組み込みで断る (D-141)
+    #[test]
+    fn validate_printscreen_is_builtin_even_when_allowed() {
+        let p = policy(&format!("{ENABLED}[allow]\nkeys=[\"printscreen\"]\n"));
+        let v = validate(&script(r#"{"type":"key","keys":"printscreen"}"#), &p, None);
+        assert_eq!(v.error_kind(), Some(ErrorKind::PolicyDenied));
+        let issue = &v.issues[0];
+        assert_eq!(issue.action_index, Some(0));
+        assert_eq!(issue.code, ErrorKind::PolicyDenied.code());
+        assert_eq!(issue.rule, Some(crate::policy::RULE_BUILTIN));
+        assert_eq!(issue.hint.as_deref(), Some(crate::policy::BUILTIN_HINT));
+    }
+
     /// 上限の判定を Policy に寄せた後も (D-079)、数と待ちの合計の問題は今の文で、操作列全体の問題 (番号なし) のまま
     #[test]
     fn validate_limit_issues_keep_message_and_whole_script_index() {

@@ -778,7 +778,7 @@ pub fn tools() -> Vec<Value> {
             "key",
             "キーの組み合わせ",
             &format!(
-                "前面のウィンドウにキーの組み合わせを送る (例 ctrl+s、alt+tab、enter、f5、shift+left)。Win を含むもの、Alt+F4、Ctrl+Alt+ 系、Ctrl+Shift+Esc、Ctrl+Esc は組み込みで拒否。{STEP_NOTE}。{LEAD_NOTE}"
+                "前面のウィンドウにキーの組み合わせを送る (例 ctrl+s、alt+tab、enter、f5、shift+left)。Win を含むもの、Alt+F4、Ctrl+Alt+ 系、Ctrl+Shift+Esc、Ctrl+Esc、PrintScreen (修飾キーにかかわらず) は組み込みで拒否。{STEP_NOTE}。{LEAD_NOTE}"
             ),
             json!({ "type": "object", "additionalProperties": false, "properties": step_props(json!({ "keys": { "type": "string", "description": "組み合わせ (大文字小文字と修飾キーの順序は問わない)。IME のキーは kanji (半角/全角)、convert (変換)、nonconvert (無変換)、imeon、imeoff (反応は IME とアプリに依る)。未知のキーの失敗の issues の message に使える名前が出る" } })), "required": ["keys"] }),
             input_tool(false),

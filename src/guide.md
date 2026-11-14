@@ -133,7 +133,7 @@ ai-cu wait-for notepad.exe --title "保存の確認" --absent                   
 - `type` は 1 文字ずつ 20 ミリ秒の間隔で送る (`interval_ms` で変えられる)。間隔を 0 にすると、アプリが文字を落とすことがある。改行 (`\n`) は Enter として送る
 - `type` の文字は Unicode として送る (改行とタブはキーとして送る)。メモ帳では IME がオンでも未確定に入らなかったが、IME がオンだと受け手によっては文字の順が乱れたり変換の窓が出たりする (GPUI の入力欄で観測)。先に `key` の `imeoff` で切ってから打ち、打った後に `text` か `shot` で確かめる。IME のキーは `key` の `kanji` (半角/全角)、`imeon`、`imeoff`、`convert` (変換)、`nonconvert` (無変換) で送る (反応は IME とアプリに依るので、送った後に撮って確かめる)。IME がオンのとき、`key` で 1 字ずつ送った文字は未確定に入る。使えるキーの名前は、未知のキーの失敗の出力の最上位の `issues[].message` に出る
 - 入力欄を `click` して続けて `type` / `key` を書くと、間に 200 ミリ秒待つ (最初の文字が落ちるのを避ける)。それでも先頭が欠けるアプリでは、間に `wait` (300〜500) を書く。`text` で値を読めない入力欄 (gpui など) は、撮って確かめる
-- `key` の例: `ctrl+s`、`alt+tab`、`enter`、`f5`、`shift+left`。`Win` を含む組み合わせ、`Alt+F4`、`Ctrl+Alt+` 系、`Ctrl+Shift+Esc`、`Ctrl+Esc` は常に拒否される (設定でも許可できない。`modifiers` に `ctrl` と `alt` を両方書いたクリックも)
+- `key` の例: `ctrl+s`、`alt+tab`、`enter`、`f5`、`shift+left`。`Win` を含む組み合わせ、`Alt+F4`、`Ctrl+Alt+` 系、`Ctrl+Shift+Esc`、`Ctrl+Esc`、`PrintScreen` (修飾キーにかかわらず。画面は `screenshot` か `shot` で撮る) は常に拒否される (設定でも許可できない。`modifiers` に `ctrl` と `alt` を両方書いたクリックも)
 - 窓のタイトルバーの `drag` は窓がカーソルの後から動くので、1 歩を掴んだ点から進む向きの窓の端までの距離の半分以下にする (`steps` を増やし、`duration_ms` は 1 歩 50 ms ほど)。各点の下が許可された窓かを見るため
 - 1 回の操作列は短く保つ (数個から十数個)。長い手順は、区切りごとに撮って確かめながら進める
 - `screenshot`、`wait_stable`、`wait_change` の `region` は必ず書く (省略すると全画面になる)。`path` は絶対パスで書く (相対パスは ai-cu を起動した作業ディレクトリが基準)

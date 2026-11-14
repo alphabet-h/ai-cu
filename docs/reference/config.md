@@ -10,7 +10,7 @@ TOML。allow と deny を、操作の種類、プロセス、ウィンドウク�
 
 判定の規則:
 
-- 優先順位は、組み込みの拒否 > `deny` > `allow`。組み込みの拒否は `Win` を含む組み合わせ、`Alt+F4`、`Ctrl+Alt+` 系、`Ctrl+Shift+Esc`、`Ctrl+Esc` (修飾キーつきのクリックの ctrl+alt も。D-137) で、設定では緩められない
+- 優先順位は、組み込みの拒否 > `deny` > `allow`。組み込みの拒否は `Win` を含む組み合わせ、`Alt+F4`、`Ctrl+Alt+` 系、`Ctrl+Shift+Esc`、`Ctrl+Esc`、`PrintScreen` を含む組み合わせすべて (修飾キーつきのクリックの ctrl+alt も。D-137、D-141) で、設定では緩められない
 - プロセスとクラスは、マウスの操作では座標の下のウィンドウ、キーと文字では前面のウィンドウに対して、送る直前に判定する。修飾キーつき (`modifiers`) の `click` / `double_click` は両方に対して判定する (修飾キーは前面の窓に届くため。D-137)
 - 窓の名指し (`focus`、`close`、`wait_for`、`screenshot` / `wait_stable` / `wait_change` の `window`、`shot --window`、`find`、`tree`、`text`) は、`windows` に出る窓 (プロセスとクラスの許可を通り、ai-cu を起動した側でない。操作列ではさらに TUI の端末でない) だけから、前面に近い順に最初の一致を探す。許可の外と起動した側の窓は、あっても無いのと同じ扱い (見つからない 12、`focus` は 11 の `not_found`、`wait_for` は下の項。message も無いときと同じ) で、名指しの結果から `windows` に出ない窓の有無と題名は分からない。実行ファイル名だけの判定は探す前に掛け、許可の外の名前は窓が無くても 4 (`error.rule` と `error.fix` が付く。D-139)
 - `focus` の対象は、`validate` でプロセス名を、実行時には上の範囲から見つけたウィンドウをフォアグラウンドガードと同じ判定 (管理者権限など) に通す。`focus` は入力を送らないが、`general.input_enabled` と `allow.actions` / `deny.actions` の対象

@@ -1101,10 +1101,18 @@ mod tests {
     #[test]
     fn policy_builtin_key_deny_cannot_be_allowed() {
         let p = policy(&[&format!(
-            "{ENABLED}[allow]\nkeys=[\"alt+f4\", \"win+r\", \"ctrl+alt+delete\"]\n"
+            "{ENABLED}[allow]\nkeys=[\"alt+f4\", \"win+r\", \"ctrl+alt+delete\", \"printscreen\", \"alt+printscreen\"]\n"
         )]);
-        for k in ["alt+f4", "win+r", "ctrl+alt+delete", "ctrl+shift+esc"] {
-            assert!(p.check_key(&key(k)).is_err(), "{k}");
+        for k in [
+            "alt+f4",
+            "win+r",
+            "ctrl+alt+delete",
+            "ctrl+shift+esc",
+            "printscreen",
+            "alt+printscreen",
+        ] {
+            let d = p.check_key(&key(k)).unwrap_err();
+            assert_eq!(d.rule, Some(RULE_BUILTIN), "{k}: {}", d.message);
         }
     }
 
