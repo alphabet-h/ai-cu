@@ -74,7 +74,7 @@
 - 画面のキャプチャ方式の候補は、GDI の `BitBlt`、DXGI のデスクトップ複製、Windows.Graphics.Capture。まず GDI と `png` クレートを試し、`shot` の出力に幅、高さ、縮尺、原点を含める
 - 画面の矩形の `BitBlt` は、その矩形に見えているものを撮る (ウィンドウ自身の中身ではない)。ウィンドウの矩形で撮ると、上に重なる別のウィンドウの中身が写り込む
   (via: 2026-10-09 の手動確認の手順 17で、メモ帳が Zed の後ろにある状態の `ai-cu shot --out win-half.png --window notepad.exe --scale 0.5` の画像に、Zed のファイル一覧と会話の文字が写った)。
-  `window` で撮るときは、撮る直前に矩形の中を間引いて見て、対象 (と対象に所有されたウィンドウ) 以外が上にあれば撮らない (D-053 の追記)。ウィンドウ自身の中身を撮るには `PrintWindow` (`PW_RENDERFULLCONTENT`) があるが、アプリによって黒や古い内容になりうる (未検証)
+  `window` で撮るときは、撮る直前に矩形の中を間引いて見て、対象 (と対象に所有されたウィンドウと、対象の窓と同じ pid・同じスレッドの題名が無いかツールウィンドウの透けない窓 (D-142)) 以外が上にあれば撮らない (D-053 の追記)。ウィンドウ自身の中身を撮るには `PrintWindow` (`PW_RENDERFULLCONTENT`) があるが、アプリによって黒や古い内容になりうる (未検証)
 - UI Automation の `CurrentBoundingRectangle` は、Per-Monitor V2 を宣言したプロセスでは物理ピクセルで、`DwmGetWindowAttribute` の枠の矩形と一致した。枠の無いポップアップ (フィクスチャ) の種類は `window` ではなく `pane`
   (via: `cargo test -- --ignored --nocapture --test-threads=1` の `fixture_real_uia_finds_fixture_window_element_in_physical_pixels` が、`FIXTURE uia element name="ai-cu fixture uia ..." type=pane rect=960,540,640,400` を出した。2026-10-09)。
   `windows` クレート 0.62.2 の `GetCurrentPatternAs` は、パターンを持たない要素 (COM では S_OK と null) では Err を返す (windows-core の `from_abi` が null を `Error::empty()` にする。win32 レビューが生成コードで確認) 前提で `text` を組んでいる (find の状態の読み取り `read_states` (D-089) も同じ前提)。UIA のクライアントの呼び出しは、窓を持たない MTA のスレッドで行う (Microsoft Learn「Understanding Threading Issues」)。D-054
