@@ -496,6 +496,7 @@ automation_id、フォーカス、状態 (D-089)。(a) はメモ帳が前面で�
 - [ ] Claude Code を終了して `tasklist /FI "IMAGENAME eq ai-cu.exe"` に残っていない (数秒以内)
 - [ ] 補助プロセス (D-057): サーバーの起動の後に人が端末で何か打ってから (頼みごとを打てば足りる。サーバーが前面化の権利を失う)、端末が前面のまま `focus` (notepad.exe) → 成功して `focused` にメモ帳、その `helper` が true (補助を通った。直接で足りたなら false)。窓が一瞬出ないこと、`tasklist` に `ai-cu.exe` の補助が残らないことも見る。失敗なら 11 の `error.detail` の `helper`、`helper_result`、`helper_error` を記録する
 - [ ] 補助が抜け道にならない: 人が Chrome などを前面にしてから `focus` → 11 (`refused_other_app`、`detail.helper` が false)、前面は Chrome のまま
+- [ ] 補助の直接起動にも判定が掛かる (D-138。GO の後、AI のセッションから release のパスで打つ): allow の外の窓の hwnd (`windows` の出力か、7 の `error.detail.window.hwnd`) を `target/release/ai-cu.exe __focus-helper <hwnd>` に渡す → 終了コード 4、標準エラーに「前面にしない」の固定の文 (窓の名前は出ない)、前面は変わらない。allow の窓 (メモ帳) の hwnd なら 0 で前面になる
 - [ ] Esc の取り消しは、マウスに触らずキーボードだけで押す (マウスを動かすと先に停止 (6) が効く)
 - [ ] close (D-062): 人がメモ帳で Ctrl+Shift+N を押して新しい**ウィンドウ** (タブではない) を開き、何も入れずに置く (この PC の題名は「タイトルなし - メモ帳」。入力すると 1 行目が題名になる。他に同じ題名のウィンドウが無いこと)。端末が前面のまま `close` (notepad.exe、title「タイトルなし」) → `closed[0].gone` が true、そのウィンドウだけが消え、元のメモ帳は残る。前面は端末のまま、文字は何も入らない。`title` を省くと道具の引数の誤りで、何も閉じない
 - [ ] close の保存の確認: 同じように新しいウィンドウを開いて「消してよい」と打ち、端末に戻って `close` (title「消してよい」。題名は 1 行目になる) → `gone` が false (保存の確認は Zed などの後ろで出て、前面は変わらない)。確認は人が「キャンセル」で閉じ、そのウィンドウは人が片付ける (AI は確認のボタンを押さない)
