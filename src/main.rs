@@ -17,8 +17,8 @@ fn main() {
 }
 
 fn real_main() -> i32 {
-    // 前面化の補助プロセス (D-057)。MCP の focus が起動する。設定もガードも読まず、前面化を 1 回だけ行う。
-    // clap の外で見分けるので、--help と schema には出ない
+    // 前面化の補助プロセス (D-057)。MCP の focus が起動する。子も親と同じ判定を前面化の前に掛け (D-138)、
+    // 通れば前面化を 1 回だけ行う。理由の分類は親が持つ。clap の外で見分けるので、--help と schema には出ない
     let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
     if let Some(code) = ai_cu::focus_helper::real_main_if_helper(&args) {
         return code;
