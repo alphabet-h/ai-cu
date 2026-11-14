@@ -1603,12 +1603,16 @@ pub(crate) fn shot(
     let (rect, shot_window) = match &window {
         // 対象をウィンドウで指定 (D-053): 探し方と判定は操作列の screenshot と同じ
         Some(t) => {
+            // 名前だけの判定は探す前 (D-139。操作列の検証と同じ形)。CLI と MCP の shot は TUI から呼ばれないので
+            // 自分の端末 (self_hwnd) は無い
+            crate::run::check_named_process(policy, &t.process)?;
             let (r, w) = resolve_capture_window(
                 desktop.as_ref(),
                 policy,
                 screen,
                 t,
                 &ctx.host_pids,
+                None,
                 ctx.surface,
             )?;
             (r, Some(w))
@@ -1679,7 +1683,8 @@ pub(crate) fn shot(
 }
 
 /// `find` と `text` の対象のウィンドウ (D-054): 要素の名前と文字列は画面上の情報なので撮影と同じ許可を求め、
-/// ウィンドウは `shot --window` と同じ探し方で見つけて、フォアグラウンドガードと同じ判定に通す
+/// ウィンドウは `shot --window` と同じく、名前だけの判定 (`check_named_process`) の後に、`windows` に出る窓
+/// (`named_window_admitted`) だけから探す (許可の外と起動した側の窓は無いものとして 12。D-139)
 fn require_ui_permission(policy: &Policy) -> Result<(), AppError> {
     policy
         .check_action_kind(ActionKind::Screenshot)
@@ -1700,13 +1705,20 @@ fn resolve_ui_window(
         Some(t) => format!("process={:?}, title={t:?}", target.process),
         None => format!("process={:?}", target.process),
     };
+    // 名前だけの判定は窓の有無に依らないので、探す前に掛ける (許可の外の名前は窓が無くても 4。D-139)
+    crate::run::check_named_process(policy, &target.process)?;
     let w = desktop
-        .find_window(&target.process, target.title.as_deref(), &|_| true)
+        .find_window(&target.process, target.title.as_deref(), &|w| {
+            crate::run::named_window_admitted(policy, w, host_pids, None)
+        })
         .map_err(backend_error)?
         .ok_or_else(|| {
             AppError::new(
                 ErrorKind::WindowNotFound,
-                format!("対象のウィンドウが見つからない ({shown})"),
+                format!(
+                    "対象のウィンドウが見つからない ({shown})。{}",
+                    crate::run::NAMED_WINDOW_SCOPE_NOTE
+                ),
             )
         })?;
     if w.minimized {
@@ -1715,7 +1727,7 @@ fn resolve_ui_window(
             format!("対象のウィンドウは最小化されている ({shown})。ai-cu は復元しない"),
         ));
     }
-    // 起動した側 (D-055) と設定の判定は、wait_for と同じ関数 (D-068)
+    // 起動した側 (D-055) と設定の判定は、wait_for と同じ関数 (D-068)。述語を通った窓には当たらない守りの重ね (D-139)
     check_ui_window(policy, &w, host_pids, None, &shown)?;
     Ok(w)
 }
@@ -5116,9 +5128,10 @@ mod tests {
         }
     }
 
-    /// ホストの除外 (D-055): find と text は、ai-cu を起動した側のウィンドウを 7 で断り、要素を読まない
+    /// ホストの除外 (D-055): find、text、tree は、ai-cu を起動した側のウィンドウを名指しの候補に入れず、無いときと
+    /// 同じ 12 を返し、要素を読まない (D-139。以前は 7)
     #[test]
-    fn find_cli_and_text_cli_refuse_host_window_with_7() {
+    fn find_host_window_is_not_found() {
         let dir = unique_temp_dir("cli-find-host");
         let floor = floor_file(&dir, ENABLED);
         let env = MapEnv::new(&[(ENV_DEV_FORBID, "1"), (ENV_DEV_FLOOR, &floor)]);
@@ -5130,20 +5143,25 @@ mod tests {
         e.text = Some("秘密の会話".into());
         w.elements = vec![(0x30, e)];
         let world = w.shared();
-        for args in [
-            &["find", "--window", "WindowsTerminal.exe"][..],
-            &["text", "--window", "WindowsTerminal.exe"][..],
-        ] {
-            let o = go_with_hosts(args, &env, &mut MockDevices(world.clone()), vec![77]);
-            match o {
-                Outcome::Json { code, value, .. } => {
-                    assert_eq!(code, 7, "{value}");
-                    assert_eq!(value["error"]["hint"], crate::run::HOST_CAPTURE_HINT);
+        world
+            .borrow_mut()
+            .tree
+            .push((0x30, 0, element("秘密の会話", "window", None)));
+        for cmd in ["find", "text", "tree"] {
+            let args = [cmd, "--window", "WindowsTerminal.exe"];
+            let o = go_with_hosts(&args, &env, &mut MockDevices(world.clone()), vec![77]);
+            let absent =
+                go_with_hosts(&args, &env, &mut MockDevices(World::new().shared()), vec![]);
+            match (o, absent) {
+                (Outcome::Json { code, value, .. }, Outcome::Json { value: absent, .. }) => {
+                    assert_eq!(code, 12, "{cmd}: {value}");
+                    assert_eq!(value, absent, "{cmd}: 無いときと同じ");
                     assert!(!value.to_string().contains("秘密"), "{value}");
                 }
                 other => panic!("{other:?}"),
             }
         }
+        assert_eq!(world.borrow().ui_tree_calls, 0);
         // pid が違えば読める
         let o = go_with_hosts(
             &["text", "--window", "WindowsTerminal.exe"],
@@ -5152,6 +5170,206 @@ mod tests {
             vec![78],
         );
         assert_eq!(o.code(), Some(0), "{o:?}");
+    }
+
+    // --- 名指しは windows に出る窓だけから探す (D-139) ---
+
+    /// 題名とクラスと pid を決めた窓 (名指しのテスト用)
+    fn named_top(hwnd: usize, process: &str, class: &str, title: &str, pid: u32) -> TopWindow {
+        let mut w = top(hwnd, process, Rect::new(100, 50, 640, 480));
+        w.info.class = class.into();
+        w.info.title = title.into();
+        w.info.pid = pid;
+        w
+    }
+
+    /// 名指しの CLI を 1 回走らせ、終了コードと JSON を返す
+    fn named_json(
+        args: &[&str],
+        env: &MapEnv,
+        world: &std::rc::Rc<std::cell::RefCell<World>>,
+        hosts: Vec<u32>,
+    ) -> (i32, Value) {
+        match go_with_hosts(args, env, &mut MockDevices(world.clone()), hosts) {
+            Outcome::Json { code, value, .. } => (code, value),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// 撮影を許し、クラス `Secret` を deny にした床
+    fn secret_class_env(name: &str) -> MapEnv {
+        let dir = unique_temp_dir(name);
+        let floor = floor_file(&dir, &format!("{ENABLED}[deny]\nclasses = [\"Secret\"]\n"));
+        MapEnv::new(&[(ENV_DEV_FORBID, "1"), (ENV_DEV_FLOOR, &floor)])
+    }
+
+    /// 窓 `w` だけがあり、その窓に要素と木を持つ世界
+    fn world_with(w: TopWindow) -> std::rc::Rc<std::cell::RefCell<World>> {
+        let hwnd = w.info.hwnd;
+        let mut world = World::new();
+        world.default_window = Some(w.info.clone());
+        world.top = vec![w];
+        let mut e = element("本文", "document", Some(Rect::new(100, 50, 100, 100)));
+        e.text = Some("秘密の会話".into());
+        world.elements = vec![(hwnd, e)];
+        world.tree = vec![(hwnd, 0, element("秘密の会話", "window", None))];
+        world.shared()
+    }
+
+    /// deny のクラスの窓の題名を名指しした find / tree / text は、その題名の窓が無いときと同じ 12 (message、hint、
+    /// detail まで一致)。message の末尾は名指しの範囲の文
+    #[test]
+    fn find_class_denied_window_reports_same_not_found_as_absent() {
+        let env = secret_class_env("cli-named-class");
+        let denied = world_with(named_top(0x40, "Notepad.exe", "Secret", "secret", 5));
+        let absent = World::new().shared();
+        for cmd in ["find", "tree", "text"] {
+            let args = [cmd, "--window", "notepad.exe", "--window-title", "secret"];
+            let (code, value) = named_json(&args, &env, &denied, vec![]);
+            let (code_a, value_a) = named_json(&args, &env, &absent, vec![]);
+            assert_eq!(code, 12, "{cmd}: {value}");
+            assert_eq!(code_a, 12, "{cmd}: {value_a}");
+            assert_eq!(value, value_a, "{cmd}");
+            let m = value["error"]["message"].as_str().unwrap();
+            assert!(m.ends_with(crate::run::NAMED_WINDOW_SCOPE_NOTE), "{m}");
+            assert!(!value.to_string().contains("秘密"), "{value}");
+        }
+        assert_eq!(denied.borrow().ui_tree_calls, 0);
+    }
+
+    /// Review Focus 1: 同じ実行ファイル名で、前面に近い窓がクラスで断られ、後ろの窓が許可されるなら、後ろが見つかる
+    #[test]
+    fn find_skips_denied_front_window_and_finds_allowed_behind() {
+        let env = secret_class_env("cli-named-front");
+        let mut w = World::new();
+        w.top = vec![
+            named_top(0x40, "Notepad.exe", "Secret", "secret", 5),
+            named_top(0x41, "Notepad.exe", "Cls", "secret 2", 6),
+        ];
+        let world = w.shared();
+        let (code, value) = named_json(
+            &[
+                "find",
+                "--window",
+                "notepad.exe",
+                "--window-title",
+                "secret",
+            ],
+            &env,
+            &world,
+            vec![],
+        );
+        assert_eq!(code, 0, "{value}");
+        assert_eq!(value["window"]["hwnd"], 0x41, "{value}");
+    }
+
+    /// Review Focus 5: 起動した側の窓と同じ実行ファイル名で pid の違う許可された窓が後ろにあれば、後ろが見つかる
+    #[test]
+    fn find_skips_host_window_and_finds_same_exe_allowed_behind() {
+        let dir = unique_temp_dir("cli-named-host-behind");
+        let floor = floor_file(&dir, ENABLED);
+        let env = MapEnv::new(&[(ENV_DEV_FORBID, "1"), (ENV_DEV_FLOOR, &floor)]);
+        let mut w = World::new();
+        w.top = vec![
+            named_top(0x30, "WindowsTerminal.exe", "Cls", "端末", 77),
+            named_top(0x31, "WindowsTerminal.exe", "Cls", "端末", 78),
+        ];
+        let world = w.shared();
+        let (code, value) = named_json(
+            &["find", "--window", "WindowsTerminal.exe"],
+            &env,
+            &world,
+            vec![77],
+        );
+        assert_eq!(code, 0, "{value}");
+        assert_eq!(value["window"]["hwnd"], 0x31, "{value}");
+    }
+
+    /// Review Focus 2: 許可の外 (deny のクラス) の窓が最小化されていても、無いときと同じ 12 (「最小化」の文も
+    /// detail も出さない)
+    #[test]
+    fn find_minimized_denied_window_is_plain_not_found() {
+        let env = secret_class_env("cli-named-minimized");
+        let mut secret = named_top(0x40, "Notepad.exe", "Secret", "secret", 5);
+        secret.minimized = true;
+        secret.rect = None;
+        let denied = world_with(secret);
+        let absent = World::new().shared();
+        let args = ["find", "--window", "notepad.exe"];
+        let (code, value) = named_json(&args, &env, &denied, vec![]);
+        let (_, value_a) = named_json(&args, &env, &absent, vec![]);
+        assert_eq!(code, 12, "{value}");
+        assert_eq!(value, value_a);
+        // hint は 12 の共通の文 (最小化にも触れる) なので、message だけを見る
+        let m = value["error"]["message"].as_str().unwrap();
+        assert!(!m.contains("最小化"), "{m}");
+        assert!(value["error"].get("detail").is_none(), "{value}");
+    }
+
+    /// 許可の外の名前 (allow.processes の外) は、窓が無くても探す前に 4 で、rule と fix が付く (find / tree / text)
+    #[test]
+    fn find_denied_process_is_policy_denied_without_window() {
+        let dir = unique_temp_dir("cli-named-process");
+        let floor = floor_file(
+            &dir,
+            &format!("{ENABLED}[allow]\nprocesses = [\"chrome\"]\n"),
+        );
+        let env = MapEnv::new(&[(ENV_DEV_FORBID, "1"), (ENV_DEV_FLOOR, &floor)]);
+        let world = World::new().shared();
+        for cmd in ["find", "tree", "text"] {
+            let (code, value) = named_json(&[cmd, "--window", "notepad.exe"], &env, &world, vec![]);
+            assert_eq!(code, 4, "{cmd}: {value}");
+            assert_eq!(value["error"]["rule"], "allow.processes", "{cmd}: {value}");
+            assert!(value["error"]["fix"].is_string(), "{cmd}: {value}");
+        }
+        assert_eq!(world.borrow().find_window_calls, 0, "探す前に断る");
+    }
+
+    /// CLI の shot --window: deny のクラスの窓の名指しは、無いときと同じ 12 で撮らない
+    #[test]
+    fn shot_window_class_denied_is_not_found_like_absent() {
+        let env = secret_class_env("cli-named-shot-class");
+        let denied = world_with(named_top(0x40, "Notepad.exe", "Secret", "secret", 5));
+        let absent = World::new().shared();
+        let args = [
+            "shot",
+            "--out",
+            "a.png",
+            "--window",
+            "notepad.exe",
+            "--window-title",
+            "secret",
+        ];
+        let (code, value) = named_json(&args, &env, &denied, vec![]);
+        let (_, value_a) = named_json(&args, &env, &absent, vec![]);
+        assert_eq!(code, 12, "{value}");
+        assert_eq!(value, value_a);
+        let m = value["error"]["message"].as_str().unwrap();
+        assert!(m.ends_with(crate::run::NAMED_WINDOW_SCOPE_NOTE), "{m}");
+        assert_eq!(denied.borrow().capture_calls, 0);
+    }
+
+    /// CLI の shot --window: 許可の外の名前は、窓が無くても探す前に 4 で、rule と fix が付く
+    #[test]
+    fn shot_window_denied_process_is_policy_denied_without_window() {
+        let dir = unique_temp_dir("cli-named-shot-process");
+        let floor = floor_file(
+            &dir,
+            &format!("{ENABLED}[allow]\nprocesses = [\"chrome\"]\n"),
+        );
+        let env = MapEnv::new(&[(ENV_DEV_FORBID, "1"), (ENV_DEV_FLOOR, &floor)]);
+        let world = World::new().shared();
+        let (code, value) = named_json(
+            &["shot", "--out", "a.png", "--window", "notepad.exe"],
+            &env,
+            &world,
+            vec![],
+        );
+        assert_eq!(code, 4, "{value}");
+        assert_eq!(value["error"]["rule"], "allow.processes", "{value}");
+        assert!(value["error"]["fix"].is_string(), "{value}");
+        assert_eq!(world.borrow().find_window_calls, 0, "探す前に断る");
+        assert_eq!(world.borrow().capture_calls, 0);
     }
 
     /// UI Automation の find (D-054): 許可されたウィンドウの要素を名前と種類で絞って返す。中心点は click に渡せる。
@@ -5738,7 +5956,7 @@ mod tests {
     }
 
     /// `tree` の許可と終了コードは `find` と同じ (D-084): 撮影の許可が無ければ 4 で装置に触れない、
-    /// 窓が無ければ 12、起動した側の窓なら 7 で木を読まない。装置の失敗は 8
+    /// 窓が無ければ 12、起動した側の窓も 12 (D-139) で木を読まない。装置の失敗は 8
     #[test]
     fn tree_cli_refuses_like_find() {
         let dir = unique_temp_dir("cli-tree-refuse");
@@ -5782,8 +6000,7 @@ mod tests {
             vec![77],
         ) {
             Outcome::Json { code, value, .. } => {
-                assert_eq!(code, 7, "{value}");
-                assert_eq!(value["error"]["hint"], crate::run::HOST_CAPTURE_HINT);
+                assert_eq!(code, 12, "{value}");
                 assert!(!value.to_string().contains("秘密"), "{value}");
             }
             other => panic!("{other:?}"),

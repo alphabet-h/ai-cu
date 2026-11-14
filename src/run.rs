@@ -274,11 +274,11 @@ pub fn check_ui_window(
     Ok(())
 }
 
-/// 撮る対象のウィンドウの矩形を解く (D-053)。`focus` と同じ探し方で見つけ、フォアグラウンドガードと同じ判定
-/// (プロセス、クラス、権限) と撮影の規則 (領域、全画面) に通し、画面からはみ出す分は切り詰める。
-/// 見つからない、最小化、画面の外は 12 (何もしていない)。CLI の `shot --window` も使う。
-/// `host_pids` (ai-cu を起動した側) のウィンドウは、設定にかかわらず撮らない (7。D-055)。
-/// 次の手の文は `surface` (CLI か MCP か) で選ぶ (D-056)。
+/// 撮る対象のウィンドウの矩形を解く (D-053)。述語 (`named_window_admitted`) を通る窓だけから探す (許可の外、
+/// ai-cu を起動した側 (`host_pids`。D-055)、TUI の端末 (`self_hwnd`) の窓は無いものとして 12。D-139)。
+/// 見つけた窓をフォアグラウンドガードと同じ判定 (権限など) と撮影の規則 (領域、全画面) に通し、画面からはみ出す
+/// 分は切り詰める。見つからない、最小化、画面の外は 12 (何もしていない)。CLI の `shot --window` も使う
+/// (`self_hwnd` は None)。次の手の文は `surface` (CLI か MCP か) で選ぶ (D-056)。
 /// 隠れは即 7。猶予は操作列の `grab` の側 (D-082)
 pub fn resolve_capture_window(
     desktop: &dyn Desktop,
@@ -286,9 +286,12 @@ pub fn resolve_capture_window(
     screen: Rect,
     target: &WindowTarget,
     host_pids: &[u32],
+    self_hwnd: Option<usize>,
     surface: Surface,
 ) -> Result<(Rect, ShotWindow), AppError> {
-    match resolve_capture_window_parts(desktop, policy, screen, target, host_pids, surface)? {
+    match resolve_capture_window_parts(
+        desktop, policy, screen, target, host_pids, self_hwnd, surface,
+    )? {
         Resolved::Clear(rect, w) => Ok((rect, ShotWindow::of(&w))),
         Resolved::Occluded { cover, point, rect } => Err(occluded_error(
             desktop, target, &cover, point, &rect, surface, None,
@@ -366,18 +369,23 @@ fn resolve_capture_window_parts(
     screen: Rect,
     target: &WindowTarget,
     host_pids: &[u32],
+    self_hwnd: Option<usize>,
     surface: Surface,
 ) -> Result<Resolved, AppError> {
     let shown = capture_target_shown(target);
+    // 述語を通る窓だけから探す (D-139)。通らない窓の有無と題名は、結果に表れない
     let w = desktop
-        .find_window(&target.process, target.title.as_deref(), &|_| true)
+        .find_window(&target.process, target.title.as_deref(), &|w| {
+            named_window_admitted(policy, w, host_pids, self_hwnd)
+        })
         .map_err(backend_error)?
         .ok_or_else(|| {
             AppError::new(
                 ErrorKind::WindowNotFound,
-                format!("撮る対象のウィンドウが見つからない ({shown})"),
+                format!("撮る対象のウィンドウが見つからない ({shown})。{NAMED_WINDOW_SCOPE_NOTE}"),
             )
         })?;
+    // 以下の起動した側と許可の判定は、述語を通った窓には当たらない守りの重ね (D-139)。
     // 許可の判定は 1 回だけ評価する。最小化の 12 の detail は許可された窓のときだけ足し、返すエラーの順は
     // 従来のまま (最小化、起動した側、許可) にする (D-135)
     let allowed = policy.check_window(&w.info);
@@ -2389,6 +2397,7 @@ impl Executor<'_> {
                 ctx.screen,
                 t,
                 ctx.host_pids,
+                ctx.self_hwnd,
                 ctx.surface,
             )? {
                 Resolved::Clear(r, w) => break (r, Some(w)),
@@ -3246,7 +3255,8 @@ mod tests {
     }
 
     /// ホストの除外 (D-055): ai-cu を起動した側のプロセスのウィンドウには、キーも、座標の下でも、focus でも、
-    /// screenshot の window でも、設定にかかわらず触れない。同じ実行ファイル名でも pid が違えば届く
+    /// screenshot の window でも、設定にかかわらず触れない。同じ実行ファイル名でも pid が違えば届く。
+    /// screenshot の window の名指しでは、起動した側の窓は無いものとして 12 (D-139)
     #[test]
     fn foreground_guard_host_pid_rejects_keys_mouse_focus_and_capture_target_without_sending() {
         let mut w = World::new();
@@ -3267,10 +3277,6 @@ mod tests {
                 r#"{"type":"focus","process":"WindowsTerminal.exe"}"#,
                 HOST_WINDOW_HINT,
             ),
-            (
-                r#"{"type":"screenshot","path":"a.png","window":{"process":"WindowsTerminal.exe"}}"#,
-                HOST_CAPTURE_HINT,
-            ),
         ] {
             let (r, images) = exec_with(&world, &p, &mut StopSet::new(), &script(s), None, &[77]);
             let e = r.unwrap_err();
@@ -3281,6 +3287,21 @@ mod tests {
             assert!(world.borrow().focus_calls.is_empty(), "{s}");
             assert!(images.written.is_empty(), "{s}");
         }
+        // screenshot の window の名指しでは、起動した側の窓は無いものとして 12 (D-139)
+        let s =
+            r#"{"type":"screenshot","path":"a.png","window":{"process":"WindowsTerminal.exe"}}"#;
+        let (r, images) = exec_with(&world, &p, &mut StopSet::new(), &script(s), None, &[77]);
+        let e = r.unwrap_err();
+        assert_eq!(e.kind, ErrorKind::WindowNotFound, "{e}");
+        assert!(
+            e.message.ends_with(NAMED_WINDOW_SCOPE_NOTE),
+            "{}",
+            e.message
+        );
+        assert!(e.detail.is_none(), "{:?}", e.detail);
+        assert!(world.borrow().sent.is_empty());
+        assert_eq!(world.borrow().capture_calls, 0);
+        assert!(images.written.is_empty());
         // 同じ実行ファイル名でも pid が違えば届く (除外は pid で見る)
         let (r, _) = exec_with(
             &world,
@@ -4562,8 +4583,15 @@ mod tests {
         let denied_class = policy(&format!(
             "{ENABLED}[allow]\nprocesses=[\"notepad\"]\n[deny]\nclasses=[\"TargetClass\"]\n"
         ));
+        // クラスで断られる窓は名指しの候補に入らない (D-139。無いときと同じ 12)
         let (r, images) = exec(&world, &denied_class, &mut StopSet::new(), &s);
-        assert_eq!(r.unwrap_err().kind, ErrorKind::PolicyDenied);
+        let e = r.unwrap_err();
+        assert_eq!(e.kind, ErrorKind::WindowNotFound, "{e}");
+        assert!(
+            e.message.ends_with(NAMED_WINDOW_SCOPE_NOTE),
+            "{}",
+            e.message
+        );
         assert!(images.written.is_empty());
     }
 
@@ -4698,8 +4726,8 @@ mod tests {
         assert_eq!(w.stack_calls, 1);
     }
 
-    /// 隠れ以外の 12 / 4 / 7 は待たずに返す (解き直さない): 見つからない、許可の外れ (deny のクラス)、
-    /// ai-cu を起動した側の窓、対象の枠の内側 8 ピクセルの帯にある小さい deny の窓。
+    /// 隠れ以外の 12 / 7 は待たずに返す (解き直さない): 見つからない、許可の外れ (deny のクラス。D-139 で 12)、
+    /// ai-cu を起動した側の窓 (D-139 で 12)、対象の枠の内側 8 ピクセルの帯にある小さい deny の窓 (7)。
     /// 最初の 3 つは対象を覆いで隠しておき、覆いがあってもこれらが隠れより先に返ることも確かめる
     #[test]
     fn screenshot_window_other_errors_do_not_wait() {
@@ -4733,8 +4761,13 @@ mod tests {
             "{ENABLED}[allow]\nprocesses=[\"notepad\"]\n[deny]\nclasses=[\"TargetClass\"]\n"
         ));
         let (r, _) = exec(&world, &denied_class, &mut StopSet::new(), &s);
-        check(&world, r, ErrorKind::PolicyDenied, "許可の外れ");
-        // ai-cu を起動した側の窓 (7)
+        let e = check(&world, r, ErrorKind::WindowNotFound, "許可の外れ");
+        assert!(
+            e.message.ends_with(NAMED_WINDOW_SCOPE_NOTE),
+            "{}",
+            e.message
+        );
+        // ai-cu を起動した側の窓 (12。D-139)
         let world = base().shared();
         let (r, _) = exec_with(
             &world,
@@ -4744,10 +4777,11 @@ mod tests {
             None,
             &[np.info.pid],
         );
-        let e = check(&world, r, ErrorKind::ForegroundGuard, "ホストの窓");
-        assert_eq!(
-            e.hint.as_deref(),
-            Some(hint(Hint::HostCapture, Surface::Cli))
+        let e = check(&world, r, ErrorKind::WindowNotFound, "ホストの窓");
+        assert!(
+            e.message.ends_with(NAMED_WINDOW_SCOPE_NOTE),
+            "{}",
+            e.message
         );
         // 帯の中の小さい deny の窓が見えている (7)
         let small = Rect::new(102, 102, 5, 5);
@@ -4840,6 +4874,7 @@ mod tests {
             screen,
             &target,
             &[],
+            None,
             Surface::Cli,
         )
         .unwrap_err();
@@ -4962,8 +4997,16 @@ mod tests {
             process: process.into(),
             title: None,
         };
-        resolve_capture_window(&desktop, policy, screen, &target, host_pids, Surface::Cli)
-            .unwrap_err()
+        resolve_capture_window(
+            &desktop,
+            policy,
+            screen,
+            &target,
+            host_pids,
+            None,
+            Surface::Cli,
+        )
+        .unwrap_err()
     }
 
     /// 見つけた窓の window (題名なし)
@@ -4977,25 +5020,40 @@ mod tests {
         assert_no_title(e);
     }
 
-    /// 起動した側の窓の 7 は、その窓の window を持つ
-    #[test]
-    fn capture_host_window_detail_has_window() {
-        let world = capture_world(|_| {});
-        let e = resolve_capture_err(&world, &notepad_policy(), "notepad.exe", &[4242]);
-        assert_eq!(e.kind, ErrorKind::ForegroundGuard, "{e}");
-        assert_eq!(e.hint.as_deref(), Some(HOST_CAPTURE_HINT));
-        assert_found_window(&e);
+    /// 名指しの失敗 `e` が、同じ名指しで窓が 1 つも無いときの失敗と同じ (kind、message、hint、detail。D-139)
+    fn assert_capture_like_absent(e: &AppError, policy: &Policy, process: &str) {
+        let mut w = World::new();
+        w.top.clear();
+        let absent = resolve_capture_err(&w.shared(), policy, process, &[]);
+        assert_eq!(e.kind, ErrorKind::WindowNotFound, "{e}");
+        assert_eq!(e.kind, absent.kind);
+        assert_eq!(e.message, absent.message);
+        assert_eq!(e.hint, absent.hint);
+        assert!(e.detail.is_none(), "{:?}", e.detail);
+        assert!(absent.detail.is_none());
+        assert!(
+            e.message.ends_with(NAMED_WINDOW_SCOPE_NOTE),
+            "{}",
+            e.message
+        );
     }
 
-    /// 起動した側の 7 は許可で絞らない。deny の窓でも 7 のままで、window を持つ
+    /// 起動した側の窓は名指しの候補に入らない。無いときと同じ 12 で、window を持たない (D-139。以前は 7)
     #[test]
-    fn capture_host_denied_window_still_has_window() {
+    fn capture_host_window_is_not_found_like_absent() {
+        let world = capture_world(|_| {});
+        let p = notepad_policy();
+        let e = resolve_capture_err(&world, &p, "notepad.exe", &[4242]);
+        assert_capture_like_absent(&e, &p, "notepad.exe");
+    }
+
+    /// 起動した側で deny の窓も、無いときと同じ 12 (D-139。以前は 7)
+    #[test]
+    fn capture_host_denied_window_is_not_found_like_absent() {
         let world = capture_world(|_| {});
         let p = policy(&format!("{ENABLED}[deny]\nprocesses=[\"notepad\"]\n"));
         let e = resolve_capture_err(&world, &p, "notepad.exe", &[4242]);
-        assert_eq!(e.kind, ErrorKind::ForegroundGuard, "{e}");
-        assert_eq!(e.hint.as_deref(), Some(HOST_CAPTURE_HINT));
-        assert_found_window(&e);
+        assert_capture_like_absent(&e, &p, "notepad.exe");
     }
 
     /// 許可された窓が最小化なら 12 で、その窓の window を持つ
@@ -5021,7 +5079,8 @@ mod tests {
         assert_found_window(&e);
     }
 
-    /// deny の窓が最小化なら、12 のまま detail を持たない (許可の外の窓の情報を増やさない)
+    /// deny の窓が最小化なら、無いときと同じ 12 で、「最小化」の文も detail も出さない (許可の外の窓の有無を
+    /// 漏らさない。D-139)
     #[test]
     fn capture_minimized_denied_window_has_no_detail() {
         let world = capture_world(|np| {
@@ -5030,9 +5089,41 @@ mod tests {
         });
         let p = policy(&format!("{ENABLED}[deny]\nprocesses=[\"notepad\"]\n"));
         let e = resolve_capture_err(&world, &p, "notepad.exe", &[]);
+        assert!(!e.message.contains("最小化"), "{}", e.message);
+        assert_capture_like_absent(&e, &p, "notepad.exe");
+    }
+
+    /// 実行器の screenshot の window (D-139): TUI の端末 (self_hwnd) の窓は名指しの候補に入らず 12 で、撮らない。
+    /// 同じ実行ファイル名の別の窓が後ろにあれば、そちらを撮る
+    #[test]
+    fn grab_window_skips_tui_terminal() {
+        let me = top(0x20, "Notepad.exe", "a.txt - メモ帳");
+        let mut w = World::new();
+        w.default_window = Some(me.info.clone());
+        w.top = vec![me.clone()];
+        let world = w.shared();
+        let s = script(NOTEPAD_SHOT);
+        let p = notepad_policy();
+        let (r, images) = exec_excluding(&world, &p, &mut StopSet::new(), &s, Some(&me.info));
+        let e = r.unwrap_err();
         assert_eq!(e.kind, ErrorKind::WindowNotFound, "{e}");
-        assert!(e.message.contains("最小化"), "{}", e.message);
+        assert!(
+            e.message.ends_with(NAMED_WINDOW_SCOPE_NOTE),
+            "{}",
+            e.message
+        );
         assert!(e.detail.is_none(), "{:?}", e.detail);
+        assert_eq!(world.borrow().capture_calls, 0);
+        assert!(images.written.is_empty());
+        // 後ろに同じ実行ファイル名の別の窓があれば、そちらが見つかる
+        let mut behind = top(0x21, "Notepad.exe", "b.txt - メモ帳");
+        behind.info.pid = 4243;
+        // 隠れの判定 (座標の下の窓) が後ろの窓自身を返すようにする
+        world.borrow_mut().default_window = Some(behind.info.clone());
+        world.borrow_mut().top.push(behind);
+        let (r, _) = exec_excluding(&world, &p, &mut StopSet::new(), &s, Some(&me.info));
+        let report = r.unwrap();
+        assert_eq!(report.screenshots[0].window.as_ref().unwrap().hwnd, 0x21);
     }
 
     /// 見つからない 12 は detail を持たない (足す情報が無い)
