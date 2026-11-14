@@ -120,8 +120,12 @@ fn mcp_default_hint(mut outcome: Outcome) -> Outcome {
 /// `--log PATH` の追記先 (D-061)。プロセスに 1 つ
 static LOG_FILE: OnceLock<Mutex<std::fs::File>> = OnceLock::new();
 
-/// 記録をファイルにも追記する (D-061)。開けなければ Err (呼び出し側は、ログなしで続ける)
+/// 記録をファイルにも追記する (D-061)。開けなければ Err (呼び出し側は、ログなしで続ける)。
+/// 開く前にパスの形を確かめ、拡張子 `.log` 以外、`\\?\` などで始まるもの、`:` を含むファイル名は
+/// 開かずに Err (InvalidInput) を返す (D-140)
 pub fn set_log_file(path: &Path) -> std::io::Result<()> {
+    crate::image::check_path_shape(&path.to_string_lossy(), "log", "ログのファイル")
+        .map_err(|msg| std::io::Error::new(std::io::ErrorKind::InvalidInput, msg))?;
     let file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -138,8 +142,36 @@ fn log_line(unix_ms: u128, msg: &str) -> String {
     format!("{h:02}:{m:02}:{s:02}.{ms:03}Z ({unix_ms}) ai-cu mcp: {msg}")
 }
 
+/// ログの記録の本文の上限 (バイト。D-140)。超えた分は文字の境目で切る
+const LOG_LINE_MAX_BYTES: usize = 4096;
+
+/// ログの記録の本文を 1 行に収める (D-140)。制御文字 (改行、復帰、U+0085 を含む) と
+/// U+2028・U+2029 を `\u{a}` の形に置き換え、`LOG_LINE_MAX_BYTES` を超えたら文字の境目で切って
+/// 「…(切った)」を付ける。clientInfo.name のような相手の決める文字が行を割らないように、出口で 1 回掛ける
+fn sanitize_log(msg: &str) -> String {
+    let mut out = String::with_capacity(msg.len());
+    for c in msg.chars() {
+        if c.is_control() || c == '\u{2028}' || c == '\u{2029}' {
+            out.push_str(&format!("\\u{{{:x}}}", c as u32));
+        } else {
+            out.push(c);
+        }
+    }
+    if out.len() > LOG_LINE_MAX_BYTES {
+        let mut end = LOG_LINE_MAX_BYTES;
+        while !out.is_char_boundary(end) {
+            end -= 1;
+        }
+        out.truncate(end);
+        out.push_str("…(切った)");
+    }
+    out
+}
+
 /// 標準エラーへの記録 (標準出力には書かない。引数、結果、題名は書かない)。`--log` があればファイルにも書く。
+/// 本文は `sanitize_log` で 1 行に収めてから、両方に同じものを書く (D-140)
 pub fn log(msg: &str) {
+    let msg = sanitize_log(msg);
     let _ = writeln!(std::io::stderr(), "ai-cu mcp: {msg}");
     if let Some(file) = LOG_FILE.get()
         && let Ok(mut f) = file.lock()
@@ -147,7 +179,7 @@ pub fn log(msg: &str) {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| d.as_millis());
-        let _ = writeln!(f, "{}", log_line(now, msg));
+        let _ = writeln!(f, "{}", log_line(now, &msg));
     }
 }
 
@@ -1376,7 +1408,8 @@ impl<'a> Server<'a> {
         match load_policy(&self.paths) {
             Ok(policy) => tools_with_approval(&policy.mcp_require_approval()),
             Err(e) => {
-                // TOML の誤りは複数行なので、ログの 1 行に収める
+                // 誤りの文が複数行でも読みやすいよう空白でつなぐ
+                // (1 行に収めること自体は `log` の出口が保証する。D-140)
                 let msg: Vec<&str> = e.message.lines().map(str::trim).collect();
                 log(&format!(
                     "tools/list: 設定を読めないので、guide を除くすべての道具に承認の印を付ける ({})",
@@ -2170,6 +2203,40 @@ mod tests {
             "11:25:31.042Z (1791545131042) ai-cu mcp: x"
         );
         assert_eq!(log_line(0, "y"), "00:00:00.000Z (0) ai-cu mcp: y");
+    }
+
+    /// 改行、復帰、U+2028、U+0085、タブは `\u{XXXX}` の形になり、行を割らない (D-140)
+    #[test]
+    fn sanitize_log_escapes_newlines_and_controls() {
+        assert_eq!(
+            sanitize_log("a\r\nb\u{2028}c\u{85}d\te"),
+            "a\\u{d}\\u{a}b\\u{2028}c\\u{85}d\\u{9}e"
+        );
+    }
+
+    /// 制御文字の無い記録はそのまま (D-140)
+    #[test]
+    fn sanitize_log_keeps_plain_text() {
+        let s = "tools/call click → ok (12 ms)";
+        assert_eq!(sanitize_log(s), s);
+    }
+
+    /// 4096 バイトの切り目が複数バイトの文字の途中に当たっても、panic せず文字の境目で切る (D-140)
+    #[test]
+    fn sanitize_log_truncates_on_char_boundary() {
+        // 「あ」は 3 バイト。2000 個で 6000 バイト、4096 は 3 の倍数でないので文字の途中に当たる
+        let out = sanitize_log(&"あ".repeat(2000));
+        let body = out.strip_suffix("…(切った)").expect("切った印");
+        // 4096 以下で最大の境目は 3 * 1365 = 4095 バイト (切り過ぎも撃つ)
+        assert_eq!(body.len(), 4095);
+        assert!(body.chars().all(|c| c == 'あ'));
+    }
+
+    /// ちょうど 4096 バイトは切らず、印も付けない (D-140)
+    #[test]
+    fn sanitize_log_keeps_exactly_max_bytes() {
+        let s = "a".repeat(LOG_LINE_MAX_BYTES);
+        assert_eq!(sanitize_log(&s), s);
     }
 
     fn floor_file(dir: &Path, body: &str) -> PathBuf {

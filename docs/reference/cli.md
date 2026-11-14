@@ -23,7 +23,7 @@ ai-cu tree --window PROCESS [--window-title TEXT] [--depth N] [--limit N] [--all
 ai-cu text --window PROCESS [--window-title TEXT] [--name TEXT] [--type TYPE] [--max-chars N]
                               要素の文字列 (文書の本文、入力欄の値) を読む。本文は既定 20000 字で切り、出力の truncated と total_chars (切る前の字数) で分かる (--max-chars で 1〜1000000。D-102)。出力の element には focused と password が出る (状態は出ない。ほかの要素の欄は find の行と同じで、name_truncated を含む)。パスワードの要素 (UIA の IsPassword) は文字列を読まずに飛ばして次の要素へ進み、文字列を持つ要素が無ければ 13 で、飛ばした数を message の末尾に「(パスワードの要素 N 個は読まない)」と添える (読み取りだけ。撮影の許可が要る。D-090)
 ai-cu config show|path|validate            設定の層、場所、検証結果を出す (読み取り専用)
-ai-cu mcp [--log PATH]        MCP サーバー (stdio) として待ち受ける。Claude Code や Codex の設定に登録して、道具として呼ぶ (「MCP サーバーモード」)
+ai-cu mcp [--log PATH]        MCP サーバー (stdio) として待ち受ける。Claude Code や Codex の設定に登録して、道具として呼ぶ (「MCP サーバーモード」)。--log は拡張子 .log のファイルだけ (それ以外は書かずに続ける。D-140)
 ai-cu                         引数なし: 設定を編集する TUI (端末のときだけ)。r で操作列 JSON を選んで検証・実行できる
 
 一手ずつの操作 (D-052)。各サブコマンドは 1 操作の操作列として run と同じ経路 (検証、ポリシー、ガード、緊急停止) を通り、出力も run と同じ (`--shot` を付けると、操作、待ち、撮影の 3 操作になり、`executed` は 3。`--settle-ms 0` と `--settle-ms auto` なら 2):
