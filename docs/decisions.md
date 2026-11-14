@@ -664,7 +664,7 @@
   - 終了コードを 7 と分けるのは、次の手が違うから (7 は許可の確認と前面化、11 は人間に頼む)
 - 覆る条件: 端末が前面でメモ帳が最小化 (ケース D、未測定) を扱う必要が出たとき → `SetForegroundWindow` が先に成功したときだけ復元する案を測ってから足す。無操作の判定で `focus` が断られすぎて作業が進まないとき → `focus` だけ別の閾値にする (`[focus] min_idle_ms`)。`click_point` が要らないと分かったとき → `windows` から外す
 - 追記 (2026-10-09): 利用者が手動確認の手順 15 を実施し、全項目 OK。Windows Terminal (pwsh) から起動した ai-cu でも、端末が前面なら隠れたメモ帳を前面にできた (根拠の A は Zed の端末で測ったもので、WT でも同じだった)。ブラウザが前面なら 11、最小化なら 11、Enter の直後は 10。11 のときのタスクバーの点滅は見られなかった
-- 状態: 採用
+- 状態: 採用 (名指しは D-139 で許可を通る窓 (`windows` に出る窓) だけから探す。許可の外と起動した側の窓は 11 の `not_found`)
 
 ### D-051 開発中の AI が release ビルドで手動確認を行う (hook を release のパスに限って緩め、開発シェルの拒否の変数を外す)
 - 日付: 2026-10-09
@@ -715,7 +715,7 @@
 - 根拠: 2026-10-09 の手順 16 で、`--region 1328,313,2437,1304` を 4 回書き写した。D-050 の `find_window` と `check_window` がそのまま使え、撮影の判定 (`check_capture_rect`、`check_full_screen`) も既にある
 - 覆る条件: 縮尺で文字が読めなくなり座標の誤りが増えたとき (縮め方を変えるか、`scale` を外す)。`find` (段階 3) で `window` の出番が無くなったとき。目盛りが無いと座標の誤りが減らないと分かったとき (字形を足す)
 - 追記 (2026-10-09、D-054 の前): 手順 17 の実機確認で、メモ帳が端末 (Zed) の後ろにある状態の `shot --window notepad.exe` に、メモ帳の矩形に重なる Zed の中身 (deny に入れた端末の画面) が写り込んだ。画面の矩形の撮影は、そこに見えているものを撮る (ウィンドウ自身の中身ではない)。対策として、`window` で撮るときは撮る直前に矩形の中を間引いて見て (内側 8 ピクセルから 64 ピクセル間隔。角の丸みを避ける)、対象と対象に所有されたウィンドウ以外が上にあれば撮らずに 7 (フォアグラウンドガード。次の手は「先に `focus`」) で止める。64 ピクセルより小さい重なりは見逃しうる (記録だけ)。`region` の撮影は従来どおり確かめない (人が領域の規則で決める。D-049) ので、手引きでウィンドウを撮るなら `--window` を勧める。ウィンドウ自身の中身を撮る `PrintWindow` (`PW_RENDERFULLCONTENT`) は、隠れていても撮れる利点があるが、アプリによって黒や古い内容になりうるので測ってから。覆る条件に足す: 隠れたウィンドウを撮る必要が出たとき (`PrintWindow` を測る)
-- 状態: 採用 (追記の「`region` の撮影は確かめない」は D-077 で締めた。deny のウィンドウが見えていれば 7。追記の隠れの 7 は、操作列の撮影 (`Executor::grab`) では D-082 で 500 ms まで解き直してから 7 にした。`shot` サブコマンドと MCP の `shot` 道具は今までどおり即 7)
+- 状態: 採用 (追記の「`region` の撮影は確かめない」は D-077 で締めた。deny のウィンドウが見えていれば 7。追記の隠れの 7 は、操作列の撮影 (`Executor::grab`) では D-082 で 500 ms まで解き直してから 7 にした。`shot` サブコマンドと MCP の `shot` 道具は今までどおり即 7。名指しは D-139 で許可を通る窓 (`windows` に出る窓) だけから探す。許可の外と起動した側の窓、TUI の端末は撮る対象として見つからない 12)
 
 ### D-054 UI Automation で要素を探す `find` と文字列を読む `text` (`windows` クレートの COM、専用の MTA スレッド、終了コード 13)
 - 日付: 2026-10-09
@@ -735,7 +735,7 @@
 - 覆る条件: `FindAll` で全部なめるのが遅いアプリ (ブラウザなど) が出たとき (`CreatePropertyCondition` に替える)。UIA の矩形が論理ピクセルで返ると分かったとき (換算を足す)。`find` の結果から直接クリックしたい声が出たとき (`click --element NAME` を足す)
 - 追記 (2026-10-09、win32 レビュー): 高は無し。中 1 件「取得の後に消えた要素 (UIA_E_ELEMENTNOTAVAILABLE) 1 つで全体が失敗する」を、ウィンドウ自身以外は飛ばして `skipped` に数える形で直した。低 5 件のうち、`FindAll` の条件を `ControlViewCondition` (レイアウト用の要素を除く) に替える、`enabled` が読めなければ false (安全側)、`CoUninitialize` を Drop のガードで対にする、`hwnd` が 0 なら入口で拒否する、`text` は文字列を持つ最初の要素で読み取りを打ち切る、の 5 つを反映した。残り: UIA の応答待ち (TransactionTimeout、既定 20 秒) を短くするには `CUIAutomation8` で `IUIAutomation2` を作る必要がある (応答の遅いアプリで止まって見えたら足す。覆る条件に加える)。確認済み: `CoInitializeEx` の S_FALSE の対、`GetCurrentPatternAs` の null は windows-core が Err にする、`CurrentBoundingRectangle` は物理座標 (Learn「Understanding Screen Scaling Issues」)、`FindAll` は木の順、スレッド設計、SAFETY の根拠、control type の表 41 件。反映後の再確認も問題なし (Drop の順序、skipped の数え方)。表記の指摘 (null の変換先は `E_POINTER` ではなく windows-core の `Error::empty`) と、ガードを `!Send` にする補強を反映した
 - 追記 (2026-10-09): 利用者の承認で、ガード hook の READ_ONLY に `find` と `text` を足した (D-048 の `guide` と同じ手順: hook のテストに 3 件を足して落ちることを見てから追加)。どちらも UI Automation で読むだけで入力は送らない。要素の名前と文字列は画面上の情報だが、`windows` の題名と同じ扱いにし、開発シェルでは最下層の `uia_allowed` (D-022) が拒否する。これで debug ビルドや `cargo run` からも `find` / `text` の動作を確かめられる (実際の要素はフィクスチャ限定のテストでしか読めない)
-- 状態: 採用 (UIA の門と `capture_enabled` の例外を D-090 で足した。本文と要素の名前の長さの上限を D-102 で足した。待ちの上限を D-104 で足した)
+- 状態: 採用 (UIA の門と `capture_enabled` の例外を D-090 で足した。本文と要素の名前の長さの上限を D-102 で足した。待ちの上限を D-104 で足した。名指しは D-139 で許可を通る窓 (`windows` に出る窓) だけから探す。許可の外と起動した側の窓は 12、実行ファイル名が許可の外なら探す前に 4)
 - 追記 (2026-10-28、D-089): 絞り込みの判定 `ElementQuery::matches` (名前と種類) は、D-089 で `matches_except_focus` (名前・種類・automation_id) と、それに focused を足した `matches_element` になった。要素の出力には `focused` と、パターンを持つ要素だけ `toggle` / `selected` / `expanded` が増えた
 - 追記 (2026-10-28、D-090): フォーカスの要素の IsPassword の読み取り (`focused_is_password`) は、フィクスチャ専用の装置では hwnd で絞らずに読む例外にした (`GetFocusedElement` は hwnd を取らず、読むのは真偽 1 つ)。開発シェルでは今までどおり断る (門は `focused_password_allowed`)。type / key の前のこの読み取りは入力の判定の一部で画面の情報を返さないので、`capture_enabled` も見ない。`text` と `wait_for` の文字列の条件は IsPassword が真の要素を読まずに飛ばし、要素の出力に `password` が増えた
 - 追記 (2026-11-03、D-101): `regions` (D-028) は座標の規則で、UIA の読み取り (`find`、`tree`、`text`、`wait_for`) には掛けない。読めるのは許可したプロセスの文書全体 (画面外と、deny の領域に重なる部分を含む)。中身を隠したいアプリは `deny.processes` か `deny.classes` に書く。`text` の本文と `find` の `name` には長さの上限が無い (後の課題で `max_chars` を検討)
@@ -770,7 +770,7 @@
 - 追記 (2026-10-09、手順 19 の A の結果): 覆る条件「孫プロセスからの `SetForegroundWindow` が端末が前面でも断られると分かったとき」に該当した。Claude Code が起動時から常駐させた `ai-cu mcp` の `focus` は、ホスト (Zed.exe) が前面で、人の最後の入力がその端末でも 11 (`SetForegroundWindow=0`) になった。B (python の客が起動した直後の `focus`) と CLI の都度起動では成功している。常駐のプロセスは前面化の権利を失うという見立て (未検証)。MCP 向けの `focus` の扱い (都度起動の補助プロセス、人が前面に出す前提への案内の変更など) は別の判断で決める。それまで MCP の `focus` は 11 を返し、`shot` の 7 の hint が勧める `focus` も MCP では行き止まりになる
 - 追記 (2026-10-09): 別プロジェクトで使った報告で、auto モードで実入力の道具に許可ルールが無いと、分類器が呼び出しごとに判定して同じ操作が通ったり拒否されたりした (allow を足してからは拒否 0)。README の権限の項に「auto モードでは実入力の道具に ask か allow を必ず書く。allow なら入力の届く先は ai-cu の設定で絞る」を足し、手引きに「拒否が ai-cu の終了コードでなければ、人間に許可ルールを足してもらう」を足した。推奨 (読み取りは allow、実入力は ask) は変えない (△)
 - 追記 (2026-11-10): 失敗の結果 (isError) の画像は Claude Code が捨てる。D-136
-- 状態: 採用 (MCP の `focus` の扱いは D-056。補助プロセスの採否は実験の後。設定の項の「層は呼び出しごとに読み直す」の例外として、`mcp.require_approval` は客が `tools/list` を取り直したときに効く (D-078))
+- 状態: 採用 (MCP の `focus` の扱いは D-056。補助プロセスの採否は実験の後。設定の項の「層は呼び出しごとに読み直す」の例外として、`mcp.require_approval` は客が `tools/list` を取り直したときに効く (D-078)。名指しは D-139 で許可を通る窓 (`windows` に出る窓) だけから探す。起動した側の窓の名指し (focus、close、shot の window、find、tree、text、wait_for) は 7 から、見つからないときと同じ結果 (12。focus は 11 の not_found、wait_for は無いと数える) に変えた。入力の届く先の 7 はそのまま)
 
 ### D-056 MCP の `focus` は、断られたら人に頼む前提にする (11 の原因の分類と MCP 向けの案内。補助プロセスは実機実験の後に決める)
 - 日付: 2026-10-09
@@ -863,7 +863,7 @@
   - 画面領域 (`allow.regions` / `deny.regions`) は `close` に掛けない。`focus` と同じく領域はマウスの点と撮影の矩形の規則 (D-028) なので。領域で絞った設定で閉じさせたくなければ `deny.actions = ["close"]` (README に書いた)
   - `PostMessageW` の失敗はすべて 12 にしている (閉じられた場合と、置けない相手の場合を分けない)。見つけた直後の失敗はまれなので、分けるのは報告が来てから
   - ガード hook (`.claude/hooks/guard_real_input.py`) の `ACTIONS` に `close` が無い。未知の語は実入力として扱う (fail-safe) ので通常の経路では止まるが、実行ファイルを変数で渡す経路などは `ACTIONS` の語だけを見る。`.claude/` は AI が編集しないので、利用者が足した (同じコミット)
-- 状態: 採用 (ロック中の close だけの操作列のマウスの監視は D-066 で外した。隠れただけの窓を見分ける `hidden` は D-096 で足した)
+- 状態: 採用 (ロック中の close だけの操作列のマウスの監視は D-066 で外した。隠れただけの窓を見分ける `hidden` は D-096 で足した。名指しは D-139 で許可を通る窓 (`windows` に出る窓) だけから探す。許可の外と起動した側の窓は 12)
 
 ### D-063 `scroll` は 1 ノッチずつ、間に 20 ミリ秒を空けて送る
 - 日付: 2026-10-10
@@ -925,7 +925,7 @@
 - 根拠: A は、待ちのループに要るもの (停止要因、期限、進み具合) が実行器にそろっていて、2 つ目のループを作らずに済み、`--shot` も付く。C は、12 / 13 (名前を確かめる) と次の手が違う (画面が進まない原因を見る、同じ条件で繰り返し待たない) ので code だけで分岐できる (D-031 の方針。E は条件を前提にした次の操作が走る)。F は UIA の `FindAll` が重く (D-054)、knob は 0 で busy loop になる
 - 覆る条件: 複数の条件を 1 つの操作で待ちたい事例 (書式を広げる)。250 ms が遅すぎる / 重すぎる事例 (設定の節に)。既定の 10 秒が合わない事例。文字列の大文字小文字を無視したい事例。ロック中の `wait_for` が誤った成功を返した事例 (入力デスクトップの判定を掛ける)。前面になるのを待ちたい事例 (`active` を足す)
 - 追記 (2026-10-15): 利用者の承認で、ガード hook の READ_ONLY に `wait-for` を足した (D-054 の `find` / `text` と同じ手順: hook のテストに 3 件を足して落ちることを見てから追加)。`find` / `text` と同じ読み取りで入力は送らず、開発シェルでは最下層の `uia_allowed` (D-022) が拒否する。これで debug ビルドや `cargo run` からも `wait-for` の動作を確かめられる。上の「hook の READ_ONLY には足さない」は、この追記で覆った
-- 状態: 採用
+- 状態: 採用 (名指しは D-139 で許可を通る窓 (`windows` に出る窓) だけから探す。拒否された窓の「待たずに即時に 4 / 7」は、無いと数える (`absent` が false なら時間切れの 15) 形に変えた)
 
 ### D-069 `--version` と MCP の serverInfo に git のコミットと dirty の印を semver の build metadata で埋め、install.py は clean な木で HEAD と一致する release だけを配置する
 - 日付: 2026-10-16
@@ -1094,7 +1094,7 @@
 - 判断: A (○)。猶予は `plan::OCCLUDED_GRACE_MS` (500)。隠れが最初に見えた時刻から数え、待ちは `Executor::sleep` (停止要因と期限を見る)。猶予の間は撮らない。使い切ったら今までどおり 7 で、message に待った時間を添える。ホストの窓の 7、許可の 4、12、14、deny の窓の 7 は待たない。一手ずつの操作の後の `--shot` と MCP の操作の道具の `shot` オブジェクトは操作列として `grab` を通るので猶予が効く (既定の `--settle-ms` 300 では固定の待ちの間に過渡が終わることが多く、`--settle-ms 0` / `auto` で focus の直後に撮る形が事例 1 と同じになる)。`check_sensitive_capture` (deny の窓) の 7 は待たないが、間引きの点に掛かる覆いは deny の窓でも隠れとして猶予を使ってから隠れの 7 になる (撮らないので安全。隠れの判定は変えない)。`shot` サブコマンドと MCP の `shot` 道具 (`cli::shot` が `resolve_capture_window` を直接呼ぶ) は待たずに 7。猶予は時間の予算に数えない。画面の待ちの最初のフレームで使った猶予は待ちの起点をずらし (`timeout_ms` を食わない)、2 枚目以降の猶予は `timeout_ms` に数える
 - 根拠: A は 2 つの事例を 1 つの仕組みで直す (前面に描かれた時点で撮れ、窓が消えた時点で 12)。`grab` は screenshot と画面の待ちが共有する 1 か所 (D-081)。B は閉じかけの事例を直せず、focus のたびに待たせる。C は src/win32/ に手が入り、focus の事例を直せない。500 は `FOCUS_SETTLE_MS` と同じ大きさで、観察した過渡 (18 ms) とメモ帳が閉じる時間 (推定 100 ms 前後) を覆う。単独の撮影には直前の操作が無いので、隠れは今の状態で、すぐ 7 の方が次の手が早い。予算に数えないのは、猶予が隠れが見えたときだけ使われ、使い切れば失敗で終わるから。検証の余裕 `DEADLINE_MARGIN_MS` (1000) は操作列の全体で 1 つなので、`window` の撮影が多い操作列では猶予の積み重ねで余裕を超えて 6 で止まりうる (限界)。`wait_stable` と `settle` では、途中で猶予を使ったフレームで静けさの始まりを置き直す (見ていない間を静けさに数えない)。出力の `waited[].elapsed_ms` と `screenshots[].settle_ms` は最初の撮影の前の猶予を含まず、途中の猶予の分だけ `timeout_ms` を超えうる
 - 覆る条件: 500 ms で足りない過渡の事例 (延ばす)。本当に隠れているときの 7 が遅いと感じる事例 (縮める)。猶予が積み重なって最大実行時間 (`limits.max_duration_ms`) の 6 (`stopped`) で止まる事例 (予算に数える)。次の手順 26 の (c) が 12 にならない (この判断を見直す)
-- 状態: 採用
+- 状態: 採用 (待たない失敗のうち「ホストの窓の 7、許可の 4」は、D-139 で名指しを許可を通る窓だけから探すようにしたので、見つからない 12 になった)
 - 追記 (2026-10-27、実装のステップ 1): 隠れを区別して返す本体は `resolve_capture_window_parts` で、戻り値の `Resolved` は 計画の例より絞り、`Clear(Rect, WindowInfo)` と `Occluded(WindowInfo)` (覆いの窓だけ) にした (例の Occluded の矩形と対象の窓は誰も読まず、dead_code で clippy の -D warnings に落ちるため)。`resolve_capture_window_info` は呼び手が `grab` だけだったので置き換えて無くし、pub の `resolve_capture_window` (CLI と MCP の `shot`) が Occluded を即 7 にする。隠れの 7 の AppError は `occluded_error` の 1 か所で作る。`grab` の戻り値はタプル `(Rect, Option<WindowInfo>, Image, u64)` (最後が使った猶予の ms)。既存の隠れのテストは直さずに通った
 - 追記 (2026-10-27、手順 26 の (c) の打ち直し): release (0.1.0+g4a38060de1b6) で、空のメモ帳を 1 つだけ開いて `s26-c.json` を背景で起動し、約 1 秒後に `close notepad.exe --title タイトルなし` (終了コード 0、`gone` true、53 ms) を打った。`s26-c.code` が 12 (`window_not_found`、`action_index` 1)、`executed` 1、`focused` にメモ帳、`elapsed_ms` 2132。前回の 7 は出ず、期待どおり。覆る条件の「次の手順 26 の (c) が 12 にならない」には当たらない。1 回だけの観察で、focus の直後の過渡 (事例 1) がこの回に起きたかは出力からは分からない
 
@@ -1120,7 +1120,7 @@
 - 判断: A と C (利用者が決めた。2026-10-27 の /autopilot の ②)。E (○)。名前の無い pane / group / custom と画面外の要素は既定で畳み (`all` で全部)、`depth` 既定 8 (1〜50)、`limit` 既定 200 行 (1〜2000)、たどる要素は 5000 で打ち切る。行は `種類 "名前" @cx,cy` と、無効なら ` disabled`。参照 (`e12`) は付けない (後の課題で決める)。許可と終了コードは `find` と同じ。ガード hook の READ_ONLY に `tree` を足す (利用者が許した)
 - 根拠: 1 行 1 要素の文字列は JSON の配列よりトークンが少なく (推定)、字下げで親子が読める。B は `find` の出力の形が指定で変わり、名前と種類の絞り込みと木の畳みの意味が混ざる。F は親子を組み直すのに要素ごとの `GetParent` が要り、深さで切れない。G は速いが、unsafe と型 (VARIANT、キャッシュの要求) が増える割に、遅い事例がまだ無い
 - 覆る条件: 1 要素ずつのプロセス間の呼び出しが遅いアプリ (数十秒) が出たら G。5000 で必要な要素が出ない事例が出たら上限を見直す。入れ物を畳むと構造が読めない事例が出たら畳みの規則を見直す。参照でクリックしたい声が出たら参照を足す
-- 状態: 採用 (2026-10-27)
+- 状態: 採用 (2026-10-27。名指しは D-139 で許可を通る窓 (`windows` に出る窓) だけから探す。許可の外と起動した側の窓は 12、実行ファイル名が許可の外なら探す前に 4)
 - 追記 (2026-10-27、plan ステップ 1): 定数 (`TREE_DEPTH_DEFAULT` ほか 5 つ) は `usize` にした (`walk_tree` / `render_tree` の引数と同じ型。clap と MCP の側で `u32` / `i64` に写す)。名前を切る文字数 80 は非公開の定数 `TREE_NAME_MAX_CHARS`。`walk_tree` の明示のスタックは「要素を読む (`Visit`)」と「その要素の次の兄弟を取る (`Sibling`)」の 2 種の手で、要素を読んだら `first_child` を先に呼び、兄弟の手を積んでから子の手を積む (子孫が兄弟より先。`Node` に `Clone` を求めない)。要素の上限は `Visit` を取り出した時点で「試した数 >= max_nodes」なら `node_cap_hit` で止める (深さの上限で切った子は `Visit` に積まないので数えない)。`render_tree` は `limit` 行を出した後に畳んだ要素を別に数え、その後に出す行が現れて打ち切ったら捨て、打ち切らなければ `folded` に足す (spec の出力の節の「`limit` で捨てた分は数えない。打ち切らなかった木では、`limit` 行の後に畳まれた要素も数える」。plan の全体の約束の「最初に捨てた行より後は数えない」と字面が食い違うが、spec と plan のステップ 1 のテストの「捨てた側の畳まれる要素は folded に数えない」に合わせた)。名前は空のときだけ省く (空白だけの名前は引用して出す。空白だけで畳むのは入れ物の判定だけ)。テスト用の `TreeSource` は src/testing.rs の `VecTreeSource` (前順の `(深さ, 要素)` の配列で要素は添字。子は「すぐ次の添字が 1 深い」、兄弟は「後ろで最初に深さが同じか浅い添字が同じ深さ」。失敗を差し込む `unreadable` / `child_fail` / `sibling_fail` と、`describe` を呼んだ回数 `describes`)
 - 追記 (2026-10-27、plan ステップ 2): windows 0.62.2 の生成コードの `IUIAutomationTreeWalker::GetFirstChildElement` / `GetNextSiblingElement` は `Result<IUIAutomationElement>` を返し、`.and_then(|| Type::from_abi(result__))` で、S_OK と null を windows-core 0.62.2 の `from_abi` (type.rs) が `Error::empty()` にする。`Error::empty().code()` は windows-result 0.4.1 で `HRESULT(0)` (S_OK) を返す (error.rs の `code`)。Microsoft Learn の GetNextSiblingElement は「Receives a pointer to the next sibling element, or NULL if there is no sibling element」と書く (Win32 の GetFirstChildElement の頁は null に触れていないので、子の null の出典は .NET の TreeWalker.GetFirstChild の「null reference if there is no such element」と、子の無いフィクスチャの根のテスト `fixture_real_uia_tree_lists_fixture_root_with_center` の `skipped` 0。win32-reviewer の N-1)。だから `walker_step` は「Ok は `Next`、`code()` が `S_OK` の Err は `End`、それ以外は `Failed`」にした (spec のとおり)。`win32::uia::tree` は `elements` と同じく専用のスレッド (`ai-cu-uia-tree`) + `ComApartment::init_mta` で、`CoCreateInstance` と `ElementFromHandle` は `elements` と共通の `automation_and_root` に出した。木の読み方は `UiaTreeSource { walker: IUIAutomationTreeWalker }` (`Node` は `IUIAutomationElement`。`describe` は既存の `describe`)。source は `_apartment` より後の名前つきの局所に置き、walker の Release を `CoUninitialize` より先にする (edition 2024 の末尾の式の一時値の drop の順に頼らない)。モックの `ui_tree` は `World::tree` をその hwnd で絞って `VecTreeSource` に入れ、`tree_unreadable` を `unreadable` に写し、添字 0 を根に `walk_tree` を呼ぶ。`ui_tree_fail` は木の有無より先に見る。呼んだ回数は失敗も数える (`ui_elements` と同じ)
 - 追記 (2026-10-27、plan ステップ 2 の win32-reviewer の S-1): `win32::uia::tree` は、たどる前に根 (`ElementFromHandle` の要素) の `CurrentIsControlElement` を読み、偽か読めなければ Err (`BackendError::Os`。「根の要素がコントロールビューに無い」) にして `walk_tree` を呼ばない。根がコントロールビューに無いと、ControlViewWalker では根の子がビューの上で根の祖先の子に当たり、深さ 1 の兄弟の経路で根の外 (許可を通していない別の窓) に出るおそれがある (未検証。フィクスチャの根は window か pane でビューに属する)。win32-reviewer の結果は must-fix 0、S-1 (この追記) と N-1 (SAFETY の出典) を取り込み、N-2 (応答しないアプリでの時間の上限) は spec のやらないこと (TransactionTimeout の短縮) のとおり直さない
@@ -1930,7 +1930,7 @@
   - 実機の手動確認 (CHECKLIST) は足さない。detail はモックの全経路のテストで撃ち、実の一覧で点の窓を引ける前提は `#[ignore]` のフィクスチャのテスト `fixture_real_at_point_root_is_listed_in_stack_windows` で確かめる。判定と入力は変えない
 - 根拠: B は原因が未確認のまま隠れの判定を緩め、写り込みの守り (D-053) を根拠なく弱める。C は守りの迂回になる。A は判定を変えずに、AI が結果だけで覆う窓と次の手を読める。失敗の経路の読みは D-065 の覆る条件「読んでいない値が要る失敗の事例が出たとき」に当たる
 - 覆る条件: 別の名前のキーが要る読み手の事例 (キー名を見直す)。列挙が重くて 7 の応答が遅れた事例 (読みをやめるか軽くする)。detail の値で、害のない窓が 7 を起こしていると確かめられたとき (判定を見直す)。`region` にも隠れの確認が入り、守りの迂回にならなくなったとき (hint で勧めてよい)。許可の外の窓の class や hwnd を出すことが問題になった事例、または最小化の許可の外の窓の情報が要る事例。実の窓で detail が欠ける事例 (手動確認を足す)。IME が原因と測って確かめたとき (hint に書く)
-- 状態: 採用 (2026-11-10)
+- 状態: 採用 (2026-11-10。名指しは D-139 で許可を通る窓 (`windows` に出る窓) だけから探す。起動した側の窓を撮ろうとした 7 とその `error.detail.window` は無くなった (見つからない 12))
 
 ### D-136 MCP の失敗の結果に撮った mcp:inline の画像があれば、捨てるクライアントがあることを hint の末尾に足す (結果の形は変えない)
 - 日付: 2026-11-10
@@ -1996,3 +1996,25 @@
 - 状態: 採用
 - 追記 (2026-11-14、実装で決めた細部): (1) 判定は `focus_helper` の純関数 `judge_target` (順を 1 か所に書く) と `gate_from_parts` (層が Err なら断る) にし、実の装置から材料を集める `real_gate` と分けた。`child_main` は判定の結果 `Gate` (Pass / Denied / UserActive / Forbidden) だけを受け取る。(2) 停止の目印は、目印のパスを自分で並べ直さず、親と同じ `runner::stop_set(policy, 環境).poll()` で見る。(3) 断る文は判定ごとの定数 (`DENY_*`) で、標準エラーの形は `ai-cu __focus-helper: 前面にしない: <固定の文>` (人が操作中は「人が操作中」)。開発シェルの拒否 (3) は今までどおり何も書かない。(4) 共有の `judge_window` と `focus_idle_check` には面 `Surface::Cli` と `Hint::FocusDenied` を渡すが、子はその `AppError` の message と hint を使わず、誤りの kind (`UserActive` か否か) だけを見る (△。message が窓を特定するため)。(5) 親の `outcome_of_exit` は 4 を「補助プロセスが設定か窓の判定で前面化を断った」、5 を「補助プロセスが人の操作中なので前面化を断った」の `Failed` にする
 - 追記 (2026-11-14、win32 のレビュー): (1) 最小化の確認を、窓の判定 (`judge_window`) の後へ移した (判定の一覧の 5 と 7 の間の順を変える。親の `focus` と同じ順)。先に見ると、deny の窓の hwnd を渡したときに「最小化されている」と「窓の判定が許さない」の文の違いから、`windows` が伏せる deny の窓が最小化かどうかが読める。テスト `judge_target_checks_window_before_minimized` で押さえた。(2) 子は DPI を宣言しないまま窓の矩形を読むが、判定は矩形を使わない (将来、矩形を判定に使うなら先に DPI をそろえる)。(3) 子の `self_hwnd` は None で、直接起動した端末は起動した側の連鎖 (コンソールのホストを含む) で除く。(4) 子は前面化の前に層・目印・窓の一覧・連鎖・入力デスクトップを読むので、親の 3 秒の待ちに近づきうる (測っていない)。超えたら親が kill して断られた扱い (安全側) になる
+
+### D-139 窓の名指し (find、tree、text、shot の window、focus、close、wait_for、画面の待ち) を、許可を通る窓 (`windows` に出る窓) だけから探す
+- 日付: 2026-11-14
+- 場面: 監査で、窓の名指しがすべてのトップレベルの窓から探し (`device::match_window`。題名は大小を無視した部分一致)、見つけた後に許可を判定していると分かった。無い (12)・最小化 (12)・許可の外 (4)・起動した側 (7) の違いから、`windows` が伏せている deny や許可の外の窓、ai-cu を起動した側の窓 (D-055) の題名を 1 文字ずつ当てられる。MCP だけで届く。目標は、名指しの結果 (成否、終了コード、message、detail) が `windows` に出ない窓の有無と題名に依らないこと
+- 選択肢: A `find_window` に候補を絞る述語を渡し、許可を通る窓だけから探す / B 今までどおり探した後、許可の外なら 12 と同じ文で返す / C 題名の部分一致をやめて完全一致にする
+- 判断: A (◎)
+- 根拠: B は、同じ実行ファイル名で前面に近い許可の外の窓が、後ろの許可された窓を隠す (12 になる)。C は当てる手間が増えるだけで漏れは残り、使い勝手を落とす。A は「名指しで見つかる窓 ⊆ `windows` が一覧に出す窓 (撮影の許可があるとき)」が不変条件になり (撮影の許可の軸は下の限界)、漏れの比べ先が `windows` の 1 つで済む
+- 覆る条件: 起動した側の窓を名指ししたときの 7 の文が無いと AI が迷うと分かったとき (12 の hint で足りなければ戻す)。許可の外の窓を `wait_for` で待つ必要が出たとき。message だけでは AI が次の手を選べないと分かったとき (そのときは D-134 を覆すかを利用者に聞く)
+- 利用者が決めたこと: (1) 探す相手を許可を通る窓に先に絞り、許可の外は 12 (見つからない) と同じ message にする (2) 名前だけの判定 (`check_process`) は探す前に掛け、許可の外の名前は窓が無くても 4 と `error.fix` を返す (`find` / `tree` / `text` / 単独の `shot --window` も、操作列の検証と同じ形にそろえる) (3) hint は変えない (D-056 の固定と D-134 の決定を覆さない)。名指しの範囲は message の末尾の 1 文で伝える
+- 細部 (実装で決めたこと):
+  - 「許可を通る窓」は `windows` の一覧に出る窓と同じ述語 `run::named_window_admitted` (設定の `check_window` (プロセス、クラス) を通り、`host_pids` に無い)。実行器ではさらに TUI の端末 (`self_hwnd`。D-045) を除く。`cli::window_allowed` (一覧の述語) はこれを `self_hwnd` なしで呼ぶ
+  - 起動した側 (D-055) と TUI の端末 (D-045) の窓も 12 にそろえる (今までは 7)。起動した側の端末は他のプロジェクトの窓も持ち、その題名は `windows` に出ないので、7 を残すと同じ当て方が通る
+  - 名前だけの判定は、操作列の操作 (focus、close、screenshot の window、wait_stable / wait_change の window、wait_for) では検証 (validate) が既に掛けている。`find` / `tree` / `text` と単独の `shot --window` (CLI と MCP) は検証を通らないので、1 つの関数 `run::check_named_process` で足す。名前だけの判定は窓の有無に依らないので何も漏らさない
+  - 12 (と focus の 11 `not_found`、`wait_for` の 15 の `unmet` が `window` のとき) の message の末尾に足す文は `run::NAMED_WINDOW_SCOPE_NOTE` の 1 つ (「許可の外と ai-cu を起動した側の窓は探さない (windows に出る窓だけを名指しできる)」)。無いときと許可の外のときで同じ文にする (違えば当てられる)
+  - 撮影の名指し (`resolve_capture_window_parts`) にも `self_hwnd` を渡す (CLI の shot は None、実行器の撮影は TUI の端末)。TUI からの操作列が自分の端末を名指しで撮れる穴を残さない
+  - 探した後の `check_window`・`check_ui_window`・実行器の窓の判定 (権限、自分の端末) は守りの重ねとして残す。述語を通った窓は設定の判定を必ず通るので届かないが、外す理由も無い。権限 (管理者) の 4 / 7 は残る (管理者の窓は `windows` に出るので漏れない)
+  - `Desktop::find_window` と `device::match_window` に述語 `admit: &dyn Fn(&WindowInfo) -> bool` を足す。探してから捨てるのではなく、述語を通る窓の中で前面から最初の一致を返す (B の隠れを起こさない)。道具の名前と trait の形は内部のもの
+  - 手引き (src/guide.md) の要点版は増やさない (上限は上げない。D-134)。範囲の 1 文は全文だけの節に置き、要点版で事実と食い違う文だけを同じ節の中でバイト数を増やさずに言い換える
+- 変わる表面: 終了コードは、クラスで断られる窓、起動した側の窓、TUI の端末を名指しすると 4 / 7 だったのが 12 (focus は 11 の `not_found`、TUI からの撮影は今まで撮れていたのが 12)。`wait_for` (`absent` が false) では同じ窓が待たずの 4 / 7 から時間切れの 15 に変わる。`find` / `tree` / `text` / 単独の `shot --window` で許可の外のプロセスを名指しすると、窓が無くても 4 (今までは窓が無ければ 12)。12 / 11 / 15 の message の末尾 (hint は変えない)
+- 限界: `wait_for` は許可の外と起動した側の窓を「無い」と数えるので、`absent: true` は最初の確認で満たされうる。`absent: false` は時間切れまで待って 15 になる (許可の外の窓の有無を答えると、それ自体が漏れになる)。述語は窓の判定 (設定のプロセスとクラス、起動した側) だけで、撮影の許可 (`capture_enabled`) は見ない。だから撮影を切って入力だけを許した設定では、`windows` は一覧を出さない (4) のに、`focus` と `close` は許可された窓を名前で見つけ、結果 (`focused`、`closed`) にその題名を返す (D-139 より前からの形。題名を返すのは部分一致の取り違えに気づくため。D-050)。入力の結果の題名に撮影の許可を求めるかは別に決める
+- 目標外: 名前だけの判定の 4 を 12 に寄せない。`windows` 自身の出力、撮影の機密の窓の判定 (D-077)、撮影の隠れの 7 (D-135)、入力のガードの 7 (座標の下の窓) は変えない
+- 状態: 採用

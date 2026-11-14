@@ -331,6 +331,7 @@ impl Desktop for Win32Desktop {
         &self,
         process: &str,
         title: Option<&str>,
+        admit: &dyn Fn(&WindowInfo) -> bool,
     ) -> Result<Option<TopWindow>, BackendError> {
         focus_allowed(self.fixture_hwnd, &ProcessEnv)?;
         // フィクスチャ専用では候補をフィクスチャだけにする (ツールウィンドウなので一覧には出ない)
@@ -338,7 +339,12 @@ impl Desktop for Win32Desktop {
             Some(h) => win32::window::describe(h).into_iter().collect(),
             None => win32::window::top_level_windows_detailed(),
         };
-        Ok(crate::device::match_window(&candidates, process, title))
+        Ok(crate::device::match_window(
+            &candidates,
+            process,
+            title,
+            admit,
+        ))
     }
 
     fn set_foreground(&self, hwnd: usize) -> Result<bool, BackendError> {

@@ -4441,6 +4441,37 @@ mod tests {
         assert_eq!(r["result"]["isError"], false, "矩形の外: {r}");
     }
 
+    /// shot の道具の window (D-139): deny のクラスの窓の名指しは、その窓が無いときと同じ 12 で撮らない
+    #[test]
+    fn mcp_shot_window_class_denied_is_not_found() {
+        let dir = unique_temp_dir("mcp-shot-named-class");
+        let floor = floor_file(&dir, &format!("{ENABLED}[deny]\nclasses = [\"Secret\"]\n"));
+        let mut f = Fixture::new(MapEnv::default());
+        let world = f.world.clone();
+        let mut info = window("Notepad.exe", "Secret");
+        info.hwnd = 0x40;
+        info.title = "secret".into();
+        world.borrow_mut().default_window = Some(info.clone());
+        world.borrow_mut().top = vec![crate::device::TopWindow {
+            info,
+            rect: Some(Rect::new(100, 100, 800, 600)),
+            minimized: false,
+        }];
+        let mut s = f.server(paths(&floor));
+        let args = json!({ "window": "notepad.exe", "window_title": "secret" });
+        let r = reply(&mut s, &call(1, "shot", args.clone()));
+        assert_eq!(exit_code(&r), 12, "{r}");
+        world.borrow_mut().top.clear();
+        let absent = reply(&mut s, &call(2, "shot", args));
+        assert_eq!(text_json(&r), text_json(&absent), "無いときと同じ");
+        let m = text_json(&r)["error"]["message"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(m.ends_with(crate::run::NAMED_WINDOW_SCOPE_NOTE), "{m}");
+        assert_eq!(world.borrow().capture_calls, 0);
+    }
+
     /// run の道具の screenshot (D-077): 同じく 7 で MCP の文
     #[test]
     fn mcp_run_screenshot_refuses_visible_denied_window_with_mcp_hint() {
