@@ -1035,6 +1035,19 @@ pub struct App {
 /// RGB の配色を選んだのに VT が使えず、ansi で描いているときの知らせ (D-129)
 const FELL_BACK_MSG: &str = "VT が使えないので ansi の配色で表示している";
 
+/// 雛形 (`config::TEMPLATE`。D-117 の deny.processes つき) の値。
+/// 読めることは `config_template_parses_to_default` が保証するが、万一のときも TUI を落とさず既定に落とす
+fn template_config() -> Config {
+    Config::parse(config::TEMPLATE).unwrap_or_default()
+}
+
+/// 新規と読めない設定の置き換えで、編集の値を雛形にする (D-117)。基準 (`saved`) は既定のまま。
+/// 取り消しの積みに既定を入れるので、`u` で既定 (ディスクで効いている値) に戻れる
+fn open_with_template(app: &mut App) {
+    app.undo.push(app.config.clone());
+    app.config = template_config();
+}
+
 impl App {
     pub fn new(target: Target, config: Config) -> App {
         App {
@@ -1062,14 +1075,16 @@ impl App {
         theme::resolve(self.config.tui.theme, self.env)
     }
 
-    /// ファイルから読む。無ければ既定値。読めなければ既定値で開き、復旧の導線を状態行に出す (D-018)。
+    /// ファイルから読む。無ければ・読めなければ雛形 (D-117) の値で開く。
+    /// 基準 (saved) は既定 (ディスクで効いている値。D-018 の閉じる側)。読めなければ復旧の導線を状態行に出す。
     pub fn load(target: Target) -> App {
         let path = target.path.clone();
         if !path.exists() {
             let mut app = App::new(target, Config::default());
+            open_with_template(&mut app);
             app.set_status(
                 StatusKind::Info,
-                "新しい設定ファイル (まだ無い)。s で作成する",
+                "新しい設定ファイル (まだ無い)。雛形の値で表示中。s で作成する",
             );
             return app;
         }
@@ -1077,10 +1092,11 @@ impl App {
             Ok(cfg) => App::new(target, cfg),
             Err(e) => {
                 let mut app = App::new(target, Config::default());
+                open_with_template(&mut app);
                 app.replace_broken = true;
                 app.set_status(
                     StatusKind::Warn,
-                    format!("読めない: {} / 既定値で表示中。s で保存すると置き換え、元は .broken-<時刻>.bak に残る", e.message),
+                    format!("読めない: {} / 雛形の値で表示中。s で保存すると置き換え、元は .broken-<時刻>.bak に残る", e.message),
                 );
                 app
             }
@@ -6106,7 +6122,14 @@ mod tests {
         assert_eq!(a.update(&press(KeyCode::Char('s'))), Effect::Save);
         config::save_with(&a.target.path, &a.config, a.replace_broken).unwrap();
         a.on_saved(Ok(()));
-        assert_eq!(Config::load(&f).unwrap(), Config::default());
+        // 置き換えた設定は雛形 (D-117) の値で、雛形の deny.processes が残る
+        let loaded = Config::load(&f).unwrap();
+        assert_eq!(loaded, Config::parse(config::TEMPLATE).unwrap());
+        assert!(
+            loaded.deny.processes.iter().any(|p| p == "cmd.exe"),
+            "{:?}",
+            loaded.deny.processes
+        );
         let broken: Vec<_> = std::fs::read_dir(&dir)
             .unwrap()
             .filter_map(|e| e.ok())
@@ -6120,6 +6143,78 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(broken[0].path()).unwrap(),
             "version = 1\n[general\n"
+        );
+    }
+
+    /// 一時ディレクトリの中の、まだ無い設定ファイル
+    fn missing_target(tag: &str) -> Target {
+        let dir = crate::testing::unique_temp_dir(tag);
+        Target {
+            path: dir.join("config.toml"),
+            overlay: false,
+        }
+    }
+
+    /// 新規は雛形 (D-117) の値で開き、基準は既定のまま。開いた時点で未保存で、s で雛形の値のファイルを作る
+    #[test]
+    fn tui_load_missing_file_opens_template_and_creates_it() {
+        let t = missing_target("tui-new");
+        let f = t.path.clone();
+        assert!(!f.exists());
+        let mut a = App::load(t);
+        assert!(a.status.contains("s で作成する"), "{}", a.status);
+        assert_eq!(a.config, template_config());
+        assert!(!a.config.deny.processes.is_empty());
+        assert_eq!(a.saved, Config::default());
+        assert!(a.dirty());
+        assert!(widening_changes(&a.saved, &a.config).is_empty());
+        assert_eq!(a.update(&press(KeyCode::Char('s'))), Effect::Save);
+        config::save_with(&a.target.path, &a.config, a.replace_broken).unwrap();
+        a.on_saved(Ok(()));
+        assert_eq!(Config::load(&f).unwrap(), template_config());
+        assert!(!a.dirty());
+    }
+
+    /// 新規ですぐ終了すると確認が出る (雛形の deny を黙って捨てない)。u で既定に戻ると未保存が消える
+    #[test]
+    fn tui_new_file_quit_asks_and_undo_returns_to_default() {
+        let mut a = App::load(missing_target("tui-new-quit"));
+        assert_eq!(a.update(&press(KeyCode::Char('q'))), Effect::None);
+        assert_eq!(a.overlay, Overlay::QuitDialog);
+        a.update(&press(KeyCode::Esc));
+        assert_eq!(a.overlay, Overlay::None);
+        a.update(&press(KeyCode::Char('u')));
+        assert_eq!(a.config, Config::default());
+        assert!(!a.dirty());
+    }
+
+    /// 新規は開いた時点で右のペインに雛形の deny.processes が見え、題名の行に未保存が出る。
+    /// 題名の行は折り返さないので、target/ の下の短い相対パスで開く (D-010。保存しないので何も作らない)
+    #[test]
+    fn tui_new_file_draws_template_deny_and_unsaved() {
+        let path = PathBuf::from("target/test-tmp/no-such/config.toml");
+        assert!(!path.exists());
+        let mut a = App::load(Target {
+            path,
+            overlay: false,
+        });
+        select(&mut a, Field::List(Side::Deny, ListKind::Processes));
+        let text = draw(&a, 120, 32);
+        assert!(has(&text, "cmd.exe"), "{text}");
+        assert!(has(&text, "未保存"), "{text}");
+    }
+
+    /// 最初の保存の前に雛形の deny を消しても、許可を広げる確認には出さない (基準の既定より deny は減らない)
+    #[test]
+    fn tui_new_file_removing_template_deny_saves_without_widening_confirm() {
+        let mut a = App::load(missing_target("tui-new-remove"));
+        a.config.deny.processes.retain(|p| p != "cmd.exe");
+        assert!(!a.config.deny.processes.iter().any(|p| p == "cmd.exe"));
+        assert_eq!(a.update(&press(KeyCode::Char('s'))), Effect::Save);
+        assert!(
+            !matches!(a.overlay, Overlay::Confirm { .. }),
+            "{:?}",
+            a.overlay
         );
     }
 
