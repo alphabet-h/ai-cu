@@ -525,6 +525,7 @@ impl Desktop for MockDesktop {
         &self,
         process: &str,
         title: Option<&str>,
+        admit: &dyn Fn(&WindowInfo) -> bool,
     ) -> Result<Option<TopWindow>, BackendError> {
         let mut w = self.0.borrow_mut();
         let n = w.find_window_calls;
@@ -536,7 +537,7 @@ impl Desktop for MockDesktop {
         {
             w.top = list;
         }
-        Ok(crate::device::match_window(&w.top, process, title))
+        Ok(crate::device::match_window(&w.top, process, title, admit))
     }
 
     fn set_foreground(&self, hwnd: usize) -> Result<bool, BackendError> {

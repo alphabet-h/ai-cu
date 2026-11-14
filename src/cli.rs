@@ -1391,9 +1391,10 @@ pub fn find_points(
 }
 
 /// ウィンドウを AI に見せてよいか: 設定のウィンドウの許可 (`check_window`) を通り、ai-cu を起動した側 (D-055) でない。
-/// `windows` の一覧と前面、MCP の `status` の前面 (D-073) が共有する
+/// `windows` の一覧と前面、MCP の `status` の前面 (D-073) が共有する。名指しの候補の述語
+/// (`run::named_window_admitted`。D-139) と同じものを `self_hwnd` なしで呼ぶ (一覧と名指しの述語を 1 か所に)
 pub(crate) fn window_allowed(policy: &Policy, info: &WindowInfo, host_pids: &[u32]) -> bool {
-    policy.check_window(info).is_ok() && !host_pids.contains(&info.pid)
+    crate::run::named_window_admitted(policy, info, host_pids, None)
 }
 
 /// `ai-cu windows`: 許可されたアプリのウィンドウの一覧。題名には画面上の情報が含まれうるので、撮影と同じ許可を求める。
@@ -1700,7 +1701,7 @@ fn resolve_ui_window(
         None => format!("process={:?}", target.process),
     };
     let w = desktop
-        .find_window(&target.process, target.title.as_deref())
+        .find_window(&target.process, target.title.as_deref(), &|_| true)
         .map_err(backend_error)?
         .ok_or_else(|| {
             AppError::new(

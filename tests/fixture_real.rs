@@ -3042,7 +3042,7 @@ fn fixture_real_wait_for_sees_fixture_window_and_element_and_times_out_on_absenc
     let desktop = Win32Desktop::for_fixture(f.scope());
     let started = Instant::now();
     let w = desktop
-        .find_window(&exe_name, Some(title))
+        .find_window(&exe_name, Some(title), &|_| true)
         .expect("find_window")
         .expect("フィクスチャ");
     let q = ElementQuery {

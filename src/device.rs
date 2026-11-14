@@ -309,11 +309,13 @@ pub trait Desktop {
     /// 押されたままの修飾キーとマウスボタン (D-066)。読むだけで、離すことはしない
     fn keys_held(&self) -> Result<HeldInputs, BackendError>;
     /// 実行ファイル名 (正規化して比べる) と、あれば題名の一部で、見えているトップレベルのウィンドウを
-    /// 前面から探す (D-050)。最初に一致したもの。読み取りだけ
+    /// 前面から探す (D-050)。最初に一致したもの。読み取りだけ。
+    /// `admit` を通らない窓は無いものとして扱う (探してから捨てるのではなく、通る窓の中で最初の一致。D-139)
     fn find_window(
         &self,
         process: &str,
         title: Option<&str>,
+        admit: &dyn Fn(&WindowInfo) -> bool,
     ) -> Result<Option<TopWindow>, BackendError>;
     /// `SetForegroundWindow` を 1 回呼ぶ (D-050)。戻り値は OS が受け付けたかで、前面になったかは
     /// `foreground_window` で別に確かめる。復元や回避策はしない
@@ -356,12 +358,19 @@ pub trait Desktop {
 
 /// `find_window` の一致の規則 (純関数。実装置もモックもこれを使う)。
 /// 実行ファイル名は `allow.processes` と同じ正規化で比べ、`title` は大文字小文字を無視した部分一致。
-pub fn match_window(top: &[TopWindow], process: &str, title: Option<&str>) -> Option<TopWindow> {
+/// `admit` を通る窓の中で、Z 順で最初に一致したもの (通らない窓は無いものと同じ。D-139)
+pub fn match_window(
+    top: &[TopWindow],
+    process: &str,
+    title: Option<&str>,
+    admit: &dyn Fn(&WindowInfo) -> bool,
+) -> Option<TopWindow> {
     let want = crate::config::normalize_process(process);
     let want_title = title.map(str::to_lowercase);
     top.iter()
         .find(|w| {
-            crate::config::normalize_process(&w.info.process) == want
+            admit(&w.info)
+                && crate::config::normalize_process(&w.info.process) == want
                 && want_title
                     .as_deref()
                     .is_none_or(|t| w.info.title.to_lowercase().contains(t))
@@ -554,7 +563,8 @@ mod tests {
             top(0x2, "Notepad.exe", "a.txt - メモ帳"),
             top(0x3, "notepad.exe", "B.TXT - メモ帳"),
         ];
-        let hit = |p: &str, t: Option<&str>| match_window(&list, p, t).map(|w| w.info.hwnd);
+        let hit =
+            |p: &str, t: Option<&str>| match_window(&list, p, t, &|_| true).map(|w| w.info.hwnd);
         assert_eq!(hit("notepad", None), Some(0x2), "前面に近いもの");
         assert_eq!(hit("NOTEPAD.EXE", None), Some(0x2));
         assert_eq!(hit("C:\\Windows\\notepad.exe", None), Some(0x2));
@@ -566,6 +576,22 @@ mod tests {
         assert_eq!(hit("notepad.exe", Some("c.txt")), None);
         assert_eq!(hit("chrome", Some("google")), Some(0x1));
         assert_eq!(hit("explorer.exe", None), None);
+    }
+
+    /// 名指しの範囲 (D-139): 述語を通らない窓は無いものとして扱い、通る窓の中で前面から最初の一致を返す。
+    /// 前面に近い通らない窓が、後ろの通る窓を隠さない
+    #[test]
+    fn match_window_skips_windows_not_admitted() {
+        let list = vec![
+            top(0xA, "notepad.exe", "secret"),
+            top(0xB, "notepad.exe", "secret 2"),
+        ];
+        let hit = |admit: &dyn Fn(&WindowInfo) -> bool| {
+            match_window(&list, "notepad.exe", Some("secret"), admit).map(|w| w.info.hwnd)
+        };
+        assert_eq!(hit(&|w| w.hwnd != 0xA), Some(0xB), "A を通さなければ B");
+        assert_eq!(hit(&|_| false), None, "どれも通さなければ無い");
+        assert_eq!(hit(&|_| true), Some(0xA), "どれも通せば前面に近い A");
     }
 
     /// 振り分けの材料を組む (テスト用)

@@ -211,6 +211,32 @@ fn absent_note(unmet: &str) -> &'static str {
     }
 }
 
+/// 名指しで見つからないときの message の末尾に足す文 (D-139)。hint は変えず (D-056、D-134)、名指しの範囲は
+/// この 1 文で伝える
+pub const NAMED_WINDOW_SCOPE_NOTE: &str =
+    "許可の外と ai-cu を起動した側の窓は探さない (windows に出る窓だけを名指しできる)";
+
+/// 名指し (`find_window`) の候補に入れてよい窓か (D-139)。`windows` の一覧に出る窓と同じ (設定の `check_window`
+/// (プロセス、クラス) を通り、ai-cu を起動した側 (`host_pids`。D-055) でない) で、実行器ではさらに TUI の端末
+/// (`self_hwnd`。D-045) を除く。通らない窓は無いものとして扱うので、名指しの結果が `windows` に出ない窓の有無と
+/// 題名に依らない。`cli::window_allowed` はこれを `self_hwnd` なしで呼ぶ (一覧と名指しの述語を 1 か所に)
+pub fn named_window_admitted(
+    policy: &Policy,
+    w: &WindowInfo,
+    host_pids: &[u32],
+    self_hwnd: Option<usize>,
+) -> bool {
+    policy.check_window(w).is_ok() && !host_pids.contains(&w.pid) && self_hwnd != Some(w.hwnd)
+}
+
+/// 名指しの前の、名前だけの判定 (D-139)。窓の有無に依らないので何も漏らさない。許可の外の名前は 4 で、
+/// 設定のキー (`rule`) と直し方 (`fix`) が付く (操作列の検証 (validate) の `check_process` と同じ扱い)
+pub fn check_named_process(policy: &Policy, process: &str) -> Result<(), AppError> {
+    policy
+        .check_process(process)
+        .map_err(|d| d.into_error(ErrorKind::PolicyDenied))
+}
+
 /// `find` / `text` と `wait_for` で共有する、読み取りの対象のウィンドウの判定 (D-054、D-068)。
 /// 自分の端末 (`self_hwnd`。TUI からの実行) と ai-cu を起動した側 (`host_pids`) のウィンドウは、設定にかかわらず
 /// 読まない (7)。設定 (プロセス、クラス) に通らなければ 4。撮影の `resolve_capture_window` は撮らない旨の文なので別
@@ -344,7 +370,7 @@ fn resolve_capture_window_parts(
 ) -> Result<Resolved, AppError> {
     let shown = capture_target_shown(target);
     let w = desktop
-        .find_window(&target.process, target.title.as_deref())
+        .find_window(&target.process, target.title.as_deref(), &|_| true)
         .map_err(backend_error)?
         .ok_or_else(|| {
             AppError::new(
@@ -1765,7 +1791,7 @@ impl Executor<'_> {
     ) -> Result<(), AppError> {
         let Some(w) = self
             .desktop
-            .find_window(process, title)
+            .find_window(process, title, &|_| true)
             .map_err(backend_error)?
         else {
             return Err(AppError::new(
@@ -1810,7 +1836,7 @@ impl Executor<'_> {
         // 失敗の理由を分ける: 対象が閉じられた (同じウィンドウを取り直せない) / 断られた (前面で 3 つに分ける)。
         // 補助プロセスを使ったときは、その後にもう一度確かめる (補助の間に閉じられることがある)
         let still_there = |d: &dyn Desktop| -> Result<bool, AppError> {
-            Ok(d.find_window(process, title)
+            Ok(d.find_window(process, title, &|_| true)
                 .map_err(backend_error)?
                 .is_some_and(|again| {
                     again.info.hwnd == w.info.hwnd && again.info.pid == w.info.pid
@@ -1933,7 +1959,7 @@ impl Executor<'_> {
         };
         let Some(w) = self
             .desktop
-            .find_window(process, Some(title))
+            .find_window(process, Some(title), &|_| true)
             .map_err(backend_error)?
         else {
             return Err(not_found(format!(
@@ -2109,7 +2135,7 @@ impl Executor<'_> {
             element: None,
         };
         let find = |d: &dyn Desktop| -> Result<Option<TopWindow>, AppError> {
-            Ok(d.find_window(spec.process, spec.title)
+            Ok(d.find_window(spec.process, spec.title, &|_| true)
                 .map_err(backend_error)?
                 .filter(|w| !w.minimized))
         };
@@ -5370,6 +5396,61 @@ mod tests {
         assert_eq!(v["error"]["rule"], "deny.processes", "{v}");
         assert!(v["error"].get("fix").is_none(), "{v}");
         assert_eq!(e.fix(), None);
+    }
+
+    /// 名指しの候補の述語 (D-139) は `windows` の一覧と同じ: 許可された窓は通り、deny のクラス、起動した側
+    /// (host_pids)、TUI の端末 (self_hwnd) は通らない
+    #[test]
+    fn named_window_admitted_matches_windows_listing() {
+        let p = policy(&format!(
+            "{ENABLED}[allow]\nprocesses=[\"notepad.exe\"]\n[deny]\nclasses=[\"DeniedClass\"]\n"
+        ));
+        let ok = top(0x20, "notepad.exe", "a").info;
+        assert!(named_window_admitted(&p, &ok, &[], None), "許可");
+        let mut denied_class = ok.clone();
+        denied_class.class = "DeniedClass".into();
+        assert!(
+            !named_window_admitted(&p, &denied_class, &[], None),
+            "deny のクラス"
+        );
+        assert!(
+            !named_window_admitted(&p, &ok, &[ok.pid], None),
+            "起動した側"
+        );
+        assert!(
+            !named_window_admitted(&p, &ok, &[], Some(ok.hwnd)),
+            "TUI の端末"
+        );
+        assert!(
+            named_window_admitted(&p, &ok, &[ok.pid + 1], Some(ok.hwnd + 1)),
+            "別の pid と別の窓なら通る"
+        );
+        // 一覧の述語 (`cli::window_allowed`) と同じ答え
+        for w in [&ok, &denied_class] {
+            for host in [&[][..], &[ok.pid][..]] {
+                assert_eq!(
+                    crate::cli::window_allowed(&p, w, host),
+                    named_window_admitted(&p, w, host, None)
+                );
+            }
+        }
+    }
+
+    /// 名指しの前の名前だけの判定 (D-139): allow.processes の外の名前は 4 で、rule と fix が付く
+    #[test]
+    fn check_named_process_denies_by_name_with_fix() {
+        let p = policy(&format!("{ENABLED}[allow]\nprocesses=[\"calc.exe\"]\n"));
+        assert!(check_named_process(&p, "calc.exe").is_ok());
+        let e = check_named_process(&p, "notepad.exe").unwrap_err();
+        assert_eq!(e.kind, ErrorKind::PolicyDenied, "{e}");
+        assert_eq!(e.kind.exit_code(), 4);
+        let v = e.to_json();
+        assert_eq!(v["error"]["rule"], "allow.processes", "{v}");
+        let fix = e.fix().expect("fix");
+        assert!(
+            fix.contains("allow.processes に \"notepad.exe\" を足す"),
+            "{fix}"
+        );
     }
 
     /// 検証の失敗のエラーは、最初の問題 (添字と同じもの) の rule と fix を写す (D-079)
