@@ -1593,6 +1593,10 @@ pub(crate) fn shot(
             None => e,
         }
     })?;
+    // 名前だけの判定は装置に触れる前、探す前 (D-139。操作列の検証と同じ順)
+    if let Some(t) = &window {
+        crate::run::check_named_process(policy, &t.process)?;
+    }
     let desktop = ctx.devices.desktop();
     let screen = desktop.virtual_screen().map_err(backend_error)?;
     // ロック中とセーバー中は人の画面ではないものを撮るので、ウィンドウの解決や矩形の検査より先に 14 で断る (D-066)
@@ -1603,9 +1607,7 @@ pub(crate) fn shot(
     let (rect, shot_window) = match &window {
         // 対象をウィンドウで指定 (D-053): 探し方と判定は操作列の screenshot と同じ
         Some(t) => {
-            // 名前だけの判定は探す前 (D-139。操作列の検証と同じ形)。CLI と MCP の shot は TUI から呼ばれないので
-            // 自分の端末 (self_hwnd) は無い
-            crate::run::check_named_process(policy, &t.process)?;
+            // 名前だけの判定は上で済んでいる。CLI と MCP の shot は TUI から呼ばれないので自分の端末 (self_hwnd) は無い
             let (r, w) = resolve_capture_window(
                 desktop.as_ref(),
                 policy,
@@ -5238,7 +5240,7 @@ mod tests {
         assert_eq!(denied.borrow().ui_tree_calls, 0);
     }
 
-    /// Review Focus 1: 同じ実行ファイル名で、前面に近い窓がクラスで断られ、後ろの窓が許可されるなら、後ろが見つかる
+    /// D-139: 同じ実行ファイル名で、前面に近い窓がクラスで断られ、後ろの窓が許可されるなら、後ろが見つかる
     #[test]
     fn find_skips_denied_front_window_and_finds_allowed_behind() {
         let env = secret_class_env("cli-named-front");
@@ -5264,7 +5266,7 @@ mod tests {
         assert_eq!(value["window"]["hwnd"], 0x41, "{value}");
     }
 
-    /// Review Focus 5: 起動した側の窓と同じ実行ファイル名で pid の違う許可された窓が後ろにあれば、後ろが見つかる
+    /// D-139: 起動した側の窓と同じ実行ファイル名で pid の違う許可された窓が後ろにあれば、後ろが見つかる
     #[test]
     fn find_skips_host_window_and_finds_same_exe_allowed_behind() {
         let dir = unique_temp_dir("cli-named-host-behind");
@@ -5286,7 +5288,7 @@ mod tests {
         assert_eq!(value["window"]["hwnd"], 0x31, "{value}");
     }
 
-    /// Review Focus 2: 許可の外 (deny のクラス) の窓が最小化されていても、無いときと同じ 12 (「最小化」の文も
+    /// D-139: 許可の外 (deny のクラス) の窓が最小化されていても、無いときと同じ 12 (「最小化」の文も
     /// detail も出さない)
     #[test]
     fn find_minimized_denied_window_is_plain_not_found() {
