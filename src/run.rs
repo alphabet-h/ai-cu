@@ -200,7 +200,7 @@ fn moves_focus(events: &[InputEvent]) -> bool {
 fn absent_note(unmet: &str) -> &'static str {
     match unmet {
         "window" => {
-            "最初の確認で既に無かった。待つ前から無かったか、実行ファイル名か題名が表示と合っていないか、最小化されている (最小化は無いと数える)。windows で対象のウィンドウを確かめる"
+            "最初の確認で既に無かった。待つ前から無かったか、実行ファイル名か題名が表示と合っていないか、最小化されている (最小化と、許可の外と ai-cu を起動した側の窓は無いと数える)。windows で対象のウィンドウを確かめる"
         }
         "element" => {
             "最初の確認で既に無かった。UI Automation に要素を出さないアプリ (gpui など) では、画面に見えていても無いと判定される。find で条件の要素 (text だけの条件なら文字列を持つ要素) が出るか確かめる"
@@ -1797,19 +1797,26 @@ impl Executor<'_> {
         state: &mut State,
         ctx: &mut Ctx<'_>,
     ) -> Result<(), AppError> {
+        // 名指しの候補は `windows` に出る窓と TUI の端末を除いた窓だけ (D-139)。`check_stop` / `settle` が
+        // `&mut self` を取るので、述語が使う値は先に写す (借用を重ねない)
+        let (policy, host_pids, self_hwnd) = (self.policy, ctx.host_pids, ctx.self_hwnd);
+        let admit = |w: &WindowInfo| named_window_admitted(policy, w, host_pids, self_hwnd);
         let Some(w) = self
             .desktop
-            .find_window(process, title, &|_| true)
+            .find_window(process, title, &admit)
             .map_err(backend_error)?
         else {
             return Err(AppError::new(
                 ErrorKind::FocusFailed,
-                format!("前面にする対象が見つからない (process={process:?}, title={title:?})"),
+                format!(
+                    "前面にする対象が見つからない (process={process:?}, title={title:?})。{NAMED_WINDOW_SCOPE_NOTE}"
+                ),
             )
             .with_reason(reason::NOT_FOUND)
             .with_hint(hint(Hint::FocusNotFound, ctx.surface)));
         };
-        // 前面にしてよい相手か。フォアグラウンドガードと同じ判定 (設定、自分の端末、管理者権限)
+        // 前面にしてよい相手か。フォアグラウンドガードと同じ判定 (設定、自分の端末、管理者権限)。設定と自分の端末は
+        // 述語を通った窓には当たらない (守りの重ね。D-139)。権限の 7 は残る
         self.check_window(&w.info, ctx, "前面にする対象", Hint::FocusDenied)?;
         let describe = format!(
             "process={:?}, title={:?}, hwnd={:#x}",
@@ -1843,8 +1850,9 @@ impl Executor<'_> {
         }
         // 失敗の理由を分ける: 対象が閉じられた (同じウィンドウを取り直せない) / 断られた (前面で 3 つに分ける)。
         // 補助プロセスを使ったときは、その後にもう一度確かめる (補助の間に閉じられることがある)
+        // 取り直しも同じ述語で探す (前に出てきた許可の外の窓を「対象が閉じられた」の根拠にしない。D-139)
         let still_there = |d: &dyn Desktop| -> Result<bool, AppError> {
-            Ok(d.find_window(process, title, &|_| true)
+            Ok(d.find_window(process, title, &admit)
                 .map_err(backend_error)?
                 .is_some_and(|again| {
                     again.info.hwnd == w.info.hwnd && again.info.pid == w.info.pid
@@ -1965,16 +1973,21 @@ impl Executor<'_> {
             AppError::new(ErrorKind::WindowNotFound, message)
                 .with_hint(hint(Hint::CloseNotFound, ctx.surface))
         };
+        // 名指しの候補は `windows` に出る窓と TUI の端末を除いた窓だけ (D-139)
+        let (policy, host_pids, self_hwnd) = (self.policy, ctx.host_pids, ctx.self_hwnd);
         let Some(w) = self
             .desktop
-            .find_window(process, Some(title), &|_| true)
+            .find_window(process, Some(title), &|w| {
+                named_window_admitted(policy, w, host_pids, self_hwnd)
+            })
             .map_err(backend_error)?
         else {
             return Err(not_found(format!(
-                "閉じる対象が見つからない (process={process:?}, title={title:?})"
+                "閉じる対象が見つからない (process={process:?}, title={title:?})。{NAMED_WINDOW_SCOPE_NOTE}"
             )));
         };
-        // 閉じてよい相手か。フォアグラウンドガードと同じ判定 (設定、自分の端末、起動した側、管理者権限)
+        // 閉じてよい相手か。フォアグラウンドガードと同じ判定 (設定、自分の端末、起動した側、管理者権限)。権限の
+        // ほかは述語を通った窓には当たらない (守りの重ね。D-139)
         self.check_window(&w.info, ctx, "閉じる対象", Hint::CloseDenied)?;
         let describe = format!(
             "process={:?}, title={:?}, hwnd={:#x}",
@@ -2063,7 +2076,9 @@ impl Executor<'_> {
 
     /// 条件がそろうまで待つ (D-068)。読むだけで何も送らない。最初の判定は待たずに行い、満たされなければ
     /// `WAIT_FOR_POLL_MS` (残りが短ければ残り) だけ `sleep` (50 ms ごとに停止要因と期限) して確かめ直す。
-    /// 経過が `timeout_ms` 以上なら 15 (期限の時点で最後に 1 回確かめる)。ホストと設定の拒否 (7 / 4) は待たずに止める
+    /// 経過が `timeout_ms` 以上なら 15 (期限の時点で最後に 1 回確かめる)。窓の名指しは `windows` に出る窓 (TUI の
+    /// 端末も除く) だけから探すので、許可の外と起動した側の窓は「無い」と数える (`present: true` なら時間切れまで
+    /// 待って 15、`absent` なら満たされる。D-139)。名前だけの判定 (4) は検証 (validate) が先に掛ける
     fn wait_for(
         &mut self,
         i: usize,
@@ -2105,28 +2120,33 @@ impl Executor<'_> {
                 } else {
                     "無い"
                 };
-                return Err(AppError::new(
-                    ErrorKind::WaitTimeout,
-                    format!(
-                        "条件 ({}) が {} ms のうちに満たされなかった (確かめた回数 {checks}。最後の判定で {} が{state_word})",
-                        spec.describe(),
-                        spec.timeout_ms,
-                        obs.unmet
-                    ),
-                )
-                .with_detail(serde_json::json!({
-                    "timeout_ms": spec.timeout_ms,
-                    "checks": checks,
-                    "unmet": obs.unmet,
-                    "window": obs.window.as_ref().map(|w| window_detail(&w.info)),
-                })));
+                let mut message = format!(
+                    "条件 ({}) が {} ms のうちに満たされなかった (確かめた回数 {checks}。最後の判定で {} が{state_word})",
+                    spec.describe(),
+                    spec.timeout_ms,
+                    obs.unmet
+                );
+                // 窓の段で満たされなかったときだけ、名指しの範囲を足す (15 の hint は画面の待ちと共有なので変えない。D-139)
+                if obs.unmet == "window" {
+                    message.push_str(&format!("。{NAMED_WINDOW_SCOPE_NOTE}"));
+                }
+                return Err(AppError::new(ErrorKind::WaitTimeout, message).with_detail(
+                    serde_json::json!({
+                        "timeout_ms": spec.timeout_ms,
+                        "checks": checks,
+                        "unmet": obs.unmet,
+                        "window": obs.window.as_ref().map(|w| window_detail(&w.info)),
+                    }),
+                ));
             }
             self.sleep(WAIT_FOR_POLL_MS.min(spec.timeout_ms - elapsed), state, ctx)?;
         }
     }
 
     /// `wait_for` の 1 回の判定 (D-068)。ウィンドウを毎回引き直す (待っている間に作り直されることがある)。
-    /// 無い、または最小化なら「ウィンドウが無い」。あれば、読んでよい相手か (`check_ui_window`。待たずに失敗)。
+    /// 窓は `named_window_admitted` を通る窓 (`windows` に出る窓から TUI の端末を除いたもの) だけから探す (D-139)。
+    /// 無い、許可の外か起動した側の窓しか無い、または最小化なら「ウィンドウが無い」。あれば、読んでよい相手か
+    /// (`check_ui_window`。述語を通った窓には当たらない守りの重ね)。
     /// 条件が要素なら 1 つ以上あるか、文字列なら最初に文字列を持つ要素の文字列が含むか (要素の文字列と条件の
     /// 文字列の両方を LF にそろえてから比べる)。
     /// 要素の読み取りが失敗したら、ウィンドウを探し直して無ければその回は「無い」(閉じられた直後の競合)、
@@ -2142,10 +2162,13 @@ impl Executor<'_> {
             window: None,
             element: None,
         };
+        let (policy, host_pids, self_hwnd) = (self.policy, ctx.host_pids, ctx.self_hwnd);
         let find = |d: &dyn Desktop| -> Result<Option<TopWindow>, AppError> {
-            Ok(d.find_window(spec.process, spec.title, &|_| true)
-                .map_err(backend_error)?
-                .filter(|w| !w.minimized))
+            Ok(d.find_window(spec.process, spec.title, &|w| {
+                named_window_admitted(policy, w, host_pids, self_hwnd)
+            })
+            .map_err(backend_error)?
+            .filter(|w| !w.minimized))
         };
         let Some(w) = find(self.desktop)? else {
             return Ok(no_window());
@@ -3256,7 +3279,7 @@ mod tests {
 
     /// ホストの除外 (D-055): ai-cu を起動した側のプロセスのウィンドウには、キーも、座標の下でも、focus でも、
     /// screenshot の window でも、設定にかかわらず触れない。同じ実行ファイル名でも pid が違えば届く。
-    /// screenshot の window の名指しでは、起動した側の窓は無いものとして 12 (D-139)
+    /// focus と screenshot の window の名指しでは、起動した側の窓は無いものとして 11 の not_found / 12 (D-139)
     #[test]
     fn foreground_guard_host_pid_rejects_keys_mouse_focus_and_capture_target_without_sending() {
         let mut w = World::new();
@@ -3270,13 +3293,21 @@ mod tests {
         }];
         let world = w.shared();
         let p = policy(ENABLED);
+        // focus の名指しでは、起動した側の窓は候補に入らない (11 の not_found。D-139)
+        let s = r#"{"type":"focus","process":"WindowsTerminal.exe"}"#;
+        let (r, _) = exec_with(&world, &p, &mut StopSet::new(), &script(s), None, &[77]);
+        let e = r.unwrap_err();
+        assert_eq!(e.kind, ErrorKind::FocusFailed, "{e}");
+        assert_eq!(e.reason, Some(reason::NOT_FOUND));
+        assert!(
+            e.message.ends_with(NAMED_WINDOW_SCOPE_NOTE),
+            "{}",
+            e.message
+        );
+        assert!(world.borrow().focus_calls.is_empty());
         for (s, hint) in [
             (r#"{"type":"key","keys":"a"}"#, HOST_WINDOW_HINT),
             (r#"{"type":"click","x":10,"y":10}"#, HOST_WINDOW_HINT),
-            (
-                r#"{"type":"focus","process":"WindowsTerminal.exe"}"#,
-                HOST_WINDOW_HINT,
-            ),
         ] {
             let (r, images) = exec_with(&world, &p, &mut StopSet::new(), &script(s), None, &[77]);
             let e = r.unwrap_err();
@@ -3702,7 +3733,8 @@ mod tests {
         );
     }
 
-    /// 前面にしてよい相手かは、フォアグラウンドガードと同じ判定 (設定、自分の端末、管理者権限) で、呼ぶ前に見る
+    /// 前面にしてよい相手かは、呼ぶ前に見る。名前の拒否は検証で 4。deny のクラスと自分の端末の窓は名指しの候補に
+    /// 入らず、無いときと同じ 11 の `not_found` (D-139。以前は 7)。管理者権限は見つけた窓の判定で 7
     #[test]
     fn focus_rejects_denied_self_and_elevated_targets_before_calling() {
         let s = script(r#"{"type":"focus","process":"notepad.exe"}"#);
@@ -3714,18 +3746,20 @@ mod tests {
         let p = policy(&format!("{ENABLED}[deny]\nprocesses=[\"notepad\"]\n"));
         let (r, _) = exec(&world, &p, &mut StopSet::new(), &s);
         assert_eq!(r.unwrap_err().kind, ErrorKind::PolicyDenied);
-        // deny.classes は実行時に、見つけたウィンドウで止まる (7)
+        // deny.classes の窓は探す候補に入らない (11 の not_found)
         let p = policy(&format!("{ENABLED}[deny]\nclasses=[\"TargetClass\"]\n"));
         let (r, _) = exec(&world, &p, &mut StopSet::new(), &s);
         let e = r.unwrap_err();
-        assert_eq!(e.kind, ErrorKind::ForegroundGuard);
-        assert_eq!(e.hint.as_deref(), Some(FOCUS_DENIED_HINT));
-        // 自分の端末 (D-045)
+        assert_eq!(e.kind, ErrorKind::FocusFailed, "{e}");
+        assert_eq!(e.reason, Some(reason::NOT_FOUND));
+        assert_eq!(e.hint.as_deref(), Some(FOCUS_NOT_FOUND_HINT));
+        // 自分の端末 (D-045) も候補に入らない
         let me = world.borrow().top[0].info.clone();
         let (r, _) = exec_excluding(&world, &policy(ENABLED), &mut StopSet::new(), &s, Some(&me));
         let e = r.unwrap_err();
-        assert_eq!(e.kind, ErrorKind::ForegroundGuard);
-        assert_eq!(e.hint.as_deref(), Some(SELF_WINDOW_HINT));
+        assert_eq!(e.kind, ErrorKind::FocusFailed, "{e}");
+        assert_eq!(e.reason, Some(reason::NOT_FOUND));
+        assert_eq!(e.hint.as_deref(), Some(FOCUS_NOT_FOUND_HINT));
         // 管理者権限
         world.borrow_mut().top[0].info.elevated = Some(true);
         let (r, _) = exec(&world, &policy(ENABLED), &mut StopSet::new(), &s);
@@ -3804,7 +3838,8 @@ mod tests {
         );
     }
 
-    /// close: 見つからなければ 12、許可されていない・自分の端末・起動した側・管理者権限なら 7。どれも WM_CLOSE を置かない
+    /// close: 見つからない・許可されていない (deny のクラス)・自分の端末・起動した側なら 12 (後の 3 つは名指しの
+    /// 候補に入らない。D-139。以前は 7)、無効と管理者権限なら 7。どれも WM_CLOSE を置かない
     #[test]
     fn close_refuses_missing_denied_self_host_and_elevated_targets_without_posting() {
         let s = script(r#"{"type":"close","process":"notepad.exe","title":"a.txt"}"#);
@@ -3825,11 +3860,13 @@ mod tests {
         let p = policy(&format!("{ENABLED}[deny]\nclasses=[\"TargetClass\"]\n"));
         let (r, _) = exec(&world, &p, &mut StopSet::new(), &s);
         let e = r.unwrap_err();
-        assert_eq!(e.kind, ErrorKind::ForegroundGuard);
-        assert_eq!(e.hint.as_deref(), Some(CLOSE_DENIED_HINT));
+        assert_eq!(e.kind, ErrorKind::WindowNotFound, "{e}");
+        assert_eq!(e.hint.as_deref(), Some(CLOSE_NOT_FOUND_HINT));
         let me = world.borrow().top[0].info.clone();
         let (r, _) = exec_excluding(&world, &policy(ENABLED), &mut StopSet::new(), &s, Some(&me));
-        assert_eq!(r.unwrap_err().hint.as_deref(), Some(SELF_WINDOW_HINT));
+        let e = r.unwrap_err();
+        assert_eq!(e.kind, ErrorKind::WindowNotFound, "{e}");
+        assert_eq!(e.hint.as_deref(), Some(CLOSE_NOT_FOUND_HINT));
         let (r, _) = exec_with(
             &world,
             &policy(ENABLED),
@@ -3838,7 +3875,9 @@ mod tests {
             None,
             &[me.pid],
         );
-        assert_eq!(r.unwrap_err().kind, ErrorKind::ForegroundGuard);
+        let e = r.unwrap_err();
+        assert_eq!(e.kind, ErrorKind::WindowNotFound, "{e}");
+        assert_eq!(e.hint.as_deref(), Some(CLOSE_NOT_FOUND_HINT));
         // ダイアログを開いていて無効なウィンドウは、閉じるボタンも押せないので閉じない
         world.borrow_mut().disabled = vec![0x20];
         let (r, _) = exec(&world, &policy(ENABLED), &mut StopSet::new(), &s);
@@ -5026,16 +5065,8 @@ mod tests {
         w.top.clear();
         let absent = resolve_capture_err(&w.shared(), policy, process, &[]);
         assert_eq!(e.kind, ErrorKind::WindowNotFound, "{e}");
-        assert_eq!(e.kind, absent.kind);
-        assert_eq!(e.message, absent.message);
-        assert_eq!(e.hint, absent.hint);
+        assert_like_absent(e, &absent);
         assert!(e.detail.is_none(), "{:?}", e.detail);
-        assert!(absent.detail.is_none());
-        assert!(
-            e.message.ends_with(NAMED_WINDOW_SCOPE_NOTE),
-            "{}",
-            e.message
-        );
     }
 
     /// 起動した側の窓は名指しの候補に入らない。無いときと同じ 12 で、window を持たない (D-139。以前は 7)
@@ -6119,14 +6150,17 @@ mod tests {
         assert_eq!(*detail(&e), serde_json::json!({"window": null}));
     }
 
-    /// focus の対象が許可外 (7): 前面にする対象のウィンドウ
+    /// focus の対象が断られた (7): 前面にする対象のウィンドウ。設定の外の窓は名指しの候補に入らない (D-139) ので、
+    /// 見つけた窓で断られる管理者権限で組む
     #[test]
     fn focus_denied_detail_has_window() {
         let mut w = World::new();
         w.foreground = Some(terminal());
-        w.top = vec![top(0x20, "notepad.exe", "a")];
+        let mut target = top(0x20, "notepad.exe", "a");
+        target.info.elevated = Some(true);
+        w.top = vec![target];
         let world = w.shared();
-        let p = policy(&format!("{ENABLED}[deny]\nclasses=[\"TargetClass\"]\n"));
+        let p = policy(ENABLED);
         let (r, _) = exec(
             &world,
             &p,
@@ -6140,14 +6174,17 @@ mod tests {
         assert_no_title(&e);
     }
 
-    /// close の対象が許可外 (7): 閉じる対象のウィンドウ
+    /// close の対象が断られた (7): 閉じる対象のウィンドウ。設定の外の窓は名指しの候補に入らない (D-139) ので、
+    /// 見つけた窓で断られる管理者権限で組む
     #[test]
     fn close_denied_detail_has_window() {
         let mut w = World::new();
         w.foreground = Some(terminal());
-        w.top = vec![top(0x20, "notepad.exe", "a.txt")];
+        let mut target = top(0x20, "notepad.exe", "a.txt");
+        target.info.elevated = Some(true);
+        w.top = vec![target];
         let world = w.shared();
-        let p = policy(&format!("{ENABLED}[deny]\nclasses=[\"TargetClass\"]\n"));
+        let p = policy(ENABLED);
         let (r, _) = exec(
             &world,
             &p,
@@ -6159,6 +6196,136 @@ mod tests {
         assert_eq!(detail(&e)["window"]["process"], "notepad.exe");
         assert_eq!(detail(&e)["window"]["class"], "TargetClass");
         assert_no_title(&e);
+    }
+
+    /// deny のクラスに当たる窓 (検証の名前の判定は通る。D-139 の述語だけが撃つ)
+    fn class_denied_policy() -> Policy {
+        policy(&format!("{ENABLED}[deny]\nclasses=[\"TargetClass\"]\n"))
+    }
+
+    /// 窓が 1 つも無い世界で `s` を走らせた失敗 (名指しの失敗の比べ先。D-139)
+    fn absent_err(p: &Policy, s: &Script) -> AppError {
+        let mut w = World::new();
+        w.foreground = Some(terminal());
+        let (r, _) = exec(&w.shared(), p, &mut StopSet::new(), s);
+        r.unwrap_err()
+    }
+
+    /// 名指しの失敗 `e` が窓が無いときの失敗 `absent` と同じ (kind、reason、message、hint、detail) で、message が
+    /// 範囲の文で終わる (D-139)
+    fn assert_like_absent(e: &AppError, absent: &AppError) {
+        assert_eq!(e.kind, absent.kind, "{e}");
+        assert_eq!(e.reason, absent.reason);
+        assert_eq!(e.message, absent.message);
+        assert_eq!(e.hint, absent.hint);
+        assert_eq!(e.detail, absent.detail);
+        assert!(
+            e.message.ends_with(NAMED_WINDOW_SCOPE_NOTE),
+            "{}",
+            e.message
+        );
+    }
+
+    /// focus (D-139): deny のクラスに当たる窓は名指しの候補に入らず、窓が無いときと同じ 11 の not_found で、
+    /// SetForegroundWindow を呼ばない
+    #[test]
+    fn focus_class_denied_window_is_not_found() {
+        let s = script(r#"{"type":"focus","process":"notepad.exe","title":"a.txt"}"#);
+        let p = class_denied_policy();
+        let mut w = World::new();
+        w.foreground = Some(terminal());
+        w.top = vec![top(0x20, "notepad.exe", "a.txt")];
+        let world = w.shared();
+        let (r, _) = exec(&world, &p, &mut StopSet::new(), &s);
+        let e = r.unwrap_err();
+        assert_eq!(e.kind, ErrorKind::FocusFailed, "{e}");
+        assert_eq!(e.reason, Some(reason::NOT_FOUND));
+        assert_eq!(e.hint.as_deref(), Some(FOCUS_NOT_FOUND_HINT));
+        assert_like_absent(&e, &absent_err(&p, &s));
+        assert!(world.borrow().focus_calls.is_empty());
+    }
+
+    /// focus の取り直し (`still_there`。D-139): 断られた後、題名の一致する許可の外の窓が前に出てきても、それを
+    /// 「対象が閉じられた」の根拠にしない (closed にならず、前面のプロセスで分けた refused_* になる)
+    #[test]
+    fn focus_recheck_ignores_denied_window() {
+        let s = script(r#"{"type":"focus","process":"notepad.exe","title":"a.txt"}"#);
+        let p = policy(&format!("{ENABLED}[deny]\nclasses=[\"SecretClass\"]\n"));
+        let target = top(0x20, "notepad.exe", "a.txt");
+        let mut denied = top(0x30, "notepad.exe", "a.txt");
+        denied.info.class = "SecretClass".into();
+        let mut w = World::new();
+        w.foreground = Some(chrome());
+        w.top = vec![target.clone()];
+        w.focus_accepts = false;
+        // 2 回目の探索 (取り直し) から、許可の外の窓が前に出る
+        w.top_after_finds = Some((1, vec![denied, target]));
+        let world = w.shared();
+        let (r, _) = exec(&world, &p, &mut StopSet::new(), &s);
+        let e = r.unwrap_err();
+        assert_eq!(e.kind, ErrorKind::FocusFailed, "{e}");
+        assert_eq!(e.reason, Some(reason::REFUSED_OTHER_APP), "{}", e.message);
+        assert_eq!(e.hint.as_deref(), Some(FOCUS_REFUSED_HINT));
+        let w = world.borrow();
+        assert_eq!(w.focus_calls, vec![0x20]);
+        assert!(w.find_window_calls >= 2, "取り直しで探した");
+    }
+
+    /// close (D-139): deny のクラスに当たる窓は名指しの候補に入らず、窓が無いときと同じ 12 で、WM_CLOSE を置かない
+    #[test]
+    fn close_class_denied_window_is_not_found() {
+        let s = script(r#"{"type":"close","process":"notepad.exe","title":"a.txt"}"#);
+        let p = class_denied_policy();
+        let mut w = World::new();
+        w.foreground = Some(terminal());
+        w.top = vec![top(0x20, "notepad.exe", "a.txt")];
+        let world = w.shared();
+        let (r, _) = exec(&world, &p, &mut StopSet::new(), &s);
+        let e = r.unwrap_err();
+        assert_eq!(e.kind, ErrorKind::WindowNotFound, "{e}");
+        assert_eq!(e.hint.as_deref(), Some(CLOSE_NOT_FOUND_HINT));
+        assert_like_absent(&e, &absent_err(&p, &s));
+        assert!(world.borrow().close_calls.is_empty());
+    }
+
+    /// wait_for の absent (D-139): deny のクラスに当たる窓しか無ければ最初の確認で満たされ、窓を出さず、note は
+    /// 窓が無いときと同じ文 (許可の外を無いと数えることを書いた文)
+    #[test]
+    fn wait_for_absent_counts_denied_window_as_absent() {
+        let s = script(&wait_json(r#","absent":true"#, 1000));
+        let p = class_denied_policy();
+        let world = wait_world().shared();
+        let (r, _) = exec(&world, &p, &mut StopSet::new(), &s);
+        let report = r.unwrap();
+        let wi = &report.waited[0];
+        assert_eq!(wi.checks, 1);
+        assert!(wi.window.is_none());
+        let n = waited_note(&report).expect("note");
+        assert!(
+            n.contains("許可の外と ai-cu を起動した側の窓は無いと数える"),
+            "{n}"
+        );
+        let mut w = World::new();
+        w.foreground = Some(terminal());
+        let (r, _) = exec(&w.shared(), &p, &mut StopSet::new(), &s);
+        assert_eq!(waited_note(&r.unwrap()).as_deref(), Some(n.as_str()));
+        assert_eq!(world.borrow().ui_element_calls, 0);
+    }
+
+    /// wait_for の present (D-139 の限界): deny のクラスに当たる窓を待つと、即時の 4 ではなく時間切れまで待って
+    /// 15 で、message と detail と hint は窓が無いときと同じ (message は範囲の文で終わる)
+    #[test]
+    fn wait_for_present_on_denied_window_times_out_like_absent() {
+        let s = script(&wait_json("", 300));
+        let p = class_denied_policy();
+        let world = wait_world().shared();
+        let (r, _) = exec(&world, &p, &mut StopSet::new(), &s);
+        let e = r.unwrap_err();
+        let d = wait_timeout(&e).clone();
+        assert_eq!(d["unmet"], "window");
+        assert!(d["window"].is_null(), "{d}");
+        assert_like_absent(&e, &absent_err(&p, &s));
+        assert_eq!(world.borrow().now_ms, 300, "時間切れまで待つ");
     }
 
     /// 利用者のマウスでの停止 (6): 読んだカーソルと、直前の移動の線分
@@ -7837,9 +8004,9 @@ mod tests {
         assert!(world.borrow().sent.is_empty());
     }
 
-    /// (8) 最小化は「無い」。ホスト、自分の端末、設定の拒否は待たずに即時 (7 / 4) で、要素も読まない
+    /// (8) 最小化は「無い」。ホスト、自分の端末、設定の拒否 (deny のクラス) の窓も「無い」(D-139) で、要素も読まない
     #[test]
-    fn wait_for_treats_minimized_as_absent_and_refuses_host_self_and_denied_without_waiting() {
+    fn wait_for_treats_minimized_host_self_and_denied_as_absent() {
         let mut w = wait_world();
         w.top[0].minimized = true;
         w.top[0].rect = None;
@@ -7862,50 +8029,36 @@ mod tests {
             &script(&wait_json(r#","absent":true"#, 0)),
         );
         assert!(r.unwrap().waited[0].window.is_none());
-        // ホスト (起動した側) は 7 で即時
-        let world = wait_world().shared();
-        let me = world.borrow().top[0].info.clone();
-        let s = script(&wait_json(r#","element":{"name":"保存"}"#, 5000));
-        let (r, _) = exec_with(
-            &world,
-            &policy(ENABLED),
-            &mut StopSet::new(),
-            &s,
-            None,
-            &[me.pid],
-        );
-        let e = r.unwrap_err();
-        assert_eq!(e.kind, ErrorKind::ForegroundGuard, "{e}");
-        assert_eq!(e.hint.as_deref(), Some(HOST_CAPTURE_HINT));
-        assert!(e.message.contains("起動した側"), "{}", e.message);
-        assert_eq!(progress(&e)["executed"], 0);
-        assert!(progress(&e).get("waited").is_none());
-        {
-            let w = world.borrow();
-            assert_eq!(w.now_ms, 0, "待たない");
-            assert_eq!(w.find_window_calls, 1);
-            assert_eq!(w.ui_element_calls, 0, "要素を読まない");
-        }
-        // 自分の端末 (TUI からの実行) も 7
-        let (r, _) = exec_excluding(&world, &policy(ENABLED), &mut StopSet::new(), &s, Some(&me));
-        let e = r.unwrap_err();
-        assert_eq!(e.kind, ErrorKind::ForegroundGuard, "{e}");
-        assert_eq!(e.hint.as_deref(), Some(HOST_CAPTURE_HINT));
-        assert!(e.message.contains("動かしている端末"), "{}", e.message);
-        // 実行時の許可: プロセスは allow に入れたまま deny.classes で落とす (validate は通り、実行時に 4)
+        // ホスト (起動した側)、自分の端末 (TUI からの実行)、deny.classes の窓は名指しの候補に入らず、「無い」と
+        // 数える (D-139。以前は待たずに 7 / 4)。時間切れまで待って 15 で、要素を読まず、窓を出さない
+        let s = script(&wait_json(r#","element":{"name":"保存"}"#, 300));
+        let me = wait_world().top[0].info.clone();
         let denied = policy(&format!(
             "{ENABLED}[allow]\nprocesses=[\"notepad\"]\n[deny]\nclasses=[\"TargetClass\"]\n"
         ));
-        let (r, _) = exec(&world, &denied, &mut StopSet::new(), &s);
-        let e = r.unwrap_err();
-        assert_eq!(e.kind, ErrorKind::PolicyDenied, "{e}");
-        assert!(e.message.contains("deny.classes"), "{}", e.message);
-        assert_eq!(progress(&e)["executed"], 0);
-        assert!(progress(&e).get("waited").is_none());
-        let w = world.borrow();
-        assert_eq!(w.now_ms, 0);
-        assert_eq!(w.ui_element_calls, 0);
-        assert!(w.sent.is_empty());
+        let cases: [(&str, &Policy, Option<&WindowInfo>, &[u32]); 3] = [
+            ("host", &policy(ENABLED), None, &[me.pid]),
+            ("self", &policy(ENABLED), Some(&me), &[]),
+            ("deny.classes", &denied, None, &[]),
+        ];
+        for (label, p, self_window, host) in cases {
+            let world = wait_world().shared();
+            let (r, _) = exec_with(&world, p, &mut StopSet::new(), &s, self_window, host);
+            let e = r.unwrap_err();
+            let d = wait_timeout(&e).clone();
+            assert_eq!(d["unmet"], "window", "{label}");
+            assert!(d["window"].is_null(), "{label}: {d}");
+            assert!(
+                e.message.ends_with(NAMED_WINDOW_SCOPE_NOTE),
+                "{label}: {}",
+                e.message
+            );
+            assert_eq!(progress(&e)["executed"], 0, "{label}");
+            let w = world.borrow();
+            assert_eq!(w.now_ms, 300, "{label}: 時間切れまで待つ");
+            assert_eq!(w.ui_element_calls, 0, "{label}: 要素を読まない");
+            assert!(w.sent.is_empty(), "{label}");
+        }
     }
 
     /// (9) 要素の読み取りの失敗: 読む直前にウィンドウが消えていればその回は「無い」(absent なら満たされる)、
