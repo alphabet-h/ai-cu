@@ -551,12 +551,43 @@ impl Layer {
     }
 }
 
+/// TOML の誤りを「行 L、列 C: 誤りの文」の形にする (D-140)。
+///
+/// toml の `Display` は元の行の抜き出しを載せる (`--config` で任意のファイルを指すと、
+/// その中身が AI に渡る) ので使わない。位置は `span()` の始まりから数え、列は行の頭からの
+/// 文字数 (バイトでなく)。span が無ければ文だけ。
+fn toml_error_text(e: &toml::de::Error, text: &str) -> String {
+    let msg = e.message().trim();
+    let Some(span) = e.span() else {
+        return msg.to_string();
+    };
+    let (line, col) = text_position(text, span.start);
+    format!("行 {line}、列 {col}: {msg}")
+}
+
+/// バイトの位置 `start` を 1 始まりの (行, 列) にする。列は行の頭からの文字数。
+///
+/// 文字の境目まで前に戻すのは、toml が span を入力の外や複数バイトの文字の途中に置いた場合への
+/// 防御 (そうなっても panic しない。`is_char_boundary` は末尾より先で偽を返すので、入力の外も
+/// この後退で末尾に寄る)。`text.len()` での頭打ちは、遠い位置から 1 バイトずつ戻る手間を省くだけ。
+fn text_position(text: &str, start: usize) -> (usize, usize) {
+    let mut p = start.min(text.len());
+    while !text.is_char_boundary(p) {
+        p -= 1;
+    }
+    let before = &text[..p];
+    let line = before.matches('\n').count() + 1;
+    let line_head = before.rfind('\n').map_or(0, |i| i + 1);
+    let col = before[line_head..].chars().count() + 1;
+    (line, col)
+}
+
 impl Config {
     /// TOML を読む。版を先に確かめ、未知のフィールドと未知の版は拒否し、中身も検証する。
     pub fn parse(text: &str) -> Result<Config, String> {
         let text = text.trim_start_matches('\u{feff}');
-        let table: toml::Table =
-            toml::from_str(text).map_err(|e| format!("TOML として読めない: {e}"))?;
+        let table: toml::Table = toml::from_str(text)
+            .map_err(|e| format!("TOML として読めない ({})", toml_error_text(&e, text)))?;
         match table.get("version") {
             Some(toml::Value::Integer(v)) if *v == i64::from(CONFIG_VERSION) => {}
             Some(toml::Value::Integer(v)) => {
@@ -567,7 +598,8 @@ impl Config {
             Some(_) => return Err("version は整数で書く".into()),
             None => return Err(format!("version = {CONFIG_VERSION} が必要")),
         }
-        let cfg: Config = toml::from_str(text).map_err(|e| format!("設定の書式が不正: {e}"))?;
+        let cfg: Config = toml::from_str(text)
+            .map_err(|e| format!("設定の書式が不正 ({})", toml_error_text(&e, text)))?;
         Layer::from_config(&cfg, "")?;
         Ok(cfg)
     }
@@ -1028,6 +1060,51 @@ mod tests {
 
     fn test_dir(name: &str) -> PathBuf {
         crate::testing::unique_temp_dir(&format!("config-{name}"))
+    }
+
+    /// TOML の誤りの文に元の行の中身と抜き出しが載らず、位置と文だけが載る (D-140)
+    #[test]
+    fn parse_error_omits_source_line() {
+        let e = Config::parse("password = hunter2-SECRET\n").unwrap_err();
+        assert!(!e.contains("SECRET"), "{e}");
+        assert!(!e.contains("hunter2"), "{e}");
+        assert!(!e.contains(" | "), "{e}");
+        assert!(e.contains("TOML として読めない"), "{e}");
+        assert!(e.contains("行 1、列 12"), "{e}");
+    }
+
+    /// 構造の段 (version = 1 がある) の誤りは、直しに要る未知のキーの名前を残し、行の抜き出しは載せない (D-140)
+    #[test]
+    fn parse_error_struct_stage_keeps_field_name() {
+        let e = Config::parse("version = 1\nalow = 1\n").unwrap_err();
+        assert!(e.contains("alow"), "{e}");
+        assert!(e.contains("設定の書式が不正"), "{e}");
+        assert!(e.contains("行 2、列 1"), "{e}");
+        assert!(!e.contains("2 | "), "{e}");
+    }
+
+    /// 列は行の頭からの文字数で数える。`"あ" = あ` の裸の値の あ は 7 文字目 (バイトで数えると 9) (D-140)
+    #[test]
+    fn parse_error_column_counts_chars() {
+        let e = Config::parse("\"あ\" = あ\n").unwrap_err();
+        assert!(e.contains("行 1、列 7"), "{e}");
+    }
+
+    /// 誤りがファイルの末尾を指しても panic しない (D-140)
+    #[test]
+    fn parse_error_at_eof_has_no_panic() {
+        let e = Config::parse("x =").unwrap_err();
+        assert!(e.contains("行 1"), "{e}");
+    }
+
+    /// 入力の外や文字の途中を指す位置でも panic せず、末尾か直前の文字の境目に寄せる (D-140)
+    #[test]
+    fn text_position_clamps_out_of_range_and_mid_char() {
+        // 入力の外: 末尾 (2 行目の c の後ろ) に寄せる
+        assert_eq!(text_position("ab\nc", 100), (2, 2));
+        // あ (3 バイト) の途中の 1 バイト目: その文字の頭に戻る
+        assert_eq!(text_position("xあ", 2), (1, 2));
+        assert_eq!(text_position("", 0), (1, 1));
     }
 
     /// 雛形の deny.processes に最初から並べる名前 (D-117)
