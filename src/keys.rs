@@ -176,8 +176,16 @@ impl KeyCombo {
     pub fn builtin_denied(&self) -> Option<&'static str> {
         const F4: u16 = 0x73;
         const ESC: u16 = 0x1B;
+        // `NAMED_KEYS` の printscreen と同じ値
+        const PRINTSCREEN: u16 = 0x2C;
         if let Some(reason) = builtin_denied_modifiers(&self.modifiers) {
             return Some(reason);
+        }
+        // 画面をクリップボードに写し、撮影の制限 (D-077) の外で画面を得られるので、修飾キーにかかわらず断る (D-141)
+        if self.key.vk == PRINTSCREEN {
+            return Some(
+                "PrintScreen は組み込みで拒否する (画面はクリップボードを通さず shot (操作列では screenshot) で撮る)",
+            );
         }
         if self.has(Modifier::Alt) && self.key.vk == F4 {
             return Some("Alt+F4 は組み込みで拒否する");
@@ -312,12 +320,41 @@ mod tests {
             "ctrl+alt+t",
             "ctrl+shift+esc",
             "ctrl+esc",
+            "printscreen",
+            "alt+printscreen",
+            "ctrl+printscreen",
+            "shift+printscreen",
+            "ctrl+shift+printscreen",
         ] {
             assert!(combo(denied).builtin_denied().is_some(), "{denied}");
         }
-        for ok in ["ctrl+s", "alt+tab", "shift+f4", "esc", "ctrl+shift+t"] {
+        for ok in [
+            "ctrl+s",
+            "alt+tab",
+            "shift+f4",
+            "esc",
+            "ctrl+shift+t",
+            "insert",
+            "pause",
+        ] {
             assert!(combo(ok).builtin_denied().is_none(), "{ok}");
         }
+    }
+
+    /// PrintScreen の理由の文は撮影の代わり (shot、操作列では screenshot) を示す。Win を含む組は Win の規則が先 (D-141)
+    #[test]
+    fn keys_builtin_deny_printscreen_reason_names_shot() {
+        for s in ["printscreen", "alt+printscreen"] {
+            let reason = combo(s).builtin_denied().expect(s);
+            assert!(reason.contains("PrintScreen"), "{s}: {reason}");
+            assert!(reason.contains("shot ("), "{s}: {reason}");
+            assert!(reason.contains("screenshot"), "{s}: {reason}");
+        }
+        assert_eq!(
+            combo("win+printscreen").builtin_denied(),
+            builtin_denied_modifiers(&[Modifier::Win]),
+            "Win を含む組は Win の理由"
+        );
     }
 
     /// 修飾キーだけの規則は Ctrl と Alt の両方と Win を断り、他の組は通す (D-137)
