@@ -90,9 +90,10 @@ pub struct GateInputs {
     pub desktop: Result<InputDesktop, String>,
 }
 
-/// 子が前面化の前に掛ける判定 (spec の「判定の一覧」の 2〜8 をこの順で。D-138)。
-/// 停止の目印 → 総スイッチと actions → 入力デスクトップ → 対象の候補と最小化 → 起動した側の連鎖 → 窓の判定
-/// (親と共有の `judge_window`) → 無操作の確認 (親と共有の `focus_idle_check`)。
+/// 子が前面化の前に掛ける判定 (D-138)。
+/// 停止の目印 → 総スイッチと actions → 入力デスクトップ → 対象の候補 → 起動した側の連鎖 → 窓の判定
+/// (親と共有の `judge_window`) → 最小化 → 無操作の確認 (親と共有の `focus_idle_check`)。
+/// 最小化は窓の判定の後に見る (親の `focus` と同じ順)。先に見ると、deny の窓が最小化かどうかが断る文の違いで読める
 /// 断る文は判定ごとの固定の文で、`AppError` の message (窓のプロセス名、クラス、pid、設定の場所を含む) は使わない
 pub fn judge_target(
     policy: &Policy,
@@ -113,9 +114,6 @@ pub fn judge_target(
     let Some(target) = &inputs.target else {
         return Gate::Denied(DENY_NOT_CANDIDATE);
     };
-    if target.minimized {
-        return Gate::Denied(DENY_MINIMIZED);
-    }
     let host_pids = match &inputs.host_pids {
         Ok(p) if !p.is_empty() => p.as_slice(),
         _ => return Gate::Denied(DENY_HOST_CHAIN),
@@ -136,6 +134,9 @@ pub fn judge_target(
     .is_err()
     {
         return Gate::Denied(DENY_WINDOW);
+    }
+    if target.minimized {
+        return Gate::Denied(DENY_MINIMIZED);
     }
     match focus_idle_check(policy, idle_ms, Surface::Cli) {
         Ok(()) => Gate::Pass,
@@ -747,6 +748,22 @@ mod tests {
         assert_eq!(why, DENY_WINDOW);
         for word in ["secret", "SecretClass", "4242"] {
             assert!(!why.contains(word), "{why}");
+        }
+    }
+
+    /// deny の窓が最小化でも、窓の判定の文で断る (最小化は窓の判定の後。先に見ると、最小化かどうかが文の違いで読める)
+    #[test]
+    fn judge_target_checks_window_before_minimized() {
+        let denied = policy_of(&format!(
+            "{ENABLED}{ALLOW_NOTEPAD}[deny]\nprocesses = [\"notepad.exe\"]\n"
+        ));
+        for minimized in [false, true] {
+            let inputs = with_window(|w| w.minimized = minimized);
+            assert_eq!(
+                judge_target(&denied, &inputs, false, &idle_ok),
+                Gate::Denied(DENY_WINDOW),
+                "minimized={minimized}"
+            );
         }
     }
 
