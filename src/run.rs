@@ -720,6 +720,119 @@ pub(crate) fn input_desktop_error(state: &InputDesktop) -> Option<AppError> {
     )
 }
 
+/// 窓の判定 (`judge_window`) が設定の他に見るもの。実行器は `Ctx` から作り、`__focus-helper` の子は
+/// 自分で集めて作る (D-138)
+#[derive(Debug, Clone, Copy)]
+pub struct WindowGuard<'a> {
+    /// 届く先がこのハンドルのウィンドウなら送らない (ai-cu 自身の端末。D-045)
+    pub self_hwnd: Option<usize>,
+    /// 届く先がこの pid のウィンドウなら送らない (ai-cu を起動した側。D-055)
+    pub host_pids: &'a [u32],
+    /// ai-cu 自身が管理者権限で動いているか (UIPI の判定)
+    pub self_elevated: bool,
+    /// 次の手の文を選ぶ呼ばれ方 (D-056)
+    pub surface: Surface,
+}
+
+/// 届く先 (または前面にする対象) が許可されたウィンドウか。`situation` は設定で拒否されたときの次の手。
+/// 順は、自分の端末 (D-045)、起動した側 (D-055)、ゴースト (D-119)、設定の deny / allow、管理者権限。
+/// 実行器のフォアグラウンドガードと `__focus-helper` の子が共有する (D-138)。`error.detail.window` は付けない
+/// (付けるのは実行器の `check_window`)
+pub fn judge_window(
+    policy: &Policy,
+    w: &WindowInfo,
+    guard: &WindowGuard<'_>,
+    place: &str,
+    situation: Hint,
+) -> Result<(), AppError> {
+    let describe = || {
+        format!(
+            "{place}のウィンドウ (process={:?}, class={:?}, pid={})",
+            w.process, w.class, w.pid
+        )
+    };
+    // 自分の端末には、設定にかかわらず送らない (D-045)。設定の判定より先に見る
+    if guard.self_hwnd == Some(w.hwnd) {
+        return Err(AppError::new(
+            ErrorKind::ForegroundGuard,
+            format!("{} は ai-cu を動かしている端末なので送らない", describe()),
+        )
+        .with_hint(hint(Hint::SelfWindow, guard.surface)));
+    }
+    // ai-cu を起動した側 (親プロセスの連鎖) にも送らない (D-055)
+    if guard.host_pids.contains(&w.pid) {
+        return Err(AppError::new(
+            ErrorKind::ForegroundGuard,
+            format!(
+                "{} は ai-cu を起動した側のウィンドウなので送らない",
+                describe()
+            ),
+        )
+        .with_hint(hint(Hint::HostWindow, guard.surface)));
+    }
+    // 応答しないアプリの代わりに OS が出すゴーストの窓には、設定にかかわらず送らない (D-119)。
+    // 持ち主は OS のプロセスなので deny の設定に当たらず、元のアプリは応答しないので届いても意味が無い
+    // (ゴーストの閉じるボタンはアプリを強制終了する確認を出す)
+    if is_ghost_window(w) {
+        return Err(AppError::new(
+            ErrorKind::ForegroundGuard,
+            format!(
+                "{} は、応答しないアプリの代わりに OS が出したゴーストの窓なので送らない",
+                describe()
+            ),
+        )
+        .with_hint(hint(situation, guard.surface)));
+    }
+    // rule と fix は Denied から写し、message の頭にウィンドウを足す (D-079)
+    policy.check_window(w).map_err(|d| {
+        let mut e = d.into_error(ErrorKind::ForegroundGuard);
+        e.message = format!("{}: {}", describe(), e.message);
+        e.with_hint(hint(situation, guard.surface))
+    })?;
+    match w.elevated {
+        Some(true) if !guard.self_elevated => Err(AppError::new(
+            ErrorKind::ForegroundGuard,
+            format!(
+                "{} は管理者権限で動いている。入力が届かず失敗も検出できない (UIPI) ので送らない",
+                describe()
+            ),
+        )
+        .with_hint(hint(Hint::Elevated, guard.surface))),
+        None => Err(AppError::new(
+            ErrorKind::ForegroundGuard,
+            format!("{} の権限を確かめられないので送らない", describe()),
+        )
+        .with_hint(hint(Hint::Elevated, guard.surface))),
+        _ => Ok(()),
+    }
+}
+
+/// `focus` の前面化の直前の無操作の確認 (D-049 の判定を focus にも掛ける)。`capture.min_idle_ms` が 0 なら
+/// 無操作を読まずに通す。読み取りの失敗は `backend_error`、足りなければ 10 `user_active`。
+/// 実行器の `focus` と `__focus-helper` の子が共有する (D-138)
+pub fn focus_idle_check(
+    policy: &Policy,
+    idle_ms: &dyn Fn() -> Result<u64, BackendError>,
+    surface: Surface,
+) -> Result<(), AppError> {
+    let min_idle = policy.capture_min_idle_ms();
+    if min_idle == 0 {
+        return Ok(());
+    }
+    let idle = idle_ms().map_err(backend_error)?;
+    if user_active(idle, min_idle) {
+        return Err(AppError::new(
+            ErrorKind::UserActive,
+            format!(
+                "人が操作中なので前面にしない (最後の入力から {idle} ms。{min_idle} ms 以上の無操作が要る: capture.min_idle_ms)"
+            ),
+        )
+        .with_detail(idle_detail(idle, min_idle))
+        .with_hint(hint(Hint::FocusUserActive, surface)));
+    }
+    Ok(())
+}
+
 /// 実行器が操作に入った後の失敗に、その時点の進み具合 (`RunReport` と `partial`) を付け、何か済んでいれば
 /// hint の頭に実行済みの一文を足す (D-065)。元の hint は状況の hint か、呼ばれ方の既定の文
 /// (`AppError::hint()` は CLI の既定を返すので使わない。MCP の結果に `ai-cu ...` が混ざる)
@@ -1684,21 +1797,8 @@ impl Executor<'_> {
             return Ok(());
         }
         // 人が操作中なら前面を奪わない (D-049 の無操作の判定を focus にも掛ける。CLI の都度起動では、端末が前面なら
-        // OS は断らないので、OS の拒否には頼れない)
-        let min_idle = self.policy.capture_min_idle_ms();
-        if min_idle > 0 {
-            let idle = self.desktop.idle_ms().map_err(backend_error)?;
-            if user_active(idle, min_idle) {
-                return Err(AppError::new(
-                    ErrorKind::UserActive,
-                    format!(
-                        "人が操作中なので前面にしない (最後の入力から {idle} ms。{min_idle} ms 以上の無操作が要る: capture.min_idle_ms)"
-                    ),
-                )
-                .with_detail(idle_detail(idle, min_idle))
-                .with_hint(hint(Hint::FocusUserActive, ctx.surface)));
-            }
-        }
+        // OS は断らないので、OS の拒否には頼れない)。判定は `__focus-helper` の子と共有する (D-138)
+        focus_idle_check(self.policy, &|| self.desktop.idle_ms(), ctx.surface)?;
         let accepted = self
             .desktop
             .set_foreground(w.info.hwnd)
@@ -2165,6 +2265,7 @@ impl Executor<'_> {
             .map_err(|e| e.with_detail(serde_json::json!({ "window": window_detail(w) })))
     }
 
+    /// 窓の判定 (自由関数の `judge_window`) に、この実行の `Ctx` から作った材料を渡す
     fn judge_window(
         &self,
         w: &WindowInfo,
@@ -2172,66 +2273,13 @@ impl Executor<'_> {
         place: &str,
         situation: Hint,
     ) -> Result<(), AppError> {
-        let describe = || {
-            format!(
-                "{place}のウィンドウ (process={:?}, class={:?}, pid={})",
-                w.process, w.class, w.pid
-            )
+        let guard = WindowGuard {
+            self_hwnd: ctx.self_hwnd,
+            host_pids: ctx.host_pids,
+            self_elevated: ctx.self_elevated,
+            surface: ctx.surface,
         };
-        // 自分の端末には、設定にかかわらず送らない (D-045)。設定の判定より先に見る
-        if ctx.self_hwnd == Some(w.hwnd) {
-            return Err(AppError::new(
-                ErrorKind::ForegroundGuard,
-                format!("{} は ai-cu を動かしている端末なので送らない", describe()),
-            )
-            .with_hint(hint(Hint::SelfWindow, ctx.surface)));
-        }
-        // ai-cu を起動した側 (親プロセスの連鎖) にも送らない (D-055)
-        if ctx.host_pids.contains(&w.pid) {
-            return Err(AppError::new(
-                ErrorKind::ForegroundGuard,
-                format!(
-                    "{} は ai-cu を起動した側のウィンドウなので送らない",
-                    describe()
-                ),
-            )
-            .with_hint(hint(Hint::HostWindow, ctx.surface)));
-        }
-        // 応答しないアプリの代わりに OS が出すゴーストの窓には、設定にかかわらず送らない (D-119)。
-        // 持ち主は OS のプロセスなので deny の設定に当たらず、元のアプリは応答しないので届いても意味が無い
-        // (ゴーストの閉じるボタンはアプリを強制終了する確認を出す)
-        if is_ghost_window(w) {
-            return Err(AppError::new(
-                ErrorKind::ForegroundGuard,
-                format!(
-                    "{} は、応答しないアプリの代わりに OS が出したゴーストの窓なので送らない",
-                    describe()
-                ),
-            )
-            .with_hint(hint(situation, ctx.surface)));
-        }
-        // rule と fix は Denied から写し、message の頭にウィンドウを足す (D-079)
-        self.policy.check_window(w).map_err(|d| {
-            let mut e = d.into_error(ErrorKind::ForegroundGuard);
-            e.message = format!("{}: {}", describe(), e.message);
-            e.with_hint(hint(situation, ctx.surface))
-        })?;
-        match w.elevated {
-            Some(true) if !ctx.self_elevated => Err(AppError::new(
-                ErrorKind::ForegroundGuard,
-                format!(
-                    "{} は管理者権限で動いている。入力が届かず失敗も検出できない (UIPI) ので送らない",
-                    describe()
-                ),
-            )
-            .with_hint(hint(Hint::Elevated, ctx.surface))),
-            None => Err(AppError::new(
-                ErrorKind::ForegroundGuard,
-                format!("{} の権限を確かめられないので送らない", describe()),
-            )
-            .with_hint(hint(Hint::Elevated, ctx.surface))),
-            _ => Ok(()),
-        }
+        judge_window(self.policy, w, &guard, place, situation)
     }
 
     /// screenshot。`settle` があれば、撮る前に `wait_stable` と同じ判定 (`watch_screen`) で落ち着くのを待ち、
@@ -3290,6 +3338,39 @@ mod tests {
         assert!(user_active(100, 3000));
         assert!(!user_active(3000, 3000));
         assert!(!user_active(5000, 3000));
+    }
+
+    /// focus の無操作の確認 (実行器と `__focus-helper` の子が共有。D-138): min_idle_ms が 0 なら無操作を読まない
+    #[test]
+    fn focus_idle_check_skips_read_when_min_idle_is_zero() {
+        let off = policy(&format!("{ENABLED}[capture]\nmin_idle_ms = 0\n"));
+        let r = focus_idle_check(
+            &off,
+            &|| panic!("min_idle_ms = 0 なら無操作を読まない"),
+            Surface::Cli,
+        );
+        assert!(r.is_ok(), "{r:?}");
+    }
+
+    /// 足りなければ 10 `user_active` (状況と次の手つき)、読み取りの失敗は `backend_error` の 8 (`os_error`)。足りれば通る
+    #[test]
+    fn focus_idle_check_reports_user_active_and_read_error() {
+        let p = policy(&format!("{ENABLED}[capture]\nmin_idle_ms = 1000\n"));
+        let e = focus_idle_check(&p, &|| Ok(10), Surface::Cli).unwrap_err();
+        assert_eq!(e.kind, ErrorKind::UserActive);
+        assert_eq!(
+            e.detail.as_deref(),
+            Some(&serde_json::json!({"idle_ms": 10, "min_idle_ms": 1000}))
+        );
+        assert_eq!(e.hint.as_deref(), Some(FOCUS_USER_ACTIVE_HINT));
+        let e = focus_idle_check(
+            &p,
+            &|| Err(BackendError::Os("読めない".into())),
+            Surface::Cli,
+        )
+        .unwrap_err();
+        assert_eq!(e.kind, ErrorKind::OsError, "{e:?}");
+        assert!(focus_idle_check(&p, &|| Ok(1000), Surface::Cli).is_ok());
     }
 
     /// 人が操作中 (最後の入力から capture.min_idle_ms 未満) なら前面にせず 10 (D-049 の判定を focus にも掛ける)。
