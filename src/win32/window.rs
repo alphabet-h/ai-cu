@@ -27,7 +27,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::device::{
-    HiddenWindow, StackWindow, TopWindow, WindowInfo, WindowOwner, WindowPresence,
+    CoverTraits, HiddenWindow, StackWindow, TopWindow, WindowInfo, WindowOwner, WindowPresence,
 };
 use crate::geometry::{Point, Rect};
 
@@ -362,16 +362,51 @@ pub fn top_level_windows_detailed() -> Vec<TopWindow> {
         .filter(|&h| {
             // 見えていて cloaked でない (判定の元は `hidden_state`。D-099)
             let visible = shown(h);
-            // SAFETY: 列挙で得たハンドルを渡すだけ。GWL_EXSTYLE の読み取りだけで、既に無いウィンドウなら 0 が返る。
-            let ex = unsafe { GetWindowLongW(h, GWL_EXSTYLE) } as u32;
+            let ex = ex_style(h);
             // ツールウィンドウかを見る前に全部の窓の題名を読むのはわざと (短絡させない): 自プロセスの
             // ツールウィンドウにもメッセージを送らない読みを、実機テスト
             // `fixture_real_window_reads_do_not_wait_on_stalled_own_window` で撃つため (D-105)
             let titled = !window_title(h).is_empty();
-            visible && titled && ex & WS_EX_TOOLWINDOW == 0
+            visible && listed_style(titled, ex)
         })
         .filter_map(|h| describe(h as usize))
         .collect()
+}
+
+/// 窓の拡張スタイル (`GWL_EXSTYLE`)。無効なハンドル (既に無い窓) なら 0。読み取りだけ。
+fn ex_style(h: HWND) -> u32 {
+    // SAFETY: ハンドルの値を渡すだけ。GWL_EXSTYLE の読み取りだけで、既に無いウィンドウなら 0 が返る。
+    unsafe { GetWindowLongW(h, GWL_EXSTYLE) as u32 }
+}
+
+/// 題名があり、ツールウィンドウ (`WS_EX_TOOLWINDOW`) でない窓の形か (`windows` の一覧に入る形。設定は見ない)。
+/// `top_level_windows_detailed` の絞り込みと、撮影の隠れの判定の読み (`cover_traits`。D-142) の両方が使う
+pub fn listed_style(titled: bool, ex: u32) -> bool {
+    titled && ex & WS_EX_TOOLWINDOW == 0
+}
+
+/// 覆う窓の性質 (撮影の隠れの判定。D-142)。`see_through` は `stack_window` の読みのまま (見えない、cloaked、最小化、
+/// 枠が取れない、読む途中で閉じられた窓は None)。`plain_top` は題名 (`window_title`。メッセージを送らない) と
+/// 拡張スタイルから `listed_style` で決める。題名と拡張スタイルは `stack_window` より先に読む: 読む途中で閉じられた
+/// 窓は題名が空や拡張スタイルが 0 に読めうる。`plain_top` が真に転ぶ側 (拡張スタイルが 0 でツールウィンドウの印が
+/// 消える) は隠れに数える向きなので安全で、偽に転ぶ側 (題名が空に読める) は `stack_window` の最後の `IsWindow`
+/// などで None に落ちる (None で、隠れに数える向き)。読み取りだけ。
+pub fn cover_traits(hwnd: usize) -> Option<CoverTraits> {
+    let h = hwnd as HWND;
+    let plain_top = listed_style(!window_title(h).is_empty(), ex_style(h));
+    let see_through = stack_window(hwnd)?.see_through;
+    Some(CoverTraits {
+        plain_top,
+        see_through,
+    })
+}
+
+/// 窓を作ったスレッドの id (`GetWindowThreadProcessId` の戻り値)。0 (無効なハンドル) なら None (D-142)。読み取りだけ。
+pub fn window_thread(hwnd: usize) -> Option<u32> {
+    // SAFETY: ハンドルの値を渡すだけ。pid の出力先は省略可能な引数 ([out, optional]) で、null なら書き込まない
+    // (Microsoft Learn の GetWindowThreadProcessId)。無効なハンドルなら 0 が返る。
+    let tid = unsafe { GetWindowThreadProcessId(hwnd as HWND, std::ptr::null_mut()) };
+    (tid != 0).then_some(tid)
 }
 
 /// 窓が下の窓を透かして写しうるか (D-077)。`ex` は拡張スタイル、`layered` は `GetLayeredWindowAttributes` の
@@ -549,8 +584,7 @@ pub fn stack_window(hwnd: usize) -> Option<StackWindow> {
         return None;
     }
     let (rect, exact_frame) = frame_rect_with_source(h)?;
-    // SAFETY: 同上。GWL_EXSTYLE の読み取りだけ (無効なハンドルなら 0 が返る)。
-    let ex = unsafe { GetWindowLongW(h, GWL_EXSTYLE) } as u32;
+    let ex = ex_style(h);
     let layered = if ex & WS_EX_LAYERED != 0 {
         layered_attributes(h)
     } else {
@@ -778,6 +812,23 @@ mod tests {
             WS_EX_LAYERED | WS_EX_TRANSPARENT,
             Some((LWA_ALPHA, 255))
         ));
+    }
+
+    /// 一覧に入る形 (題名があり、ツールウィンドウでない) の判定 (D-142)。題名が無いか、ツールウィンドウなら偽
+    #[test]
+    fn listed_style_needs_title_and_no_tool_window() {
+        assert!(listed_style(true, 0));
+        assert!(listed_style(true, WS_EX_LAYERED));
+        assert!(!listed_style(false, 0));
+        assert!(!listed_style(true, WS_EX_TOOLWINDOW));
+        assert!(!listed_style(false, WS_EX_TOOLWINDOW));
+    }
+
+    /// 無効なハンドル (0) では覆う窓の性質もスレッドも読めない (D-142。読めなければ隠れに数える向き)
+    #[test]
+    fn cover_traits_is_none_for_invalid_handle() {
+        assert_eq!(cover_traits(0), None);
+        assert_eq!(window_thread(0), None);
     }
 
     /// 見えているかの判定の元 (D-099): 見えて cloaked でなければ入れない (None)。見えて cloaked なら cloaked、

@@ -105,6 +105,16 @@ pub struct StackWindow {
     pub hung: bool,
 }
 
+/// 撮影の隠れの判定 (D-142) に使う、覆う窓の性質 (`Desktop::cover_traits`)。設定は見ない。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CoverTraits {
+    /// 題名があり、ツールウィンドウ (`WS_EX_TOOLWINDOW`) でない (`top_level_windows_detailed` の列挙に入る形)。
+    /// 偽ならツールチップやメニューのような、アプリの付属の表示
+    pub plain_top: bool,
+    /// 下の窓が透けて写りうる (`StackWindow::see_through` と同じ定義。D-077)
+    pub see_through: bool,
+}
+
 /// 見えないトップレベルの窓 (`windows` の `hidden_windows`。D-099)。`cloaked` が偽なら `IsWindowVisible` が偽、
 /// 真なら見えるが cloaked。cloaked の理由は別の仮想デスクトップに限らず、アプリ自身が隠した (`DWM_CLOAKED_APP`。
 /// 中断中のストアのアプリの枠など) や、持ち主から受け継いだ (`DWM_CLOAKED_INHERITED`) もある (理由の値は出さない)。
@@ -334,6 +344,12 @@ pub trait Desktop {
     /// 所有者の連鎖の根 (`GA_ROOTOWNER`)。所有者の無いウィンドウなら自分自身。モーダルダイアログが
     /// 対象に属するかの判定に使う (D-050)
     fn owner_root(&self, hwnd: usize) -> usize;
+    /// 覆う窓の性質 (題名があり、ツールウィンドウでないか / 透けるか)。撮影の隠れの判定 (D-142) に使う。
+    /// 読めなければ (見えない、閉じた、最小化、枠が取れない) None。読み取りだけ
+    fn cover_traits(&self, hwnd: usize) -> Option<CoverTraits>;
+    /// 窓を作ったスレッドの id (`GetWindowThreadProcessId` の戻り値)。0 (無効なハンドル) なら None。
+    /// 撮影の隠れの判定 (D-142) に使う。読み取りだけ
+    fn window_thread(&self, hwnd: usize) -> Option<u32>;
     /// UI Automation で、ウィンドウ自身とその子孫の要素を `query` で絞って返す (木の順。D-054)。
     /// 読み取りだけ。名前と文字列は画面上の情報なので、呼び出し側は撮影と同じ許可を求める
     fn ui_elements(

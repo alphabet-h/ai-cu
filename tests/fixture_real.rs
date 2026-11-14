@@ -1893,6 +1893,45 @@ fn fixture_real_at_point_root_is_listed_in_stack_windows() {
     );
 }
 
+/// 撮影の隠れの判定の読みの口 (D-142): フィクスチャ A の一部に重ねてフィクスチャ B を開く (`FixtureWindow::open` は
+/// `WS_EX_TOPMOST | WS_EX_TOOLWINDOW` で、窓ごとに別のスレッドで動く)。重なりの点の窓は B で pid は A と同じ、
+/// B の `cover_traits` は `plain_top` が偽 (ツールウィンドウ) で `see_through` が偽、A と B のスレッドは
+/// どちらも読めて互いに違う (別のスレッドの同じ pid の窓は D-142 で飛ばさない、の前提)。読み取りだけ (入力も撮影もしない)
+#[test]
+#[ignore = "実機のフィクスチャ限定。cargo test -- --ignored --test-threads=1"]
+fn fixture_real_cover_traits_of_tool_window() {
+    let a = Fixture::open("cover-a");
+    let b = Fixture::open_at("cover-b", 320);
+    let (ha, hb) = (a.win.hwnd(), b.win.hwnd());
+    let frame_a = window::describe(ha)
+        .and_then(|d| d.rect)
+        .expect("A の枠の矩形");
+    let frame_b = window::describe(hb)
+        .and_then(|d| d.rect)
+        .expect("B の枠の矩形");
+    // B の左端の少し内側で、A の枠の中にもある点 (重なり)
+    let p = Point::new(frame_b.x + 10, frame_b.center().y);
+    assert!(frame_a.contains(p), "点が A の枠の中: {p:?} {frame_a}");
+    let at = window::at_point(p).expect("重なりの点の窓");
+    assert_eq!(at.hwnd, hb, "重なりの点の窓は後から開いた B");
+    // A の中央は B の左端の列に当たる (320 ずらしで幅 640) ので、B に掛からない A の左寄りの点で A を引く
+    let pa = Point::new(frame_a.x + 10, frame_a.center().y);
+    assert!(!frame_b.contains(pa), "点が B の枠の外: {pa:?} {frame_b}");
+    let a_info = window::at_point(pa).expect("A の左寄りの点の窓");
+    assert_eq!(a_info.hwnd, ha, "A の左寄りの点の窓は A");
+    assert_eq!(at.pid, a_info.pid, "A と B は同じ pid");
+    let traits = window::cover_traits(hb).expect("B の性質が読める");
+    assert!(!traits.plain_top, "B はツールウィンドウ: {traits:?}");
+    assert!(!traits.see_through, "B は透けない: {traits:?}");
+    let ta = window::window_thread(ha).expect("A のスレッドが読める");
+    let tb = window::window_thread(hb).expect("B のスレッドが読める");
+    assert_ne!(ta, tb, "A と B は別のスレッド");
+    println!(
+        "FIXTURE cover_traits point={},{} a={ha:#x} b={hb:#x} pid={} traits={traits:?} thread_a={ta} thread_b={tb}",
+        p.x, p.y, at.pid
+    );
+}
+
 /// 撮影から外れる窓 (D-077): 層付きでないフィクスチャでも `GetWindowDisplayAffinity` が成功して値を返すこと
 /// (文書には「層付きの窓でだけ成功する」とあり、失敗すると外れた窓を覆いに数えて奥の deny の窓が写る) と、
 /// `WDA_EXCLUDEFROMCAPTURE` を付けると重なりの一覧で覆いとみなさないことを確かめる。付けるのは自分の窓だけで、

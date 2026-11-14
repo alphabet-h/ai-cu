@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 
 use crate::config::{EnvLookup, ProcessEnv, dev_forbid_active};
 use crate::device::{
-    BackendError, Desktop, FrameState, HeldInputs, HelperOutcome, HiddenWindow, Image, Indicator,
-    InputDesktop, InputEvent, InputLock, InputSink, StackWindow, TopWindow, WindowInfo,
+    BackendError, CoverTraits, Desktop, FrameState, HeldInputs, HelperOutcome, HiddenWindow, Image,
+    Indicator, InputDesktop, InputEvent, InputLock, InputSink, StackWindow, TopWindow, WindowInfo,
     WindowOwner, WindowPresence,
 };
 use crate::geometry::{Point, Rect};
@@ -399,6 +399,14 @@ impl Desktop for Win32Desktop {
 
     fn owner_root(&self, hwnd: usize) -> usize {
         win32::window::owner_root(hwnd)
+    }
+
+    fn cover_traits(&self, hwnd: usize) -> Option<CoverTraits> {
+        win32::window::cover_traits(hwnd)
+    }
+
+    fn window_thread(&self, hwnd: usize) -> Option<u32> {
+        win32::window::window_thread(hwnd)
     }
 
     fn ui_elements(
