@@ -2,6 +2,7 @@
 //! find の経路ではフォーカスと状態 (Toggle / SelectionItem / ExpandCollapse) とパスワードの要素か (IsPassword) も読む
 //! (D-089、D-090)。文字列を読む問い合わせでは IsPassword を先に読み、真の要素の文字列は読まずに飛ばす (D-090)。
 //! 入力の判定のために、システム全体のキーボードフォーカスの要素の IsPassword も読む (`focused_is_password`。D-090)。
+//! 右クリックとドロップの判定のために、点の下の要素の IsPassword も読む (`point_is_password`。D-149)。
 //! 呼び出しごとに専用のスレッドを立てて MTA で COM を初期化する (UIA のクライアントは窓を持たない MTA の
 //! スレッドから呼ぶ。Microsoft Learn「Understanding Threading Issues」)。主スレッドでは COM を初期化しない。
 
@@ -10,7 +11,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
-use windows::Win32::Foundation::{ERROR_TIMEOUT, HWND, RECT, S_OK};
+use windows::Win32::Foundation::{ERROR_TIMEOUT, HWND, POINT, RECT, S_OK};
 use windows::Win32::System::Com::{
     CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize,
 };
@@ -27,7 +28,7 @@ use crate::elements::{
     ElementQuery, Elements, ReadError, TreeSource, UiElement, UiTree, WalkStep, control_type_name,
     expand_collapse_state_name, skip_or_abort, toggle_state_name, walk_tree,
 };
-use crate::geometry::Rect;
+use crate::geometry::{Point, Rect};
 
 /// UIA の層の誤り (D-104)。時間切れ (上限つきの待ちの時間切れ、返らないスレッドの上限、UIA 自身の時間切れ (どの HRESULT かは `is_uia_timeout`。フォーカスの判定と、要素と木の読み (D-110))) を他の失敗と分け、
 /// 装置の層で `BackendError::TimedOut` に写す
@@ -254,7 +255,8 @@ const FOCUS_READ_LIMIT: Duration = Duration::from_millis(3 * FOCUS_TIMEOUT_MS as
 /// フォーカスの判定の終わっていないスレッドの数 (要素と木とは別に数え、別の窓が固まっても判定に響かない。D-104)
 static UIA_FOCUS_INFLIGHT: AtomicUsize = AtomicUsize::new(0);
 
-/// フォーカスの判定の組 (`FOCUS_READ_LIMIT`、`UIA_FOCUS_INFLIGHT`)
+/// フォーカスの判定の組 (`FOCUS_READ_LIMIT`、`UIA_FOCUS_INFLIGHT`)。点の下の要素の判定 (`point_is_password`) も
+/// 同じ組を使う (呼び出しの数は同じ 3 回の待ちで、時間切れと失敗の振り分けを 1 つに保つ。D-149)
 fn focus_bounds() -> Bounds {
     Bounds {
         name: "ai-cu-uia-focus",
@@ -319,10 +321,44 @@ pub fn focused_is_password() -> Result<Option<bool>, UiaError> {
 
 fn focused_is_password_on_mta_thread() -> Result<Option<bool>, UiaError> {
     let raw = read_focus_raw(|| {}).map_err(UiaError::Failed)?;
-    classify_focus(&raw)
+    classify_focus(&raw, GET_FOCUSED_ELEMENT)
 }
 
-/// 判定の 1 つの UIA の呼び出し (`GetFocusedElement`) の結果 (D-108)。`code` は Err の HRESULT (成功なら None。
+/// フォーカスの判定で要素を取る UIA の呼び出しの名前 (文に出す。D-108)
+const GET_FOCUSED_ELEMENT: &str = "GetFocusedElement";
+
+/// 点の判定で要素を取る UIA の呼び出しの名前 (文に出す。D-149)
+const ELEMENT_FROM_POINT: &str = "ElementFromPoint";
+
+/// 点 `p` (物理ピクセルの画面座標) の下の UIA の要素が IsPassword か (D-149。右クリックとドロップの入力の判定)。
+/// フォーカスの判定 (`focused_is_password`) と同じ上限と本数の組 (`focus_bounds`)、同じ生の読み
+/// (`read_element_raw`) と同じ振り分け (`classify_focus`) を使い、要素の取り方だけを `ElementFromPoint` にする。
+/// `ElementFromPoint` は物理座標を取る (Microsoft Learn「Understanding Screen Scaling Issues」。プロセスは
+/// Per-Monitor V2 を宣言している)。点の下に要素が無ければ (S_OK と null) `Ok(None)`、要素が消えていれば
+/// (`UIA_E_ELEMENTNOTAVAILABLE`) `Failed`。窓で絞らない (呼び出し側の門は `backend::uia_allowed` を点の下の根の窓に当てる)
+pub fn point_is_password(p: Point) -> Result<Option<bool>, UiaError> {
+    let b = focus_bounds();
+    run_bounded(
+        b.name,
+        b.limit,
+        b.inflight,
+        MAX_INFLIGHT_UIA_THREADS,
+        move || {
+            let pt = POINT { x: p.x, y: p.y };
+            let raw = read_element_raw(
+                // SAFETY: CoInitializeEx 済みのスレッドで作った有効な automation オブジェクト (read_element_raw の約束)。
+                //         POINT を値で渡すだけ。点の下に要素が無ければ S_OK と null が windows-core の Error::empty
+                //         (code が S_OK) に変換されて返るだけ (GetFocusedElement と同じ)。
+                |automation| unsafe { automation.ElementFromPoint(pt) },
+                || {},
+            )
+            .map_err(UiaError::Failed)?;
+            classify_focus(&raw, ELEMENT_FROM_POINT)
+        },
+    )
+}
+
+/// 判定の要素を取る UIA の呼び出し (`GetFocusedElement`、点の判定では `ElementFromPoint`。D-149) の結果 (D-108)。`code` は Err の HRESULT (成功なら None。
 /// S_OK は「要素が無い」)、`ms` は呼び出しの経過 (ミリ秒)
 #[doc(hidden)]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -345,9 +381,9 @@ pub struct PasswordRead {
 pub struct FocusRaw {
     /// `CUIAutomation8` を作れて、接続と処理の待ちの setter がどちらも成功したか
     pub short_timeouts: bool,
-    /// `GetFocusedElement` (Err の code が S_OK なら要素が無い)
+    /// 要素を取る呼び出し (`GetFocusedElement`、点の判定では `ElementFromPoint`。D-149)。Err の code が S_OK なら要素が無い
     pub focused: ProbeCall,
-    /// `GetFocusedElement` が要素を返したときだけ Some (型で矛盾した状態を作らない)
+    /// 要素を取る呼び出しが要素を返したときだけ Some (型で矛盾した状態を作らない)
     pub is_password: Option<PasswordRead>,
 }
 
@@ -362,13 +398,14 @@ pub struct FocusProbe {
     pub short_timeout_ms: u64,
 }
 
-/// `GetFocusedElement` の時間切れでない失敗の文 (D-108)。`text` は `HRESULT::message()` の文で、系の文が引けない
-/// HRESULT では空になるので、空なら HRESULT だけにする (末尾に空白を残さない)
-fn focus_failed_text(hr: HRESULT, text: &str) -> String {
+/// 要素を取る呼び出し `api` (`GetFocusedElement` か `ElementFromPoint`) の時間切れでない失敗の文 (D-108、D-149)。
+/// `text` は `HRESULT::message()` の文で、系の文が引けない HRESULT では空になるので、空なら HRESULT だけにする
+/// (末尾に空白を残さない)
+fn focus_failed_text(api: &str, hr: HRESULT, text: &str) -> String {
     if text.is_empty() {
-        format!("GetFocusedElement: {hr}")
+        format!("{api}: {hr}")
     } else {
-        format!("GetFocusedElement: {hr} {text}")
+        format!("{api}: {hr} {text}")
     }
 }
 
@@ -383,12 +420,27 @@ fn elapsed_ms(start: Instant) -> u64 {
 /// `between` は COM を MTA で初期化したこのスレッドで、UIA のオブジェクトを持ったまま走る。COM のオブジェクトを
 /// スレッドの外へ持ち出さない閉包だけを渡す (計測の入口では、上限で切り離された後に走りうる)
 fn read_focus_raw(between: impl FnOnce()) -> Result<FocusRaw, String> {
+    read_element_raw(
+        // SAFETY: CoInitializeEx 済みのスレッドで作った有効な automation オブジェクト (read_element_raw の約束)。
+        //         フォーカスの要素が無ければ S_OK と null が windows-core の Error::empty (code が S_OK) に変換されて
+        //         返るだけ (walker_step と同じ)。
+        |automation| unsafe { automation.GetFocusedElement() },
+        between,
+    )
+}
+
+/// 生の読みの本体 (D-108、D-149)。COM を MTA で初期化し、縮めた待ちの入口を作って、要素の取り方 `get`
+/// (`GetFocusedElement` か `ElementFromPoint`。経過を測り、`FocusRaw::focused` に入れる) → `between()` → 要素があれば
+/// `CurrentIsPassword` (経過を測る) の順に呼ぶ。`get` は COM を MTA で初期化したこのスレッドで、このスレッドで作った
+/// 有効な入口を受けて呼ばれる。返した要素はこの関数の中で Release される。`between` の約束は `read_focus_raw` のとおり
+fn read_element_raw(
+    get: impl FnOnce(&IUIAutomation) -> windows::core::Result<IUIAutomationElement>,
+    between: impl FnOnce(),
+) -> Result<FocusRaw, String> {
     let _apartment = ComApartment::init_mta()?;
     let (automation, short_timeouts) = automation_with_short_timeouts()?;
     let start = Instant::now();
-    // SAFETY: CoInitializeEx 済みのスレッドで作った有効な automation オブジェクト。フォーカスの要素が無ければ
-    //         S_OK と null が windows-core の Error::empty (code が S_OK) に変換されて返るだけ (walker_step と同じ)。
-    let got = unsafe { automation.GetFocusedElement() };
+    let got = get(&automation);
     let ms = elapsed_ms(start);
     let (focused, element) = match got {
         Ok(el) => (ProbeCall { code: None, ms }, Some(el)),
@@ -419,12 +471,13 @@ fn read_focus_raw(between: impl FnOnce()) -> Result<FocusRaw, String> {
     })
 }
 
-/// 生の読みを判定の戻り値に振り分ける純関数 (D-104、D-108)。`GetFocusedElement` の Err は、S_OK (要素が無い) なら
-/// `Ok(None)`、UIA の時間切れ (`is_uia_timeout`) なら `TimedOut`、他は `Failed` (文は HRESULT と
+/// 生の読みを判定の戻り値に振り分ける純関数 (D-104、D-108)。要素を取る呼び出し `api` (`GetFocusedElement`、
+/// 点の判定では `ElementFromPoint`。D-149) の Err は、S_OK (要素が無い) なら
+/// `Ok(None)`、UIA の時間切れ (`is_uia_timeout`) なら `TimedOut`、他は `Failed` (文は `api` の名前と HRESULT と
 /// `HRESULT::message()`。`windows::core::Error::from(HRESULT)` は `GetErrorInfo` を呼んでスレッドの誤り情報を
 /// 消費するので使わない)。要素があれば、`CurrentIsPassword` の Ok(b) は `Ok(Some(b))`、時間切れは `TimedOut`、
 /// 他の Err は `Ok(None)` (読めなければ通す)。要素があるのに IsPassword の読みが無い形も `Ok(None)`
-fn classify_focus(raw: &FocusRaw) -> Result<Option<bool>, UiaError> {
+fn classify_focus(raw: &FocusRaw, api: &str) -> Result<Option<bool>, UiaError> {
     if let Some(code) = raw.focused.code {
         let hr = HRESULT(code);
         if hr == S_OK {
@@ -432,10 +485,10 @@ fn classify_focus(raw: &FocusRaw) -> Result<Option<bool>, UiaError> {
         }
         if is_uia_timeout(hr) {
             return Err(UiaError::TimedOut(format!(
-                "GetFocusedElement が UIA の時間切れ ({hr})"
+                "{api} が UIA の時間切れ ({hr})"
             )));
         }
-        return Err(UiaError::Failed(focus_failed_text(hr, &hr.message())));
+        return Err(UiaError::Failed(focus_failed_text(api, hr, &hr.message())));
     }
     match &raw.is_password {
         None => Ok(None),
@@ -483,7 +536,7 @@ pub fn probe_focused_password(
         MAX_INFLIGHT_UIA_THREADS,
         move || {
             let raw = read_focus_raw(between).map_err(UiaError::Failed)?;
-            let classified = classify_focus(&raw);
+            let classified = classify_focus(&raw, GET_FOCUSED_ELEMENT);
             Ok(FocusProbe {
                 raw,
                 classified,
@@ -1267,9 +1320,14 @@ mod tests {
             HRESULT(UIA_E_TIMEOUT as i32),
             HRESULT::from_win32(ERROR_TIMEOUT.0),
         ];
-        assert_eq!(classify_focus(&raw(Some(S_OK), None)), Ok(None));
+        assert_eq!(
+            classify_focus(&raw(Some(S_OK), None), GET_FOCUSED_ELEMENT),
+            Ok(None)
+        );
         for t in timeouts {
-            let Err(UiaError::TimedOut(m)) = classify_focus(&raw(Some(t), None)) else {
+            let Err(UiaError::TimedOut(m)) =
+                classify_focus(&raw(Some(t), None), GET_FOCUSED_ELEMENT)
+            else {
                 panic!("GetFocusedElement の {t} が TimedOut でない");
             };
             assert!(
@@ -1277,7 +1335,9 @@ mod tests {
                 "{m}"
             );
         }
-        let Err(UiaError::Failed(m)) = classify_focus(&raw(Some(E_FAIL), None)) else {
+        let Err(UiaError::Failed(m)) =
+            classify_focus(&raw(Some(E_FAIL), None), GET_FOCUSED_ELEMENT)
+        else {
             panic!("GetFocusedElement の E_FAIL が Failed でない");
         };
         assert!(
@@ -1286,17 +1346,25 @@ mod tests {
         );
         // 系の文が空のときは HRESULT だけにし、末尾に空白を残さない (win32-reviewer の nit)
         assert_eq!(
-            focus_failed_text(E_FAIL, ""),
+            focus_failed_text(GET_FOCUSED_ELEMENT, E_FAIL, ""),
             "GetFocusedElement: 0x80004005"
         );
         assert_eq!(
-            focus_failed_text(E_FAIL, "Unspecified error"),
+            focus_failed_text(GET_FOCUSED_ELEMENT, E_FAIL, "Unspecified error"),
             "GetFocusedElement: 0x80004005 Unspecified error"
         );
-        assert_eq!(classify_focus(&raw(None, Some(Ok(true)))), Ok(Some(true)));
-        assert_eq!(classify_focus(&raw(None, Some(Ok(false)))), Ok(Some(false)));
+        assert_eq!(
+            classify_focus(&raw(None, Some(Ok(true))), GET_FOCUSED_ELEMENT),
+            Ok(Some(true))
+        );
+        assert_eq!(
+            classify_focus(&raw(None, Some(Ok(false))), GET_FOCUSED_ELEMENT),
+            Ok(Some(false))
+        );
         for t in timeouts {
-            let Err(UiaError::TimedOut(m)) = classify_focus(&raw(None, Some(Err(t)))) else {
+            let Err(UiaError::TimedOut(m)) =
+                classify_focus(&raw(None, Some(Err(t))), GET_FOCUSED_ELEMENT)
+            else {
                 panic!("CurrentIsPassword の {t} が TimedOut でない");
             };
             assert!(
@@ -1305,9 +1373,46 @@ mod tests {
             );
         }
         let gone = HRESULT(UIA_E_ELEMENTNOTAVAILABLE as i32);
-        assert_eq!(classify_focus(&raw(None, Some(Err(gone)))), Ok(None));
-        assert_eq!(classify_focus(&raw(None, Some(Err(E_FAIL)))), Ok(None));
-        assert_eq!(classify_focus(&raw(None, None)), Ok(None));
+        assert_eq!(
+            classify_focus(&raw(None, Some(Err(gone))), GET_FOCUSED_ELEMENT),
+            Ok(None)
+        );
+        assert_eq!(
+            classify_focus(&raw(None, Some(Err(E_FAIL))), GET_FOCUSED_ELEMENT),
+            Ok(None)
+        );
+        assert_eq!(
+            classify_focus(&raw(None, None), GET_FOCUSED_ELEMENT),
+            Ok(None)
+        );
+    }
+
+    /// 点の判定 (D-149) では、要素を取る呼び出しの失敗と時間切れの文に `ElementFromPoint` の名前が出て、
+    /// `GetFocusedElement` は出ない。点の下に要素が無い (S_OK) のは通し、IsPassword の振り分けはフォーカスと同じ
+    #[test]
+    fn classify_point_failure_names_element_from_point() {
+        let Err(UiaError::Failed(m)) = classify_focus(&raw(Some(E_FAIL), None), ELEMENT_FROM_POINT)
+        else {
+            panic!("ElementFromPoint の E_FAIL が Failed でない");
+        };
+        assert!(m.starts_with("ElementFromPoint: 0x80004005"), "{m}");
+        assert!(!m.contains(GET_FOCUSED_ELEMENT), "{m}");
+        for t in timeout_codes() {
+            let Err(UiaError::TimedOut(m)) =
+                classify_focus(&raw(Some(t), None), ELEMENT_FROM_POINT)
+            else {
+                panic!("ElementFromPoint の {t} が TimedOut でない");
+            };
+            assert_eq!(m, format!("ElementFromPoint が UIA の時間切れ ({t})"));
+        }
+        assert_eq!(
+            classify_focus(&raw(Some(S_OK), None), ELEMENT_FROM_POINT),
+            Ok(None)
+        );
+        assert_eq!(
+            classify_focus(&raw(None, Some(Ok(true))), ELEMENT_FROM_POINT),
+            Ok(Some(true))
+        );
     }
 
     /// 計測の入口は上限 20 秒で、判定とも要素と木とも別の数を使う (D-108)

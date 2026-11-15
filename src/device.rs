@@ -371,6 +371,9 @@ pub trait Desktop {
     /// 読めなかった (フォーカスの要素が無い、IsPassword が読めない)。入力の判定の一部で、画面の情報は返さない
     /// (D-090)。読み取りだけ
     fn focused_is_password(&self) -> Result<Option<bool>, BackendError>;
+    /// 点 `p` (物理ピクセルの画面座標) の下の UIA の要素がパスワードの要素か。`Ok(None)` は読めなかった。
+    /// 入力の判定の一部で画面の情報は返さない (D-149)。読み取りだけ
+    fn point_is_password(&self, p: Point) -> Result<Option<bool>, BackendError>;
 }
 
 /// `find_window` の一致の規則 (純関数。実装置もモックもこれを使う)。
