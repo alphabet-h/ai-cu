@@ -835,7 +835,8 @@ pub fn judge_window(
         .with_hint(hint(Hint::HostWindow, guard.surface)));
     }
     // 応答しないアプリの代わりに OS が出すゴーストの窓には、設定にかかわらず送らない (D-119)。
-    // 持ち主は OS のプロセスなので deny の設定に当たらず、元のアプリは応答しないので届いても意味が無い
+    // 持ち主は OS のプロセスなので deny の設定に当たるとは限らず (名前が読めなければ deny.processes の層で
+    // 断られる。D-145)、元のアプリは応答しないので届いても意味が無い
     // (ゴーストの閉じるボタンはアプリを強制終了する確認を出す)
     if is_ghost_window(w) {
         return Err(AppError::new(
@@ -6221,7 +6222,9 @@ mod tests {
         assert_eq!(e.to_json()["error"]["detail"]["point"]["x"], 550);
     }
 
-    /// OS のゴーストの窓 (持ち主の読みは空、権限は読めたことにする) と、deny だけの設定 (ゴーストは deny に当たらない)
+    /// OS のゴーストの窓 (持ち主の読みは空、権限は読めたことにする) と、deny.classes だけの設定 (ゴーストは deny に
+    /// 当たらない)。deny.processes を持つ設定では、名前の空いたゴーストは設定でも断られる (D-145) ので、ここでは
+    /// ゴーストの判定そのもの (D-119) を確かめるために deny.processes を持たせない
     fn ghost_under_point_world() -> (Rc<RefCell<World>>, Policy) {
         let mut ghost = window("", "Ghost");
         ghost.hwnd = 0x50;
@@ -6230,7 +6233,7 @@ mod tests {
         w.default_window = Some(top(0x20, "notepad.exe", "a.txt").info);
         w.windows_at = vec![(Rect::new(500, 0, 100, 100), ghost.clone())];
         w.foreground = Some(ghost);
-        let p = policy(&format!("{ENABLED}[deny]\nprocesses=[\"zed.exe\"]\n"));
+        let p = policy(&format!("{ENABLED}[deny]\nclasses=[\"ZedWindow\"]\n"));
         (w.shared(), p)
     }
 
@@ -6261,6 +6264,84 @@ mod tests {
             &script(r#"{"type":"click","x":550,"y":50}"#),
         );
         assert!(r.is_ok(), "{r:?}");
+    }
+
+    /// プロセス名を読めない窓 (権限は読めた) には、deny.processes の層があれば前面 (type) にも座標の下 (click)
+    /// にも送らない (7、rule は deny.processes、fix なし。D-145)。deny の無い設定では今までどおり通る
+    #[test]
+    fn guards_refuse_unreadable_process_name_with_deny_list() {
+        let mut unreadable = window("", "SomeClass");
+        unreadable.hwnd = 0x60;
+        let world_with = |w: &WindowInfo| {
+            let mut world = World::new();
+            world.foreground = Some(w.clone());
+            world.default_window = Some(w.clone());
+            world.windows_at = vec![(Rect::new(500, 0, 100, 100), w.clone())];
+            world.shared()
+        };
+        let deny = policy(&format!("{ENABLED}[deny]\nprocesses=[\"zed.exe\"]\n"));
+        for action in [
+            r#"{"type":"type","text":"x"}"#,
+            r#"{"type":"click","x":550,"y":50}"#,
+        ] {
+            let world = world_with(&unreadable);
+            let (r, _) = exec(&world, &deny, &mut StopSet::new(), &script(action));
+            let e = r.unwrap_err();
+            assert_eq!(e.kind, ErrorKind::ForegroundGuard, "{action}: {e}");
+            let v = e.to_json();
+            assert_eq!(v["error"]["rule"], "deny.processes", "{action}: {v}");
+            assert!(v["error"].get("fix").is_none(), "{action}: {v}");
+            assert_eq!(detail(&e)["window"]["class"], "SomeClass", "{action}");
+            assert!(world.borrow().sent.is_empty(), "{action}: 何も送らない");
+        }
+        // deny の無い設定では通る
+        let world = world_with(&unreadable);
+        let (r, _) = exec(
+            &world,
+            &policy(ENABLED),
+            &mut StopSet::new(),
+            &script(r#"{"type":"type","text":"x"}"#),
+        );
+        assert!(r.is_ok(), "{r:?}");
+    }
+
+    /// 名指しと一覧の述語 (D-139) も、deny.processes の設定では名前を読めない窓を通さない (D-145)。
+    /// `windows` の一覧と前面に出ない。deny の無い設定では通る
+    #[test]
+    fn named_window_admitted_refuses_unreadable_name_only_with_deny_list() {
+        let w = window("", "X");
+        let deny = policy(&format!("{ENABLED}[deny]\nprocesses=[\"zed.exe\"]\n"));
+        assert!(!named_window_admitted(&deny, &w, &[], None));
+        assert!(!crate::cli::window_allowed(&deny, &w, &[]));
+        let open = policy(ENABLED);
+        assert!(named_window_admitted(&open, &w, &[], None));
+        assert!(crate::cli::window_allowed(&open, &w, &[]));
+    }
+
+    /// 正規化で空になる process (`.exe`) の名指しは、deny.processes の設定では名前を読めない窓に解けず、
+    /// 窓が無いときと同じ 11 の not_found (D-145)。deny の無い設定では今までどおりその窓に解ける
+    #[test]
+    fn focus_with_name_normalizing_to_empty_misses_unreadable_window_with_deny_list() {
+        let s = script(r#"{"type":"focus","process":".exe"}"#);
+        let world_of = || {
+            let mut w = World::new();
+            w.foreground = Some(terminal());
+            w.top = vec![top(0x30, "", "t")];
+            w.shared()
+        };
+        let deny = policy(&format!("{ENABLED}[deny]\nprocesses=[\"zed.exe\"]\n"));
+        let world = world_of();
+        let (r, _) = exec(&world, &deny, &mut StopSet::new(), &s);
+        let e = r.unwrap_err();
+        assert_eq!(e.kind, ErrorKind::FocusFailed, "{e}");
+        assert_eq!(e.reason, Some(reason::NOT_FOUND));
+        assert_eq!(e.hint.as_deref(), Some(FOCUS_NOT_FOUND_HINT));
+        assert!(world.borrow().focus_calls.is_empty(), "前面にしない");
+        // deny の無い設定では、同じ操作列がその窓に解ける (今の main の挙動)
+        let world = world_of();
+        let (r, _) = exec(&world, &policy(ENABLED), &mut StopSet::new(), &s);
+        assert!(r.is_ok(), "{r:?}");
+        assert_eq!(world.borrow().focus_calls, vec![0x30]);
     }
 
     /// 前面がゴーストの窓なら、キーと文字も送らない (クラス名の大文字小文字は区別しない。D-119)
