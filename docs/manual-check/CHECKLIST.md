@@ -413,6 +413,7 @@ Start-Sleep -Seconds 4; & $cu run (Join-Path $dir sample-focus.json); $LASTEXITC
 & $cu run target/manual-check/s17-tip.json; $LASTEXITCODE
 ```
 - [ ] 終了コード `0` で、png にツールチップが写る (出なかったら `wait` を延ばして 1 回だけ打ち直す)。0 だけでは D-142 の例外が効いたことは確かめられない (所有の例外でも、間引きの点に掛からなくても 0 になる)。写り込みが無いこと (ツールチップ以外の窓が写らない) を見る確認で、ツールチップの縁や影の下に別の窓が写っていないかも見る
+- [ ] 出力の `screenshots[0].window` の `title` がメモ帳の本体の題名で、`PopupHost` (ツールチップの窓) ではない。`screenshots[0]` の `width` と `height` がツールチップの小さな矩形ではなく、本体の矩形 (`windows` に出るメモ帳の `rect` の `w` と `h`) と合う (process だけの名指しでポップアップらしい窓を後に回す。D-143)
 - [ ] 7 なら `error.detail.window` の `class` と `pid` (対象と同じか)、`see_through`、`point` と、覆う窓のスレッドが対象と同じか (分からなければ未確認) を記録する。覆う窓が端末なら `focus` が効いていない (D-142 とは無関係)。同じ pid で D-142 の判定 (同じ pid・同じスレッド・題名が無いかツールウィンドウ・透けない) に当たらない窓 (別のスレッド、題名がありツールウィンドウでない、透ける) なら、D-142 の覆る条件として記録する
 - [ ] 基本の層の `allow.actions` に `move` か `wait` が無く 4 になったら、設定を変えずに記録して止める
 
