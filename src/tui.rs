@@ -317,8 +317,8 @@ impl Field {
                 "無効なら、対象のウィンドウなど一部の領域しか撮れない (作業中の画面が丸ごと写るのを防ぐ)。",
             ],
             Field::CaptureIdleMs => vec![
-                "shot と focus (操作列でウィンドウを前面にする) の直前に、人の最後の入力からこれ以上の無操作を求める (ミリ秒)。",
-                "満たさなければ撮らず、前面にもせずに終了コード 10 で断る。0 なら求めない。ai-cu 自身の run の直後も数える。",
+                "shot、pixel、focus (操作列でウィンドウを前面にする) の直前に、人の最後の入力からこれ以上の無操作を求める (ミリ秒)。",
+                "満たさなければ撮らず、色も読まず、前面にもせずに終了コード 10 で断る。0 なら求めない。ai-cu 自身の run の直後も数える。",
             ],
             Field::CaptureSaveDirs => vec![
                 "撮影の保存先を、このフォルダのどれかの下に限る。",
@@ -625,7 +625,7 @@ pub fn widening_changes(old: &Config, new: &Config) -> Vec<String> {
     }
     if new.capture.min_idle_ms < old.capture.min_idle_ms {
         out.push(format!(
-            "無操作の時間を短くする (人の操作中でも shot と focus を断りにくくなる。{} → {} ms)",
+            "無操作の時間を短くする (人の操作中でも shot、pixel、focus を断りにくくなる。{} → {} ms)",
             old.capture.min_idle_ms, new.capture.min_idle_ms
         ));
     }

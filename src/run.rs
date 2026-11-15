@@ -566,19 +566,48 @@ pub fn check_sensitive_capture(
     self_hwnd: Option<usize>,
     surface: Surface,
 ) -> Result<(), AppError> {
+    check_sensitive_capture_rects(
+        desktop,
+        policy,
+        std::slice::from_ref(rect),
+        host_pids,
+        self_hwnd,
+        surface,
+        Hint::CaptureSensitive,
+    )
+}
+
+/// 撮る矩形がいくつもあるときの、機密のウィンドウの判定 (D-077、D-146)。窓の重なり (`stack_windows`) は 1 回だけ読み、
+/// 矩形ごとに当て、最初に当たった矩形で `check_sensitive_capture` と同じ 7 (文、`error.detail`、`rule`) を返す。
+/// 次の手は `on_hit` の文。どの層にも deny のプロセスかクラスが無ければ窓を列挙しない
+pub fn check_sensitive_capture_rects(
+    desktop: &dyn Desktop,
+    policy: &Policy,
+    rects: &[Rect],
+    host_pids: &[u32],
+    self_hwnd: Option<usize>,
+    surface: Surface,
+    on_hit: Hint,
+) -> Result<(), AppError> {
     if !policy.has_window_deny() {
         return Ok(());
     }
     let stack = desktop.stack_windows().map_err(backend_error)?;
-    match sensitive_window_hit(&stack, policy, rect, host_pids, self_hwnd) {
+    let hit = rects.iter().find_map(|rect| {
+        sensitive_window_hit(&stack, policy, rect, host_pids, self_hwnd).map(|h| (rect, h))
+    });
+    match hit {
         None => Ok(()),
         // rule だけを写し、fix は付けない (設定を緩めるよう頼ませない。D-077、D-079)
-        Some(SensitiveHit {
-            window: w,
-            visible,
-            rule,
-            ghost,
-        }) => Err(AppError::new(
+        Some((
+            rect,
+            SensitiveHit {
+                window: w,
+                visible,
+                rule,
+                ghost,
+            },
+        )) => Err(AppError::new(
             ErrorKind::ForegroundGuard,
             format!(
                 "撮る矩形 {rect} に、設定で拒否されたウィンドウ (process={:?}, class={:?}) が見えている{}",
@@ -591,7 +620,7 @@ pub fn check_sensitive_capture(
                 }
             ),
         )
-        .with_hint(hint(Hint::CaptureSensitive, surface))
+        .with_hint(hint(on_hit, surface))
         .with_detail(serde_json::json!({ "window": window_detail(&w), "visible": visible }))
         .with_deny(rule, None)),
     }
@@ -880,22 +909,37 @@ pub fn focus_idle_check(
     idle_ms: &dyn Fn() -> Result<u64, BackendError>,
     surface: Surface,
 ) -> Result<(), AppError> {
+    match idle_refusal(policy, idle_ms, "前面にしない")? {
+        Some((e, idle, min_idle)) => Err(e
+            .with_detail(idle_detail(idle, min_idle))
+            .with_hint(hint(Hint::FocusUserActive, surface))),
+        None => Ok(()),
+    }
+}
+
+/// 無操作の判定の核 (D-049、D-146)。`capture.min_idle_ms` が 0 なら無操作を読まずに `None`。読み取りの失敗は
+/// `backend_error`。人が操作中なら、kind `UserActive` で「人が操作中なので{verb}」の文の誤りと、読んだ無操作と
+/// 下限を返す。`error.detail` と hint は付けない (呼び手が付ける: focus は detail と hint、shot は何も、pixel は hint だけ)
+pub(crate) fn idle_refusal(
+    policy: &Policy,
+    idle_ms: &dyn Fn() -> Result<u64, BackendError>,
+    verb: &str,
+) -> Result<Option<(AppError, u64, u64)>, AppError> {
     let min_idle = policy.capture_min_idle_ms();
     if min_idle == 0 {
-        return Ok(());
+        return Ok(None);
     }
     let idle = idle_ms().map_err(backend_error)?;
-    if user_active(idle, min_idle) {
-        return Err(AppError::new(
-            ErrorKind::UserActive,
-            format!(
-                "人が操作中なので前面にしない (最後の入力から {idle} ms。{min_idle} ms 以上の無操作が要る: capture.min_idle_ms)"
-            ),
-        )
-        .with_detail(idle_detail(idle, min_idle))
-        .with_hint(hint(Hint::FocusUserActive, surface)));
+    if !user_active(idle, min_idle) {
+        return Ok(None);
     }
-    Ok(())
+    let e = AppError::new(
+        ErrorKind::UserActive,
+        format!(
+            "人が操作中なので{verb} (最後の入力から {idle} ms。{min_idle} ms 以上の無操作が要る: capture.min_idle_ms)"
+        ),
+    );
+    Ok(Some((e, idle, min_idle)))
 }
 
 /// 実行器が操作に入った後の失敗に、その時点の進み具合 (`RunReport` と `partial`) を付け、何か済んでいれば
@@ -3483,6 +3527,35 @@ mod tests {
         assert!(focus_idle_check(&p, &|| Ok(1000), Surface::Cli).is_ok());
     }
 
+    /// 無操作の判定の核 (D-146): min_idle_ms が 0 なら読まない。操作中なら動詞を差し込んだ 10 の文と、読んだ値と下限を
+    /// 返し、detail と hint は付けない (呼び手が付ける)。足りれば None、読み取りの失敗は 8
+    #[test]
+    fn idle_refusal_returns_bare_error_with_verb() {
+        let off = policy(&format!("{ENABLED}[capture]\nmin_idle_ms = 0\n"));
+        assert!(
+            idle_refusal(&off, &|| panic!("読まない"), "読まない")
+                .unwrap()
+                .is_none()
+        );
+        let p = policy(&format!("{ENABLED}[capture]\nmin_idle_ms = 1000\n"));
+        let (e, idle, min_idle) = idle_refusal(&p, &|| Ok(10), "読まない").unwrap().unwrap();
+        assert_eq!((idle, min_idle), (10, 1000));
+        assert_eq!(e.kind, ErrorKind::UserActive);
+        assert!(
+            e.message.starts_with("人が操作中なので読まない ("),
+            "{}",
+            e.message
+        );
+        assert!(e.detail.is_none() && e.hint.is_none(), "{e:?}");
+        assert!(
+            idle_refusal(&p, &|| Ok(1000), "読まない")
+                .unwrap()
+                .is_none()
+        );
+        let e = idle_refusal(&p, &|| Err(BackendError::Os("x".into())), "読まない").unwrap_err();
+        assert_eq!(e.kind, ErrorKind::OsError);
+    }
+
     /// 人が操作中 (最後の入力から capture.min_idle_ms 未満) なら前面にせず 10 (D-049 の判定を focus にも掛ける)。
     /// 既に前面なら判定しない。min_idle_ms が 0 なら見ない
     #[test]
@@ -5429,6 +5502,81 @@ mod tests {
         let (_, visible) =
             sensitive_window(&[zed], &p, &Rect::new(150, 0, 1000, 250), &[], None).unwrap();
         assert_eq!(visible, Rect::new(150, 100, 150, 150));
+    }
+
+    /// 矩形がいくつもあるときの機密の窓の判定 (D-146): 窓の重なりは 1 回だけ読み、最初に当たった矩形で、その矩形を
+    /// 1 つで渡した `check_sensitive_capture` と同じ 7 (文、detail、rule) を返す。次の手だけが `on_hit` の文。
+    /// どれにも当たらなければ通り、deny の窓の規則が無ければ列挙しない
+    #[test]
+    fn check_sensitive_capture_rects_reads_stack_once_and_refuses_first_hit() {
+        let p = deny_zed();
+        let world = World::new().shared();
+        world.borrow_mut().stack = vec![stacked(terminal(), Rect::new(100, 100, 200, 200), false)];
+        let desktop = MockDesktop(world.clone());
+        let rects = [
+            Rect::new(0, 0, 10, 10),
+            Rect::new(150, 150, 1, 1),
+            Rect::new(200, 200, 1, 1),
+        ];
+        let e = check_sensitive_capture_rects(
+            &desktop,
+            &p,
+            &rects,
+            &[],
+            None,
+            Surface::Cli,
+            Hint::PixelSensitive,
+        )
+        .unwrap_err();
+        assert_eq!(world.borrow().stack_calls, 1, "窓の重なりは 1 回だけ読む");
+        assert_eq!(e.kind, ErrorKind::ForegroundGuard);
+        assert!(e.message.contains("撮る矩形 150,150,1,1"), "{}", e.message);
+        assert_eq!(
+            e.hint.as_deref(),
+            Some(hint(Hint::PixelSensitive, Surface::Cli))
+        );
+        let one =
+            check_sensitive_capture(&desktop, &p, &rects[1], &[], None, Surface::Cli).unwrap_err();
+        assert_eq!(e.message, one.message);
+        assert_eq!(e.detail, one.detail);
+        assert_eq!(
+            e.deny.as_ref().map(|d| d.rule),
+            one.deny.as_ref().map(|d| d.rule)
+        );
+        assert_eq!(e.deny.as_ref().map(|d| d.rule), Some("deny.processes"));
+        assert_eq!(one.hint.as_deref(), Some(CAPTURE_SENSITIVE_HINT));
+        let detail = e.detail.as_deref().unwrap();
+        assert_eq!(detail["window"]["hwnd"], 0x10);
+        assert_eq!(
+            detail["visible"],
+            serde_json::to_value(Rect::new(150, 150, 1, 1)).unwrap()
+        );
+        // どれにも当たらなければ通る (読みは 1 回)
+        let before = world.borrow().stack_calls;
+        let miss = [Rect::new(0, 0, 10, 10), Rect::new(400, 400, 1, 1)];
+        check_sensitive_capture_rects(
+            &desktop,
+            &p,
+            &miss,
+            &[],
+            None,
+            Surface::Cli,
+            Hint::PixelSensitive,
+        )
+        .unwrap();
+        assert_eq!(world.borrow().stack_calls, before + 1);
+        // deny の窓の規則が無ければ列挙しない
+        check_sensitive_capture_rects(
+            &desktop,
+            &policy(ENABLED),
+            &rects,
+            &[],
+            None,
+            Surface::Cli,
+            Hint::PixelSensitive,
+        )
+        .unwrap();
+        assert_eq!(world.borrow().stack_calls, before + 1);
     }
 
     /// 透けうる窓 (see_through) は覆いにしない。deny の窓より奥の窓は、どれだけ大きく不透明でも覆いにしない (D-077)

@@ -70,6 +70,17 @@ pub fn downscale(img: &Image, scale: f64) -> Image {
     }
 }
 
+/// 画像の点 (x, y) の色を `#RRGGBB` (大文字の 16 進) で返す (D-146)。アルファは見ない。
+/// 画像の外、または画素の数が大きさに足りなければ None
+pub fn hex_color(img: &Image, x: u32, y: u32) -> Option<String> {
+    if x >= img.width || y >= img.height {
+        return None;
+    }
+    let i = ((y as usize) * (img.width as usize) + (x as usize)) * 4;
+    let p = img.rgba.get(i..i + 3)?;
+    Some(format!("#{:02X}{:02X}{:02X}", p[0], p[1], p[2]))
+}
+
 /// 実際に使う縮尺 (D-072): `scale` と `max_edge / 長辺` の小さい方。縮める向きだけで、
 /// `max_edge` が無い、長辺が 0、長辺が `max_edge` 以下なら `scale` のまま。長辺は撮る矩形の `max(w, h)` (物理ピクセル)。
 /// `Some(0)` は呼び出し側の形の確認で弾く (debug では panic)。
@@ -330,6 +341,31 @@ impl ImageWriter for PngFileWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 点の色 (D-146): RGBA の R・G・B を大文字の 16 進で `#RRGGBB` にし、アルファは見ない。画像の外は None
+    #[test]
+    fn hex_color_reads_rgb_uppercase_and_none_outside() {
+        let img = Image {
+            width: 2,
+            height: 2,
+            rgba: vec![
+                0x19, 0x23, 0x1e, 0xff, 0x00, 0x00, 0x00, 0x00, //
+                0x01, 0xab, 0xcd, 0x10, 0xff, 0xff, 0xff, 0xff,
+            ],
+        };
+        assert_eq!(hex_color(&img, 0, 0).as_deref(), Some("#19231E"));
+        assert_eq!(hex_color(&img, 1, 0).as_deref(), Some("#000000"));
+        assert_eq!(hex_color(&img, 0, 1).as_deref(), Some("#01ABCD"));
+        assert_eq!(hex_color(&img, 1, 1).as_deref(), Some("#FFFFFF"));
+        assert_eq!(hex_color(&img, 2, 0), None);
+        assert_eq!(hex_color(&img, 0, 2), None);
+        let short = Image {
+            width: 1,
+            height: 1,
+            rgba: vec![1, 2],
+        };
+        assert_eq!(hex_color(&short, 0, 0), None, "画素が足りなければ None");
+    }
 
     #[test]
     fn png_roundtrip() {

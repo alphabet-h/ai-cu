@@ -22,9 +22,10 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::cli::{
-    CLICK_MODIFIERS_NOTE, ConfigCmd, Context, DEFAULT_STEP_SETTLE_MS, GUIDE, Outcome, SettleOpt,
-    ShotSpec, TYPE_IME_NOTE, click_modifier_names, config_cmd, find_cmd, guide_summary, run_script,
-    shot, step_with_shot, text_cmd, tree_cmd, window_allowed, windows_cmd, with_policy,
+    CLICK_MODIFIERS_NOTE, ConfigCmd, Context, DEFAULT_STEP_SETTLE_MS, GUIDE, Outcome,
+    PIXEL_MAX_POINTS, SettleOpt, ShotSpec, TYPE_IME_NOTE, click_modifier_names, config_cmd,
+    find_cmd, guide_summary, pixel, run_script, shot, step_with_shot, text_cmd, tree_cmd,
+    window_allowed, windows_cmd, with_policy,
 };
 use crate::config::{ConfigPaths, DefaultLocator, EnvLookup};
 use crate::device::{BackendError, FrameState, HeldInputs, Image, InputDesktop};
@@ -35,7 +36,7 @@ use crate::elements::{
 };
 use crate::error::{AppError, ErrorKind, reason, stopped_by_user_json};
 use crate::estop::{StopReason, StopSource};
-use crate::geometry::Rect;
+use crate::geometry::{Point, Rect};
 use crate::hint::{Hint, Surface, hint};
 use crate::jsonrpc::{
     INVALID_PARAMS, INVALID_REQUEST, Incoming, METHOD_NOT_FOUND, Message, PARSE_ERROR, RpcError,
@@ -73,8 +74,8 @@ pub const META_CLIENT_CAPS: &str = "io.modelcontextprotocol/clientCapabilities";
 pub const META_SERVER_INFO: &str = "io.modelcontextprotocol/serverInfo";
 /// 読み取りだけの道具 (実入力を送らない)。`wait_for` は待つだけで何も送らない (D-068)。
 /// `status` も読むだけで、cooldown の旗も下ろさない (D-073)
-pub const READ_ONLY_TOOLS: [&str; 9] = [
-    "guide", "config", "status", "windows", "shot", "find", "tree", "text", "wait_for",
+pub const READ_ONLY_TOOLS: [&str; 10] = [
+    "guide", "config", "status", "windows", "shot", "pixel", "find", "tree", "text", "wait_for",
 ];
 
 /// 装置 (枠を含む) に触れうる呼び出しか。`guide`・`config` と `dry_run` は触れない (D-039、D-107)
@@ -689,6 +690,15 @@ pub fn tools() -> Vec<Value> {
             read_only(),
         ),
         tool(
+            "pixel",
+            "点の色を読む",
+            &format!(
+                "画面座標 (物理ピクセル) の点の色を #RRGGBB (大文字の 16 進) で返す (結果の pixels に x、y、color を入力の順で)。find の center をそのまま渡せる。点は 1 回に 1〜{PIXEL_MAX_POINTS} 個で、画面の外は usage。撮影の許可が要り、shot と同じ守りを点ごとに掛ける: deny の領域の点と、設定で拒否されたウィンドウが見えている点は断り、人が操作中 (最後の入力から min_idle_ms 未満) なら user_active。全画面の許可は要らない。どれか 1 点でも断れば何も読まずに返す (一部の結果は返さない)。読むだけ"
+            ),
+            json!({ "type": "object", "additionalProperties": false, "properties": { "points": { "type": "array", "minItems": 1, "maxItems": PIXEL_MAX_POINTS, "description": "読む点 (画面座標、物理ピクセル)", "items": { "type": "object", "additionalProperties": false, "properties": { "x": schema_int("X (物理ピクセル。負でもよい)"), "y": schema_int("Y") }, "required": ["x", "y"] } } }, "required": ["points"] }),
+            read_only(),
+        ),
+        tool(
             "find",
             "要素を探す",
             &format!(
@@ -1022,6 +1032,21 @@ struct TreeArgs {
     depth: Option<u32>,
     limit: Option<u32>,
     all: Option<bool>,
+}
+
+/// `pixel` の引数 (D-146)。点の数の範囲は `cli::pixel` が検査する (CLI と同じ文)
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PixelArgs {
+    points: Vec<PixelPoint>,
+}
+
+/// `pixel` の点。`geometry::Point` は未知のキーを断らないので、ここで別に持つ (D-146)
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PixelPoint {
+    x: i32,
+    y: i32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1812,6 +1837,14 @@ fn run_tool(name: &str, args: &Value, paths: &ConfigPaths, ctx: &mut Context) ->
                     )
                 })
             }
+            "pixel" => {
+                let a: PixelArgs = parse_args(args)?;
+                let points: Vec<Point> = a.points.iter().map(|p| Point::new(p.x, p.y)).collect();
+                with_policy(paths, |policy| {
+                    require_dpi(&ctx.dpi)?;
+                    pixel(policy, &points, ctx)
+                })
+            }
             "find" => {
                 let a: FindArgs = parse_args(args)?;
                 let limit = a.limit.unwrap_or(50);
@@ -2479,7 +2512,7 @@ mod tests {
             .copied()
             .filter(|n| *n != "guide")
             .collect();
-        assert_eq!(all_but_guide.len(), 18);
+        assert_eq!(all_but_guide.len(), 19);
         assert_eq!(marked(&r), all_but_guide);
         let guide = &r["result"]["tools"][0];
         assert_eq!(guide["name"], "guide");
@@ -2518,7 +2551,7 @@ mod tests {
         assert_eq!(marked(&r), ["click"]);
         floor_file(&dir, "[mcp\n");
         let r = reply(&mut s, &modern(2, "tools/list", json!({})));
-        assert_eq!(marked(&r).len(), 18);
+        assert_eq!(marked(&r).len(), 19);
         assert!(!marked(&r).contains(&"guide".to_string()));
         floor_file(&dir, "[mcp]\nrequire_approval = [\"type\"]\n");
         let r = reply(&mut s, &modern(3, "tools/list", json!({})));
@@ -2709,6 +2742,7 @@ mod tests {
                 "status",
                 "windows",
                 "shot",
+                "pixel",
                 "find",
                 "tree",
                 "text",
@@ -3749,6 +3783,126 @@ mod tests {
         assert_eq!(exit_code(&r), 10, "{r}");
         assert_eq!(world.borrow().ui_tree_calls, 3);
         assert!(world.borrow().sent.is_empty());
+    }
+
+    /// `pixel` は読み取りの道具 (D-146): tools/list で readOnlyHint、点の数の上限は `PIXEL_MAX_POINTS`、
+    /// 点は x と y の整数だけ。`mcp.require_approval` に書けて、書けば承認の印が付く
+    #[test]
+    fn mcp_pixel_is_listed_read_only_and_can_require_approval() {
+        let t = tools();
+        let px = t.iter().find(|t| t["name"] == "pixel").unwrap();
+        assert_eq!(px["annotations"]["readOnlyHint"], true);
+        assert!(READ_ONLY_TOOLS.contains(&"pixel"));
+        let schema = &px["inputSchema"];
+        assert_eq!(schema["required"], json!(["points"]));
+        assert_eq!(schema["additionalProperties"], false);
+        let points = &schema["properties"]["points"];
+        assert_eq!(points["minItems"], 1);
+        assert_eq!(points["maxItems"], PIXEL_MAX_POINTS);
+        assert_eq!(points["items"]["required"], json!(["x", "y"]));
+        assert_eq!(points["items"]["additionalProperties"], false);
+        assert_eq!(points["items"]["properties"]["x"]["type"], "integer");
+        assert_eq!(points["items"]["properties"]["y"]["type"], "integer");
+        let dir = unique_temp_dir("mcp-pixel-approval");
+        let floor = floor_file(&dir, "[mcp]\nrequire_approval = [\"pixel\"]\n");
+        let mut f = Fixture::new(dev_env());
+        let mut s = f.server(paths(&floor));
+        let r = reply(&mut s, &modern(1, "tools/list", json!({})));
+        assert_eq!(marked(&r), ["pixel"]);
+    }
+
+    /// `pixel` の道具は CLI と同じ経路で点の色を入力の順に返し、点ごとに 1x1 で撮る (D-146)
+    #[test]
+    fn mcp_pixel_returns_colors_like_the_cli() {
+        let dir = unique_temp_dir("mcp-pixel-colors");
+        let floor = floor_file(&dir, ENABLED);
+        let mut f = Fixture::new(MapEnv::default());
+        let world = f.world.clone();
+        world.borrow_mut().pixel_colors = vec![
+            (crate::geometry::Point::new(10, 20), [0x19, 0x23, 0x1e]),
+            (crate::geometry::Point::new(30, 40), [0xff, 0x00, 0x80]),
+        ];
+        let mut s = f.server(paths(&floor));
+        let args = json!({ "points": [{ "x": 30, "y": 40 }, { "x": 10, "y": 20 }] });
+        let r = reply(&mut s, &call(1, "pixel", args));
+        assert_eq!(r["result"]["isError"], false, "{r}");
+        assert_eq!(
+            text_json(&r),
+            json!({
+                "ok": true,
+                "pixels": [
+                    { "x": 30, "y": 40, "color": "#FF0080" },
+                    { "x": 10, "y": 20, "color": "#19231E" },
+                ]
+            })
+        );
+        assert_eq!(
+            world.borrow().capture_rects,
+            vec![Rect::new(30, 40, 1, 1), Rect::new(10, 20, 1, 1)]
+        );
+    }
+
+    /// MCP の pixel も DPI の門を通る (D-146): Per-Monitor V2 でなければ 8 で撮らない
+    #[test]
+    fn mcp_pixel_refuses_without_per_monitor_dpi() {
+        let dir = unique_temp_dir("mcp-pixel-dpi");
+        let floor = floor_file(&dir, ENABLED);
+        let mut f = Fixture::new(MapEnv::default());
+        let world = f.world.clone();
+        let mut s = Server::new(
+            paths(&floor),
+            &f.env,
+            &f.locator,
+            &mut f.devices,
+            &mut f.disk,
+            Err("DPI 認識が Per-Monitor V2 になっていない".into()),
+            Vec::new(),
+            Arc::new(Inbox::default()),
+        );
+        let r = reply(
+            &mut s,
+            &call(1, "pixel", json!({ "points": [{ "x": 1, "y": 2 }] })),
+        );
+        assert_eq!(exit_code(&r), 8, "{r}");
+        assert!(world.borrow().capture_rects.is_empty());
+    }
+
+    /// MCP の pixel の引数の誤り (D-146): 小数、文字列、y の欠け、65 個、最上位と点の中の未知のキーは
+    /// 引数の誤り (usage、2) で、何も撮らない
+    #[test]
+    fn mcp_pixel_rejects_bad_points() {
+        let dir = unique_temp_dir("mcp-pixel-bad");
+        let floor = floor_file(&dir, ENABLED);
+        let mut f = Fixture::new(MapEnv::default());
+        let world = f.world.clone();
+        let mut s = f.server(paths(&floor));
+        let many: Vec<Value> = (0..=PIXEL_MAX_POINTS as i32)
+            .map(|i| json!({ "x": i, "y": 0 }))
+            .collect();
+        assert_eq!(many.len(), 65);
+        let bad = [
+            json!({ "points": [{ "x": 1.5, "y": 2 }] }),
+            json!({ "points": [{ "x": "1", "y": 2 }] }),
+            json!({ "points": [{ "x": 1 }] }),
+            json!({ "points": many }),
+            json!({ "points": [{ "x": 1, "y": 2 }], "window": "notepad.exe" }),
+            json!({ "points": [{ "x": 1, "y": 2, "z": 0 }] }),
+            json!({ "points": [] }),
+            json!({}),
+        ];
+        for (i, args) in bad.iter().enumerate() {
+            let r = reply(&mut s, &call(i as i64 + 1, "pixel", args.clone()));
+            assert_eq!(r["result"]["isError"], true, "{args}: {r}");
+            assert_eq!(exit_code(&r), 2, "{args}: {r}");
+            assert_eq!(text_json(&r)["error"]["code"], "usage", "{args}: {r}");
+        }
+        assert!(world.borrow().capture_rects.is_empty(), "何も撮らない");
+        // 対照: 同じサーバーで正しい形なら読める
+        let r = reply(
+            &mut s,
+            &call(99, "pixel", json!({ "points": [{ "x": 1, "y": 2 }] })),
+        );
+        assert_eq!(r["result"]["isError"], false, "{r}");
     }
 
     #[test]
