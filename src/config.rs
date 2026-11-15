@@ -846,7 +846,7 @@ mouse_threshold_px = 50
 [capture]
 # 全画面 (region を省略した撮影、または画面全体を覆う矩形) を許すか (既定 false)
 full_screen = false
-# shot、focus、前面にある対象への close の前に、人の最後の入力からこれ以上の無操作を求める (ミリ秒。0 なら求めない)
+# shot、pixel、focus、前面にある対象への close の前に、人の最後の入力からこれ以上の無操作を求める (ミリ秒。0 なら求めない)
 min_idle_ms = 3000
 # 撮影の保存先として許すフォルダ (絶対パス)。空なら制限なし。書いた層はすべてが許すときだけ通す
 save_dirs = []

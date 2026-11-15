@@ -151,6 +151,9 @@ pub struct World {
     pub frames: Vec<usize>,
     /// `capture` に渡された矩形 (呼ばれた順。D-081)
     pub capture_rects: Vec<Rect>,
+    /// 画面の点 (絶対座標) の色 (D-146)。`capture` は `frames` の塗りの後に、矩形の中に入る点をこの色
+    /// (アルファ 0xFF) で上書きする。同じ点が重なれば後のものが勝つ。既定は空
+    pub pixel_colors: Vec<(Point, [u8; 3])>,
     /// UI Automation の木 (ウィンドウの hwnd, 深さ, 要素)。hwnd ごとに前順で、根が深さ 0 (D-084)
     pub tree: Vec<(usize, usize, crate::elements::UiElement)>,
     /// `describe` が失敗する要素 (その hwnd の木の中の添字。D-084)
@@ -290,6 +293,7 @@ impl World {
             stack_err: false,
             frames: Vec::new(),
             capture_rects: Vec::new(),
+            pixel_colors: Vec::new(),
             tree: Vec::new(),
             tree_unreadable: Vec::new(),
             tree_timed_out: Vec::new(),
@@ -451,6 +455,14 @@ impl Desktop for MockDesktop {
         let mut rgba = vec![0x7f; n];
         let k = dark.saturating_mul(4).min(n);
         rgba[..k].fill(0x00);
+        // 設定した点の色 (D-146)。矩形の中の点だけを、矩形の左上からの位置に塗る
+        for (p, [r, g, b]) in &w.pixel_colors {
+            if rect.contains(*p) {
+                let i =
+                    (((p.y - rect.y) as usize) * (rect.w as usize) + ((p.x - rect.x) as usize)) * 4;
+                rgba[i..i + 4].copy_from_slice(&[*r, *g, *b, 0xFF]);
+            }
+        }
         Ok(Image {
             width: rect.w,
             height: rect.h,

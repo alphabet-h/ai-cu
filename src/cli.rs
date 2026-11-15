@@ -93,7 +93,7 @@ pub fn guide_summary() -> String {
     name = "ai-cu",
     version = crate::build_info::VERSION,
     about = "AI が Windows のデスクトップを操作するための CLI (一手ずつのサブコマンド、または JSON の操作列)",
-    after_help = "初めて使う AI は、まず `ai-cu guide` を読む (要点版。座標の注意、前面化、終了コードごとの次の手)。全文は `ai-cu guide --full` (使い方の流れ、一手ずつの操作、操作列 JSON)。\n一手ずつ操作するなら、click / double-click / drag / move / scroll / type / key / focus / close / wait-for の各サブコマンド (`--shot PATH --window PROCESS` か `--shot PATH --region X,Y,W,H` で操作の後に撮る。出力は run と同じ)。focus / close / wait-for の対象は位置引数で、`--window` は撮る対象 (`--shot` と組む)。\n要素の位置は `find --window PROCESS [--name TEXT] [--type TYPE]` (UI Automation) で取れ、`center` をそのまま click に渡せる。何があるか分からないときは、先に `tree --window PROCESS` で要素の木 (1 行 1 要素の字下げ、`@x,y` は center) を見る。文字列は `text`。\n引数なしで、標準入力と標準出力の両方が端末のときは、設定を編集する TUI を起動する。\n`mcp` は MCP サーバー (stdio) として待ち受ける。クライアントの設定に `ai-cu mcp` を登録する (README の「MCP サーバーモード」)。\n終了コード: 0 成功 / 1 内部 / 2 使い方 / 3 操作列 / 4 ポリシー / 5 設定 / 6 緊急停止 / 7 フォアグラウンドガード / 8 OS / 9 開発シェルでの実入力の拒否 / 10 人が操作中 (shot と focus を行わない) / 11 前面にできない (focus) / 12 対象のウィンドウが無い (window) / 13 文字列を持つ要素が無い (text) / 14 画面がロックかセーバー (何も送らない) / 15 条件が時間内に満たされない (wait_for、run の wait_stable と wait_change。何も送らない) / 16 別の ai-cu が画面を操作中で待ちきれない (何も送らない)"
+    after_help = "初めて使う AI は、まず `ai-cu guide` を読む (要点版。座標の注意、前面化、終了コードごとの次の手)。全文は `ai-cu guide --full` (使い方の流れ、一手ずつの操作、操作列 JSON)。\n一手ずつ操作するなら、click / double-click / drag / move / scroll / type / key / focus / close / wait-for の各サブコマンド (`--shot PATH --window PROCESS` か `--shot PATH --region X,Y,W,H` で操作の後に撮る。出力は run と同じ)。focus / close / wait-for の対象は位置引数で、`--window` は撮る対象 (`--shot` と組む)。\n要素の位置は `find --window PROCESS [--name TEXT] [--type TYPE]` (UI Automation) で取れ、`center` をそのまま click に渡せる。何があるか分からないときは、先に `tree --window PROCESS` で要素の木 (1 行 1 要素の字下げ、`@x,y` は center) を見る。文字列は `text`。\n引数なしで、標準入力と標準出力の両方が端末のときは、設定を編集する TUI を起動する。\n`mcp` は MCP サーバー (stdio) として待ち受ける。クライアントの設定に `ai-cu mcp` を登録する (README の「MCP サーバーモード」)。\n終了コード: 0 成功 / 1 内部 / 2 使い方 / 3 操作列 / 4 ポリシー / 5 設定 / 6 緊急停止 / 7 フォアグラウンドガード / 8 OS / 9 開発シェルでの実入力の拒否 / 10 人が操作中 (shot、pixel、focus を行わない) / 11 前面にできない (focus) / 12 対象のウィンドウが無い (window) / 13 文字列を持つ要素が無い (text) / 14 画面がロックかセーバー (何も送らない) / 15 条件が時間内に満たされない (wait_for、run の wait_stable と wait_change。何も送らない) / 16 別の ai-cu が画面を操作中で待ちきれない (何も送らない)"
 )]
 pub struct Cli {
     /// 追加の設定ファイル。deny を足せるが allow は広げられない (人間の設定が基本の層)
@@ -149,6 +149,17 @@ pub enum Command {
         /// 保存する画像の長辺の上限 (ピクセル)。縮尺は --scale と N / 長辺 の小さい方
         #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
         max_edge: Option<u32>,
+    },
+    /// 画面の点の色を読む (撮影の許可が要る。読むだけ。オプションは点の前に置く)
+    Pixel {
+        /// 読む点 X,Y (物理ピクセルの画面座標。負でもよい)。1〜64 個。出力は #RRGGBB で入力の順
+        #[arg(
+            required = true,
+            num_args = 1..,
+            allow_hyphen_values = true,
+            value_name = "X,Y"
+        )]
+        points: Vec<String>,
     },
     /// 許可されたアプリのウィンドウの一覧 (位置、前面か、クリックで前面にできる点)。読み取りだけ
     Windows {
@@ -1113,6 +1124,18 @@ pub fn dispatch(cli: Cli, ctx: &mut Context) -> Outcome {
             });
             shot(policy, &out, region, window, scale, max_edge, ctx)
         }),
+        Some(Command::Pixel { points }) => with_policy(&paths, |policy| {
+            require_dpi(&ctx.dpi)?;
+            let points = points
+                .iter()
+                .map(|s| {
+                    parse_xy(s)
+                        .map(|(x, y)| Point::new(x, y))
+                        .map_err(|e| AppError::new(ErrorKind::Usage, e))
+                })
+                .collect::<Result<Vec<Point>, AppError>>()?;
+            pixel(policy, &points, ctx)
+        }),
         Some(Command::Find {
             window,
             window_title,
@@ -1622,15 +1645,7 @@ pub(crate) fn shot(
         }
         None => {
             let rect = region.unwrap_or(screen);
-            if !screen.contains_rect(&rect) {
-                return Err(AppError::new(
-                    ErrorKind::Usage,
-                    format!("矩形 {rect} が画面 {screen} からはみ出す"),
-                ));
-            }
-            policy
-                .check_capture_rect(&rect)
-                .map_err(|d| d.into_error(ErrorKind::PolicyDenied))?;
+            check_capture_region(policy, screen, &rect)?;
             // 全画面 (region の省略、または画面全体を覆う矩形) は設定で許されたときだけ (D-049)
             policy
                 .check_full_screen(region.as_ref(), Some(&screen))
@@ -1638,18 +1653,11 @@ pub(crate) fn shot(
             (rect, None)
         }
     };
-    // 人が操作中なら撮らない (D-049)。ai-cu 自身の run の直後も、最後の入力からの経過として数える
-    let min_idle = policy.capture_min_idle_ms();
-    if min_idle > 0 {
-        let idle = desktop.idle_ms().map_err(backend_error)?;
-        if crate::run::user_active(idle, min_idle) {
-            return Err(AppError::new(
-                ErrorKind::UserActive,
-                format!(
-                    "人が操作中なので撮らない (最後の入力から {idle} ms。{min_idle} ms 以上の無操作が要る: capture.min_idle_ms)"
-                ),
-            ));
-        }
+    // 人が操作中なら撮らない (D-049)。ai-cu 自身の run の直後も、最後の入力からの経過として数える。
+    // shot の 10 は detail も hint も付けない (今までの出力のまま。D-146)
+    if let Some((e, _, _)) = crate::run::idle_refusal(policy, &|| desktop.idle_ms(), "撮らない")?
+    {
+        return Err(e);
     }
     // deny のウィンドウが矩形に見えていれば撮らない (D-077)。region、全画面、window のどれにも効くよう腕の外に置く。
     // CLI の shot は TUI から呼ばれないので、自分の端末 (self_hwnd) は無い
@@ -1683,6 +1691,88 @@ pub(crate) fn shot(
             .map_err(|e| AppError::new(ErrorKind::Internal, e.to_string()))?;
     }
     Ok(Outcome::ok(v))
+}
+
+/// 撮る矩形の判定 (`shot` の region と全画面、`pixel` の点ごとの 1x1 が共有する。D-146): 画面 (仮想デスクトップ)
+/// の内側でなければ usage (2)、設定の領域の規則 (`check_capture_rect`) に当たれば 4。全画面の判定は含まない
+fn check_capture_region(policy: &Policy, screen: Rect, rect: &Rect) -> Result<(), AppError> {
+    if !screen.contains_rect(rect) {
+        return Err(AppError::new(
+            ErrorKind::Usage,
+            format!("矩形 {rect} が画面 {screen} からはみ出す"),
+        ));
+    }
+    policy
+        .check_capture_rect(rect)
+        .map_err(|d| d.into_error(ErrorKind::PolicyDenied))
+}
+
+/// `pixel` が 1 回に読む点の数の上限 (D-146)。MCP の道具の schema の `maxItems` もこの値
+pub(crate) const PIXEL_MAX_POINTS: usize = 64;
+
+/// 画面の点の色を読む (D-146)。撮影と同じ許可 (`ActionKind::Screenshot`) と守りを、点ごとの 1x1 の矩形に掛ける。
+/// 順は、点の数 (2) の後は `shot` と同じ: 撮影の許可 (4) → 画面 → ロック (14) → 点ごとに画面の内側 (2) と
+/// 領域の規則 (4) → 無操作 (10) → 全部の点の機密の窓 (7) → 点ごとに 1x1 で撮る。全部の判定が通ってから撮るので、
+/// どれか 1 点でも断れば 1 回も撮らない (全か無か)。出力は入力の順 (重複もそのまま)
+pub(crate) fn pixel(
+    policy: &Policy,
+    points: &[Point],
+    ctx: &mut Context,
+) -> Result<Outcome, AppError> {
+    if points.is_empty() || points.len() > PIXEL_MAX_POINTS {
+        return Err(AppError::new(
+            ErrorKind::Usage,
+            format!(
+                "点は 1〜{PIXEL_MAX_POINTS} 個 (渡されたのは {} 個)",
+                points.len()
+            ),
+        ));
+    }
+    policy
+        .check_action_kind(ActionKind::Screenshot)
+        .map_err(|d| d.into_error(ErrorKind::PolicyDenied))?;
+    let desktop = ctx.devices.desktop();
+    let screen = desktop.virtual_screen().map_err(backend_error)?;
+    // ロック中とセーバー中は人の画面ではないものを読むので、点の検査より先に 14 で断る (D-066)
+    let state = desktop.input_desktop().map_err(backend_error)?;
+    if let Some(e) = input_desktop_error(&state) {
+        return Err(e);
+    }
+    let rects: Vec<Rect> = points.iter().map(|p| Rect::new(p.x, p.y, 1, 1)).collect();
+    for r in &rects {
+        check_capture_region(policy, screen, r)?;
+    }
+    // 人が操作中なら読まない (D-049)。detail は付けない (shot にそろえる)
+    if let Some((e, _, _)) = crate::run::idle_refusal(policy, &|| desktop.idle_ms(), "読まない")?
+    {
+        return Err(e.with_hint(hint(Hint::PixelUserActive, ctx.surface)));
+    }
+    // deny のウィンドウが点に見えていれば読まない (D-077)。窓の重なりは 1 回だけ読み、撮る直前に置く。
+    // CLI と MCP の pixel は TUI から呼ばれないので、自分の端末 (self_hwnd) は無い
+    crate::run::check_sensitive_capture_rects(
+        desktop.as_ref(),
+        policy,
+        &rects,
+        &ctx.host_pids,
+        None,
+        ctx.surface,
+        Hint::PixelSensitive,
+    )?;
+    let mut pixels = Vec::with_capacity(rects.len());
+    for r in &rects {
+        let img = desktop.capture(*r).map_err(backend_error)?;
+        let color = crate::image::hex_color(&img, 0, 0).ok_or_else(|| {
+            AppError::new(
+                ErrorKind::Internal,
+                format!(
+                    "撮った画像 ({}x{}) から点 {},{} の色を読めない",
+                    img.width, img.height, r.x, r.y
+                ),
+            )
+        })?;
+        pixels.push(json!({ "x": r.x, "y": r.y, "color": color }));
+    }
+    Ok(Outcome::ok(json!({ "ok": true, "pixels": pixels })))
 }
 
 /// `find` と `text` の対象のウィンドウ (D-054): 要素の名前と文字列は画面上の情報なので撮影と同じ許可を求め、
@@ -4887,6 +4977,427 @@ mod tests {
             other => panic!("{other:?}"),
         }
         assert_eq!(world.borrow().capture_calls, 2);
+    }
+
+    /// pixel の床だけの env (D-146)
+    fn pixel_env(name: &str, body: &str) -> MapEnv {
+        let dir = unique_temp_dir(name);
+        MapEnv::new(&[
+            (ENV_DEV_FORBID, "1"),
+            (ENV_DEV_FLOOR, &floor_file(&dir, body)),
+        ])
+    }
+
+    /// `cli::pixel` を直に呼ぶ (点の数の 0 個と呼ばれ方の文を見る。D-146)
+    fn call_pixel(
+        body: &str,
+        points: &[Point],
+        world: &std::rc::Rc<std::cell::RefCell<World>>,
+        surface: Surface,
+    ) -> Result<Outcome, AppError> {
+        let cfg = crate::config::Config::parse(&format!("version = 1\n{body}")).unwrap();
+        let policy = Policy::new(vec![crate::config::Layer::from_config(&cfg, "t").unwrap()]);
+        let env = MapEnv::default();
+        let mut input: &[u8] = b"";
+        let mut images = MemoryImages::default();
+        let mut devices = MockDevices(world.clone());
+        let mut ctx = Context {
+            env: &env,
+            locator: &TripwireLocator,
+            stdin: &mut input,
+            stdin_tty: false,
+            stdout_tty: false,
+            devices: &mut devices,
+            images: &mut images,
+            dpi: Ok(()),
+            host_pids: vec![],
+            surface,
+            stops: vec![],
+        };
+        pixel(&policy, points, &mut ctx)
+    }
+
+    fn pixel_go(
+        args: &[&str],
+        env: &MapEnv,
+        world: &std::rc::Rc<std::cell::RefCell<World>>,
+    ) -> Outcome {
+        go(
+            args,
+            env,
+            "",
+            &mut MockDevices(world.clone()),
+            (false, false),
+        )
+    }
+
+    /// pixel (D-146): 点ごとの色を入力の順 (重複もそのまま) に #RRGGBB (大文字) で返し、点ごとに 1x1 で撮る
+    #[test]
+    fn pixel_reads_colors_in_input_order() {
+        let env = pixel_env("cli-pixel-order", ENABLED);
+        let world = World::new().shared();
+        world.borrow_mut().pixel_colors = vec![
+            (Point::new(10, 20), [0x19, 0x23, 0x1e]),
+            (Point::new(30, 40), [0xff, 0x00, 0x80]),
+        ];
+        match pixel_go(&["pixel", "30,40", "10,20", "30,40", "5,5"], &env, &world) {
+            Outcome::Json { code: 0, value, .. } => {
+                assert_eq!(
+                    value,
+                    json!({
+                        "ok": true,
+                        "pixels": [
+                            {"x": 30, "y": 40, "color": "#FF0080"},
+                            {"x": 10, "y": 20, "color": "#19231E"},
+                            {"x": 30, "y": 40, "color": "#FF0080"},
+                            {"x": 5, "y": 5, "color": "#7F7F7F"},
+                        ]
+                    })
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(
+            world.borrow().capture_rects,
+            vec![
+                Rect::new(30, 40, 1, 1),
+                Rect::new(10, 20, 1, 1),
+                Rect::new(30, 40, 1, 1),
+                Rect::new(5, 5, 1, 1),
+            ]
+        );
+    }
+
+    /// 撮影を断る設定 (撮影の総スイッチが切れている、deny.actions に screenshot) では色も読めない (4。D-146)
+    #[test]
+    fn pixel_requires_capture_permission() {
+        for (name, body, rule) in [
+            (
+                "cli-pixel-capture-off",
+                "[general]\ninput_enabled = true\ncapture_enabled = false\n".to_string(),
+                "general.capture_enabled",
+            ),
+            (
+                "cli-pixel-deny-shot",
+                format!("{ENABLED}[deny]\nactions=[\"screenshot\"]\n"),
+                "deny.actions",
+            ),
+        ] {
+            let env = pixel_env(name, &body);
+            let world = World::new().shared();
+            match pixel_go(&["pixel", "1,2"], &env, &world) {
+                Outcome::Json { code: 4, value, .. } => {
+                    assert_eq!(value["error"]["code"], "policy_denied", "{value}");
+                    assert_eq!(value["error"]["rule"], rule, "{value}");
+                }
+                other => panic!("{name}: {other:?}"),
+            }
+            assert!(world.borrow().capture_rects.is_empty(), "{name}");
+        }
+    }
+
+    /// deny.regions に当たる点は 4 (rule は deny.regions)。撮らない (D-146)
+    #[test]
+    fn pixel_refuses_point_in_denied_region() {
+        let env = pixel_env(
+            "cli-pixel-region",
+            &format!("{ENABLED}[deny]\nregions=[\"100,100,50,50\"]\n"),
+        );
+        let world = World::new().shared();
+        match pixel_go(&["pixel", "120,130"], &env, &world) {
+            Outcome::Json { code: 4, value, .. } => {
+                assert_eq!(value["error"]["rule"], "deny.regions", "{value}");
+                let msg = value["error"]["message"].as_str().unwrap();
+                assert!(msg.contains("120,130,1,1"), "{msg}");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(world.borrow().capture_rects.is_empty());
+    }
+
+    /// 全か無か (D-146): 1 点目が通っても、2 点目が deny.regions (4) か deny の窓 (7) なら 1 回も撮らない
+    #[test]
+    fn pixel_refuses_all_when_one_point_is_denied_and_captures_nothing() {
+        let env = pixel_env(
+            "cli-pixel-all-region",
+            &format!("{ENABLED}[deny]\nregions=[\"100,100,50,50\"]\n"),
+        );
+        let world = World::new().shared();
+        let o = pixel_go(&["pixel", "10,10", "120,120"], &env, &world);
+        assert_eq!(o.code(), Some(4), "{o:?}");
+        assert!(world.borrow().capture_rects.is_empty());
+
+        let env = pixel_env("cli-pixel-all-window", &format!("{ENABLED}{DENY_ZED}"));
+        let mut w = World::new();
+        w.stack = vec![stacked("Zed.exe", 0x10, 1, Rect::new(100, 100, 100, 100))];
+        let world = w.shared();
+        match pixel_go(&["pixel", "10,10", "150,160"], &env, &world) {
+            Outcome::Json { code: 7, value, .. } => {
+                assert_eq!(value["error"]["code"], "foreground_guard", "{value}");
+                assert_eq!(value["error"]["detail"]["window"]["hwnd"], 0x10, "{value}");
+                assert_eq!(
+                    value["error"]["detail"]["visible"],
+                    serde_json::to_value(Rect::new(150, 160, 1, 1)).unwrap(),
+                    "{value}"
+                );
+                assert_eq!(value["error"]["rule"], "deny.processes", "{value}");
+                assert!(value["error"].get("fix").is_none(), "{value}");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(world.borrow().capture_rects.is_empty(), "撮る前に断る");
+        assert_eq!(world.borrow().stack_calls, 1);
+    }
+
+    /// 点の間に deny の窓や deny.regions があっても、点に重ならなければ読める (外接矩形で判定しない。D-146)。
+    /// deny の窓の組でも窓の重なりは 1 回だけ読む
+    #[test]
+    fn pixel_reads_points_around_denied_window_and_region() {
+        let env = pixel_env(
+            "cli-pixel-around-region",
+            &format!("{ENABLED}[deny]\nregions=[\"100,100,50,50\"]\n"),
+        );
+        let world = World::new().shared();
+        let o = pixel_go(&["pixel", "10,10", "300,300"], &env, &world);
+        assert_eq!(o.code(), Some(0), "{o:?}");
+        assert_eq!(world.borrow().capture_rects.len(), 2);
+
+        let env = pixel_env("cli-pixel-around-window", &format!("{ENABLED}{DENY_ZED}"));
+        let mut w = World::new();
+        w.stack = vec![stacked("Zed.exe", 0x10, 1, Rect::new(100, 100, 100, 100))];
+        let world = w.shared();
+        let o = pixel_go(&["pixel", "10,10", "300,300"], &env, &world);
+        assert_eq!(o.code(), Some(0), "{o:?}");
+        assert_eq!(world.borrow().capture_rects.len(), 2);
+        assert_eq!(world.borrow().stack_calls, 1);
+    }
+
+    /// DPI の門 (D-146): Per-Monitor V2 を宣言できていなければ 8 で、撮らない。門は振り分けで掛かる
+    #[test]
+    fn pixel_refuses_without_per_monitor_dpi() {
+        let dir = unique_temp_dir("cli-pixel-dpi");
+        let floor = floor_file(&dir, ENABLED);
+        let env = MapEnv::default();
+        let world = World::new().shared();
+        let mut devices = MockDevices(world.clone());
+        let mut images = MemoryImages::default();
+        let mut input: &[u8] = b"";
+        let mut ctx = Context {
+            env: &env,
+            locator: &crate::config::FixedLocator(PathBuf::from(&floor)),
+            stdin: &mut input,
+            stdin_tty: false,
+            stdout_tty: false,
+            devices: &mut devices,
+            images: &mut images,
+            dpi: Err("test".into()),
+            host_pids: vec![],
+            surface: Surface::Cli,
+            stops: vec![],
+        };
+        assert_eq!(dispatch(parse(&["pixel", "1,2"]), &mut ctx).code(), Some(8));
+        assert!(world.borrow().capture_rects.is_empty());
+    }
+
+    /// ロック中は 14、人が操作中は 10 (文に「読まない」、hint は pixel の文、detail は付けない)。どちらも撮らない (D-146)
+    #[test]
+    fn pixel_refuses_while_locked_and_while_user_active() {
+        let env = pixel_env("cli-pixel-locked", ENABLED);
+        let world = World::new().shared();
+        world.borrow_mut().input_desktop = Ok(InputDesktop::Locked {
+            name: Some("Default".into()),
+        });
+        match pixel_go(&["pixel", "1,2"], &env, &world) {
+            Outcome::Json {
+                code: 14, value, ..
+            } => assert_eq!(value["error"]["reason"], "locked", "{value}"),
+            other => panic!("{other:?}"),
+        }
+        assert!(world.borrow().capture_rects.is_empty());
+
+        let world = World::new().shared();
+        world.borrow_mut().idle_ms = 500;
+        match pixel_go(&["pixel", "1,2"], &env, &world) {
+            Outcome::Json {
+                code: 10, value, ..
+            } => {
+                assert_eq!(value["error"]["code"], "user_active", "{value}");
+                let msg = value["error"]["message"].as_str().unwrap();
+                assert!(msg.contains("読まない") && msg.contains("500"), "{msg}");
+                assert_eq!(
+                    value["error"]["hint"],
+                    crate::hint::PIXEL_USER_ACTIVE_HINT,
+                    "{value}"
+                );
+                assert!(value["error"].get("detail").is_none(), "{value}");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(world.borrow().capture_rects.is_empty());
+        let e = call_pixel(ENABLED, &[Point::new(1, 2)], &world, Surface::Mcp).unwrap_err();
+        assert_eq!(
+            e.hint.as_deref(),
+            Some(hint(Hint::PixelUserActive, Surface::Mcp))
+        );
+        assert!(world.borrow().capture_rects.is_empty());
+    }
+
+    /// pixel の 7 の hint (D-146) は pixel の文で、shot 向けの region / window の手を示さない。shot の 7 は今のまま
+    #[test]
+    fn pixel_sensitive_hint_does_not_point_to_region_or_window() {
+        let body = format!("{ENABLED}{DENY_ZED}");
+        let env = pixel_env("cli-pixel-sensitive-hint", &body);
+        let mut w = World::new();
+        w.stack = vec![stacked("Zed.exe", 0x10, 1, Rect::new(100, 100, 100, 100))];
+        let world = w.shared();
+        match pixel_go(&["pixel", "150,150"], &env, &world) {
+            Outcome::Json { code: 7, value, .. } => assert_eq!(
+                value["error"]["hint"],
+                crate::hint::PIXEL_SENSITIVE_HINT,
+                "{value}"
+            ),
+            other => panic!("{other:?}"),
+        }
+        let e = call_pixel(&body, &[Point::new(150, 150)], &world, Surface::Mcp).unwrap_err();
+        assert_eq!(
+            e.hint.as_deref(),
+            Some(hint(Hint::PixelSensitive, Surface::Mcp))
+        );
+        for s in [Surface::Cli, Surface::Mcp] {
+            let h = hint(Hint::PixelSensitive, s);
+            assert!(h.starts_with("何も読んでいない。"), "{h}");
+            assert!(h.contains("detail.visible"), "{h}");
+            assert!(h.contains("設定を緩めるよう頼まない"), "{h}");
+            for bad in ["--region", "--window", "region", "window で"] {
+                assert!(!h.contains(bad), "{bad}: {h}");
+            }
+        }
+        // shot の 7 は今までの文のまま
+        let env = pixel_env(
+            "cli-pixel-sensitive-shot",
+            &format!("{ENABLED}[capture]\nmin_idle_ms = 0\n{DENY_ZED}"),
+        );
+        match pixel_go(
+            &["shot", "--out", "a.png", "--region", "140,140,20,20"],
+            &env,
+            &world,
+        ) {
+            Outcome::Json { code: 7, value, .. } => assert_eq!(
+                value["error"]["hint"],
+                crate::run::CAPTURE_SENSITIVE_HINT,
+                "{value}"
+            ),
+            other => panic!("{other:?}"),
+        }
+        assert!(world.borrow().capture_rects.is_empty());
+    }
+
+    /// 画面の端 (D-146): 右下の内側の点は読め、その外 (x = 右端) は usage (文に点と画面)。
+    /// 負の原点の画面では負の座標の点が読める
+    #[test]
+    fn pixel_point_on_screen_edge() {
+        let env = pixel_env("cli-pixel-edge", ENABLED);
+        let world = World::new().shared();
+        world.borrow_mut().screen = Rect::new(0, 0, 640, 480);
+        let o = pixel_go(&["pixel", "639,479"], &env, &world);
+        assert_eq!(o.code(), Some(0), "{o:?}");
+        for p in ["640,0", "0,480", "-1,0"] {
+            match pixel_go(&["pixel", p], &env, &world) {
+                Outcome::Json { code: 2, value, .. } => {
+                    let msg = value["error"]["message"].as_str().unwrap();
+                    assert!(msg.contains(&format!("{p},1,1")), "{msg}");
+                    assert!(msg.contains("0,0,640,480"), "{msg}");
+                }
+                other => panic!("{p}: {other:?}"),
+            }
+        }
+        assert_eq!(
+            world.borrow().capture_rects,
+            vec![Rect::new(639, 479, 1, 1)]
+        );
+        world.borrow_mut().screen = Rect::new(-1920, -100, 3840, 1180);
+        world.borrow_mut().pixel_colors = vec![(Point::new(-5, -7), [1, 2, 3])];
+        match pixel_go(&["pixel", "-5,-7", "-1920,-100"], &env, &world) {
+            Outcome::Json { code: 0, value, .. } => {
+                assert_eq!(
+                    value["pixels"][0],
+                    json!({"x": -5, "y": -7, "color": "#010203"})
+                );
+                assert_eq!(value["pixels"][1]["x"], -1920);
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(
+            pixel_go(&["pixel", "-1921,0"], &env, &world).code(),
+            Some(2)
+        );
+    }
+
+    /// 点の数 (D-146): 0 個と 65 個は usage (撮らない)、64 個は読める
+    #[test]
+    fn pixel_point_count_bounds() {
+        let world = World::new().shared();
+        let e = call_pixel(ENABLED, &[], &world, Surface::Cli).unwrap_err();
+        assert_eq!(e.kind, ErrorKind::Usage);
+        let many: Vec<Point> = (0..65).map(|i| Point::new(i, 0)).collect();
+        let e = call_pixel(ENABLED, &many, &world, Surface::Cli).unwrap_err();
+        assert_eq!(e.kind, ErrorKind::Usage);
+        assert!(e.message.contains("65"), "{}", e.message);
+        assert!(world.borrow().capture_rects.is_empty());
+        match call_pixel(ENABLED, &many[..PIXEL_MAX_POINTS], &world, Surface::Cli) {
+            Ok(Outcome::Json { code: 0, value, .. }) => {
+                assert_eq!(value["pixels"].as_array().unwrap().len(), 64)
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(PIXEL_MAX_POINTS, 64);
+        // CLI でも 65 個は 2
+        let env = pixel_env("cli-pixel-count", ENABLED);
+        let args: Vec<String> = (0..65).map(|i| format!("{i},0")).collect();
+        let mut argv = vec!["pixel"];
+        argv.extend(args.iter().map(String::as_str));
+        assert_eq!(pixel_go(&argv, &env, &world).code(), Some(2));
+    }
+
+    /// CLI の点の解析 (D-146): オプションは点の前に置け、負の点 (`-5,7`) は点として読む。点の後ろのオプションは
+    /// 点として読まれて `X,Y` の形の誤り (2) になる (設定を黙って落とさない)。形の誤りは 2
+    #[test]
+    fn pixel_cli_parses_points_and_rejects_bad_shapes() {
+        let cli =
+            Cli::try_parse_from(["ai-cu", "pixel", "--config=x.toml", "-5,7", "1,-2"]).unwrap();
+        assert_eq!(cli.config, Some(PathBuf::from("x.toml")));
+        match cli.command {
+            Some(Command::Pixel { points }) => assert_eq!(points, vec!["-5,7", "1,-2"]),
+            other => panic!("{other:?}"),
+        }
+        let cli = Cli::try_parse_from(["ai-cu", "pixel", "1,2", "--config=x.toml"]).unwrap();
+        assert_eq!(cli.config, None);
+        match cli.command {
+            Some(Command::Pixel { points }) => {
+                assert_eq!(points, vec!["1,2", "--config=x.toml"]);
+                assert!(parse_xy(&points[1]).is_err());
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(
+            Cli::try_parse_from(["ai-cu", "pixel"]).is_err(),
+            "点は 1 個以上"
+        );
+        let env = pixel_env("cli-pixel-shapes", ENABLED);
+        let world = World::new().shared();
+        for bad in ["1", "1,2,3", "a,b", "1.5,2"] {
+            match pixel_go(&["pixel", "1,2", bad], &env, &world) {
+                Outcome::Json { code: 2, value, .. } => {
+                    assert_eq!(value["error"]["code"], "usage", "{bad}: {value}")
+                }
+                other => panic!("{bad}: {other:?}"),
+            }
+        }
+        assert_eq!(
+            pixel_go(&["pixel", "1,2", "--config=x.toml"], &env, &world).code(),
+            Some(2)
+        );
+        assert!(world.borrow().capture_rects.is_empty());
     }
 
     /// shot --window (D-077): 対象の枠の内側 8 ピクセルの帯 (隠れの確認の間引きが見ない所) に小さい deny の窓が
