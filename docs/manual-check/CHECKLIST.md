@@ -527,7 +527,7 @@ python <repo>\docs\manual-check\mcp_client.py <repo>\target\release\ai-cu.exe mc
 ```
 - [ ] 標準エラーの最初の行に `host: [...]` (python.exe、シェル、端末が並ぶ)
 - [ ] id 1 (`server/discover`): `supportedVersions` が `["2026-07-28"]`、`resultType` が `complete`、`ttlMs` と `cacheScope` がある
-- [ ] id 2 (`tools/list`): 道具が 19 個
+- [ ] id 2 (`tools/list`): 道具が 20 個 (`pixel` に `readOnlyHint` が付く)。この流れでは `pixel` を呼ばない (固定の要求にはメモ帳の座標を書けず、撮って読んでよいのはメモ帳の矩形の中だけのため)。MCP で点の色を読む確かめは手順 34 の (a) で行う (D-146)
 - [ ] id 3 (`config`): 基本の層 (`paths.floor.kind`) が `default` で `input_enabled` が true。id 4 (`windows`): メモ帳が出て端末は出ない (`other_windows` に数えられる)
 - [ ] id 5、6 (`find`、`text`): 本文の要素と文字列。id 7 (`shot`): `isError` が false で `image` が 1 つ (保存した png にメモ帳だけが写る。隠れていれば 7)
 - [ ] id 8 (`click` の dry_run): `dry_run` true、`plan` がある。id 9 (`alt+f4`): `isError` true で `exit_code` 4。id 10 (`ping`): `{}`
@@ -1086,6 +1086,61 @@ target/release/ai-cu.exe text --window notepad.exe --type document
 
 結果が違ったときは、D-131 の覆る条件に戻る: (a) で `kanji` に反応しなければ VK_OEM_AUTO / VK_OEM_ENLW を試す、(b) で `imeon` / `imeoff` に反応しなければ表から外す、どのキーも届かなければスキャンコードの指定を考える、(d) で文字が未確定に入ったら手引き、参照、説明の文を直す。(c) で未確定に入ると確かめられたら、手引きに足す。
 
+## 34. 点の色 (pixel、D-146)
+
+`pixel` は読むだけ (入力を送らない) で、撮影と同じ許可と守りを点ごとの 1x1 に掛ける。手順 0 の設定 (基本の層。allow に notepad、`capture_enabled` が true) のまま行い、断る側の確かめは `--config=` の上書き層 (deny を足すだけ。allow を広げない) を `target/manual-check/` に作って行う。
+`AI_CU_MANUAL_CHECK=1` のセッションで、release のパスを文字どおり書く (開発のシェルの `cargo run -- pixel` とデバッグビルドはガード hook が止める。D-146 の限界)。入力を送らないので GO は要らないが、(c) の窓の配置は人に頼む。終了コード 10 (人が操作中) なら 3 秒待って 1 回だけ打ち直す。点はメモ帳の `rect` の内側に取り、角と縁から数十ピクセル離す。全画面は撮らない。
+
+準備: 人がメモ帳を開き、何も入れずに置く。AI は `target/release/ai-cu.exe windows` でメモ帳の `rect` を読み、本文の内側の 2 点 P1、P2 (例: 本文の左寄りと右寄り。`find --window notepad.exe --type document` の `center` も使える) を決める。
+
+(a) 色を読む (CLI と MCP):
+
+```
+target/release/ai-cu.exe pixel <P1.x>,<P1.y> <P2.x>,<P2.y>
+target/release/ai-cu.exe pixel <P1.x>,<P1.y> <P1.x>,<P1.y>
+target/release/ai-cu.exe pixel <P1.x>,<P1.y> --config=x.toml
+```
+- [ ] 1 つ目: 終了コード `0`、`pixels` が入力の順に 2 つで、`color` が `#RRGGBB` (大文字の 16 進 6 桁)。本文の背景の色 (ライトのテーマなら白に近い) を記録する
+- [ ] 2 つ目: 同じ点の重複も 2 つのまま返る
+- [ ] 3 つ目: 点の後ろのオプションは点として読まれ、終了コード `2` (`X,Y` の形の誤り)。設定は黙って落ちない
+- [ ] MCP: AI は `target/manual-check/s34-mcp.jsonl` に、手順 19 の B の `mcp-requests.jsonl` の id 1 と同じ `server/discover` と、`pixel` の `tools/call` (`points` に P1 と P2 の `{x, y}`) を書き、`mcp_client.py` で送る (手順 19 の B と同じ書き方)。`isError` が false で、`pixels` が CLI の 1 つ目と同じ色
+
+(b) `deny.regions` に当たる点は 4。上書き層 `target/manual-check/s34.toml` は次の内容だけにする (P1 を中心に 20x20 の矩形を deny に足す):
+
+```toml
+version = 1
+[general]
+capture_enabled = true
+[deny]
+regions = ["<P1.x - 10>,<P1.y - 10>,20,20"]
+```
+
+```
+target/release/ai-cu.exe pixel --config=target/manual-check/s34.toml <P2.x>,<P2.y> <P1.x>,<P1.y>
+target/release/ai-cu.exe pixel --config=target/manual-check/s34.toml <P2.x>,<P2.y>
+```
+- [ ] 1 つ目: 終了コード `4`、`error.rule` が `deny.regions`、`pixels` は無い (P2 も返さない。全か無か)
+- [ ] 2 つ目: 終了コード `0` (deny の矩形に重ならない点は読める)
+
+(c) deny の窓が見えている点は 7、点の間にあるだけなら読める。手順 23 と同じく、上書き層 `target/manual-check/s34-deny.toml` で文字コード表 (charmap.exe) だけを deny に足す (`version = 1`、`[general] capture_enabled = true`、`[deny] processes = ["charmap.exe"]` だけ)。人が文字コード表をメモ帳の中ほどに重ねて置き (Z 順でメモ帳の上)、端末に返事を打つ。端末の窓はメモ帳にかけない。AI は文字コード表の位置を人に聞き、文字コード表の上の点 Q (メモ帳の rect の中) と、文字コード表を挟んで左右にあるメモ帳の本文の 2 点 L、R を決める。
+
+```
+target/release/ai-cu.exe pixel --config=target/manual-check/s34-deny.toml <L.x>,<L.y> <Q.x>,<Q.y>
+target/release/ai-cu.exe pixel --config=target/manual-check/s34-deny.toml <L.x>,<L.y> <R.x>,<R.y>
+```
+- [ ] 1 つ目: 終了コード `7`、`error.detail.window.process` が `charmap.exe` (題名のキーは無い)、`error.detail.visible` がある、`hint` に「何も読んでいない」と「設定を緩めるよう頼まない」があり、`--region` と `--window` を勧めない。`pixels` は無い
+- [ ] 2 つ目: 終了コード `0`、`pixels` が 2 つ (L と R の間に deny の窓があっても断らない)
+
+(d) 撮影を切った設定で 4。上書き層 `target/manual-check/s34-nocap.toml` は `version = 1` と `[general] capture_enabled = false` だけにする (上の層は狭めるだけ):
+
+```
+target/release/ai-cu.exe pixel --config=target/manual-check/s34-nocap.toml <P2.x>,<P2.y>
+```
+- [ ] 終了コード `4`、`error.rule` が `general.capture_enabled`、`pixels` は無い
+
+記録する値: 使った release の版 (`target/release/ai-cu.exe --version`)、点の座標、(a) の色、各コマンドの終了コードと出力の JSON。「実施の記録」の節のとおり、手元に日付つきで書く。
+後片付け: 文字コード表とメモ帳は人が閉じる。`target/manual-check/s34*` は残してよい (git 管理外)
+
 ## 結果が違ったとき
 
 - 手順 1 で `dev_mode: true`: この端末に `AI_CU_DEV_FORBID_REAL_INPUT` がある。`Remove-Item Env:AI_CU_DEV_FORBID_REAL_INPUT` で外す
@@ -1102,7 +1157,7 @@ ai-cu.exe を呼んで確かめられる。開発セッション (このリポ�
 手を離す。別のディレクトリで開いたセッション (hook 無し) に頼む形も使える (2026-10-08 に実施)。そのときの依頼文に書くこと:
 
 - 使うのは release の ai-cu.exe だけ。リポジトリを編集しない、cargo を走らせない
-- 実際の設定ファイルは読むだけ。手順 9 と 10 は `--config=` の上書き層 (deny と stop だけを足す。`version = 1` と `[general] input_enabled = true` が要る) で行い、allow を広げる設定は作らない。手順 23 も上書き層で行う (`version = 1`、`[general] capture_enabled = true`、deny だけ)。手順 24 も上書き層で行う (`version = 1`、`[general] capture_enabled = true`、`[mcp] require_approval = ["windows"]` だけ。登録と確認の画面は人が行う)。手順 25 は `guide --setup` と `validate` だけで、設定ファイルを作らない (TUI の左の一覧で fix の場所を探すのは人)。手順 26 は基本の層のまま行い、設定ファイルを作らない (基本の層の `allow.actions` を書いた設定では `wait_stable` / `wait_change` を並べないと 4 になる。そのときは記録して止まる)。手順 27 は基本の層のまま行い、設定ファイルを作らない (撮影の許可が要る。実入力は送らない)。手順 28 は確認専用のアプリ pw-probe (`tools/pw-probe`、D-092) で行う。人がビルドし、基本の層の `allow.processes` に `pw-probe.exe` がある (入れたままでよい。無ければ人が TUI で足す) ことを確かめてから、(a) の読み取りは GO 無しで、(b) から (d) は GO をもらって行い、設定ファイルを作らない (`general.password_input` は書かない)。送る文字は無害な 1 文字 (`x`、`a`、`b`、`y`)。読めないアプリでは 4 にならず文字が入るので、先に (a) の `find` で `secret` の `password` が true になることを確かめてから (b) を行う。pw-probe は AI が起動してよい (起動は実入力ではない)。手順 29 は基本の層のまま行い、(d) だけ上書き層 (`version = 1`、`[general] input_enabled = true`、`[indicator] sound = true` だけ) を `target/manual-check/` に作る。枠は撮影に写らないので、枠と札の見え方と音は人に聞いて記録する。手順 30 は基本の層のまま行い、設定ファイルを作らない。ignored の段がフィクスチャへ実入力を送るので GO の後に行う。枠と札は撮影に写らないので、人に聞いて記録する。cargo を走らせるので、別のディレクトリのセッションへの依頼には入れず、開発セッションの主エージェントが行う (D-111)。手順 33 は基本の層のまま行い、設定ファイルを作らない。一手ずつの `focus`、`key`、`type` は実入力なので GO の後に行う。IME の表示は撮影では確かめず、人に聞いて記録する (D-131)。17 の新しい項 (ツールチップ。D-142) は基本の層のまま、設定ファイルを作らず、GO の後に行う
+- 実際の設定ファイルは読むだけ。手順 9 と 10 は `--config=` の上書き層 (deny と stop だけを足す。`version = 1` と `[general] input_enabled = true` が要る) で行い、allow を広げる設定は作らない。手順 23 も上書き層で行う (`version = 1`、`[general] capture_enabled = true`、deny だけ)。手順 24 も上書き層で行う (`version = 1`、`[general] capture_enabled = true`、`[mcp] require_approval = ["windows"]` だけ。登録と確認の画面は人が行う)。手順 25 は `guide --setup` と `validate` だけで、設定ファイルを作らない (TUI の左の一覧で fix の場所を探すのは人)。手順 26 は基本の層のまま行い、設定ファイルを作らない (基本の層の `allow.actions` を書いた設定では `wait_stable` / `wait_change` を並べないと 4 になる。そのときは記録して止まる)。手順 27 は基本の層のまま行い、設定ファイルを作らない (撮影の許可が要る。実入力は送らない)。手順 28 は確認専用のアプリ pw-probe (`tools/pw-probe`、D-092) で行う。人がビルドし、基本の層の `allow.processes` に `pw-probe.exe` がある (入れたままでよい。無ければ人が TUI で足す) ことを確かめてから、(a) の読み取りは GO 無しで、(b) から (d) は GO をもらって行い、設定ファイルを作らない (`general.password_input` は書かない)。送る文字は無害な 1 文字 (`x`、`a`、`b`、`y`)。読めないアプリでは 4 にならず文字が入るので、先に (a) の `find` で `secret` の `password` が true になることを確かめてから (b) を行う。pw-probe は AI が起動してよい (起動は実入力ではない)。手順 29 は基本の層のまま行い、(d) だけ上書き層 (`version = 1`、`[general] input_enabled = true`、`[indicator] sound = true` だけ) を `target/manual-check/` に作る。枠は撮影に写らないので、枠と札の見え方と音は人に聞いて記録する。手順 30 は基本の層のまま行い、設定ファイルを作らない。ignored の段がフィクスチャへ実入力を送るので GO の後に行う。枠と札は撮影に写らないので、人に聞いて記録する。cargo を走らせるので、別のディレクトリのセッションへの依頼には入れず、開発セッションの主エージェントが行う (D-111)。手順 33 は基本の層のまま行い、設定ファイルを作らない。一手ずつの `focus`、`key`、`type` は実入力なので GO の後に行う。IME の表示は撮影では確かめず、人に聞いて記録する (D-131)。17 の新しい項 (ツールチップ。D-142) は基本の層のまま、設定ファイルを作らず、GO の後に行う。手順 34 は基本の層のまま (a) を行い、(b) から (d) は上書き層 (`version = 1`、`[general] capture_enabled = true` (d は false)、deny だけ) を `target/manual-check/` に作る。入力を送らないので GO は要らない。(c) の窓の配置は人に頼む (D-146)
 - `--dry-run` の無い `run` は手順 6、7、8、9、17、20、26、28 (c)、29、31 だけ (17 はメモ帳のボタンの上へ `move` するだけで、クリックしない。26 の `run` は `focus` と画面の待ちだけで、入力は送らない。28 (c) は pw-probe のふつうの欄に Tab を含む `type` を送る標準入力の `run -`。28 の (b) と (d) は `run` ではなく一手ずつの `focus`、`click`、`key`、`type` で、これも実入力。31 は基本の層のまま (allow に notepad) で、設定ファイルを作らずに 2 本の `run` を同時にメモ帳へ送る実入力なので、GO をもらってから行う。33 は `run` を使わないが、28 の (b) と (d) と同じく一手ずつの `focus`、`key`、`type` が実入力)。7 と 8 は実行の直前にターンを終え、人の GO を待つ (GO の後、人は枠が出てから約 3 秒 (予告の間) 待って Alt+Tab でメモ帳を前面にし、マウスに触れない)。7 は `sample-with-focus.json` (sample.json の先頭に `focus` を足したもの) を使えば、端末が前面のままで済み、Alt+Tab の合図が要らない (2026-10-09 に実施)
 - 手順 2 の前提 (allow に notepad があり、端末と端末を内蔵するエディタが allow に無く deny にある、input_enabled が true、dev_mode が false) が崩れていたら、run 系を走らせずに止まる。allow に `pw-probe` や利用者がふだん使うアプリがあるのは崩れではない
 - 画像は全画面を撮らない。手順 12 の画像は寸法だけ調べて消す。メモ帳の内容は `windows` で矩形を取り、その範囲だけ撮って読んでよい

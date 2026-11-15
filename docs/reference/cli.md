@@ -16,6 +16,8 @@ ai-cu windows [--include-hidden]
 ai-cu schema                  操作列 JSON の書式を JSON で出す
 ai-cu shot --out <PNG> [--region X,Y,W,H | --window PROCESS [--window-title TEXT]] [--scale F] [--max-edge N]
                               画面の矩形、または対象のウィンドウを png に撮る (どちらも省略 = 全画面は、既定の設定では拒否)
+ai-cu pixel [オプション] X,Y [X,Y ...]
+                              画面の点 (物理ピクセルの画面座標、1〜64 個) の色を読み、{"ok": true, "pixels": [{"x", "y", "color": "#RRGGBB"}]} を入力の順で出す (重複もそのまま)。撮影の許可が要り、shot と同じ守り (撮影の許可、ロック、deny.regions、無操作、機密の窓) を点ごとの 1x1 に掛け、どれか 1 点でも断れば何も読まない。オプション (--config=PATH など) は点の前に置く (点の後ろは点として読まれて 2。負の点 -5,7 を受けるため。D-146)
 ai-cu find --window PROCESS [--window-title TEXT] [--name TEXT] [--type TYPE] [--automation-id ID] [--focused] [--limit N]
                               許可されたウィンドウの要素 (UI Automation) を名前・種類・automation_id・フォーカスで探し、矩形と中心点を出す。--automation-id は完全一致 (大文字小文字を区別)、--focused はキーボードのフォーカスを持つ要素だけ (窓の中のフォーカス。前面でない窓でも当たり、複数ありうる。0 件でも成功)。各要素に focused と password (パスワードの要素か。UIA の IsPassword。D-090) と、そのパターンを持つ要素だけ toggle (on / off / indeterminate)、selected (bool)、expanded (expanded / collapsed / partially_expanded / leaf_node) が出る。name は 500 字で切り、切った要素にだけ name_truncated: true が出る (「…」は付けないので、そのまま --name に渡せる。D-102) (読み取りだけ。撮影の許可が要る。D-089)
 ai-cu tree --window PROCESS [--window-title TEXT] [--depth N] [--limit N] [--all]

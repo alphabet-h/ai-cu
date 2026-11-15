@@ -33,7 +33,7 @@ use ai_cu::error::{AppError, ErrorKind};
 use ai_cu::estop::StopSet;
 use ai_cu::geometry::{Point, Rect};
 use ai_cu::hint::{Hint, LEAD_USER_ACTIVE_HINT, Surface, hint};
-use ai_cu::image::{PngFileWriter, decode_png, frame_diff, thumb};
+use ai_cu::image::{PngFileWriter, decode_png, frame_diff, hex_color, thumb};
 use ai_cu::policy::Policy;
 use ai_cu::run::{self, ExecOptions, Executor, RunReport};
 use ai_cu::runner::{DeviceFactory, RealDevices};
@@ -1130,6 +1130,37 @@ fn fixture_real_screenshot_of_fixture_region_only() {
         "FIXTURE shot {}x{} match={matching}/{total}",
         img.width, img.height
     );
+}
+
+/// 点の色 (pixel、D-146) の芯: フィクスチャ限定の装置の 1x1 の撮影と `hex_color` の組が塗りの色を返す。
+/// 守りの順はモックのテストが、`pixel` の道具の経路は release の手動確認が受け持つ (`cli::pixel` は tests/ から呼べない)
+#[test]
+#[ignore = "実機のフィクスチャ限定。cargo test -- --ignored --test-threads=1"]
+fn fixture_real_pixel_reads_fixture_fill_color() {
+    let f = Fixture::open("pixel");
+    let desktop = Win32Desktop::for_fixture(f.scope());
+    let (r, g, b) = FIXTURE_RGB;
+    let expected = format!("#{r:02X}{g:02X}{b:02X}");
+    // 縁と枠の影響を避けて内寄りの 3 点 (左上寄り、中央、右下寄り)
+    let (w, h) = (f.client.w as i32, f.client.h as i32);
+    let points = [f.at(12, 12), f.at(w / 2, h / 2), f.at(w - 13, h - 13)];
+    let colors: Vec<String> = points
+        .iter()
+        .map(|p| {
+            let img = desktop
+                .capture(Rect::new(p.x, p.y, 1, 1))
+                .expect("1x1 の撮影");
+            assert_eq!((img.width, img.height), (1, 1));
+            hex_color(&img, 0, 0).expect("1x1 の画素")
+        })
+        .collect();
+    println!(
+        "FIXTURE pixel points={} colors={colors:?} expected={expected}",
+        points.len()
+    );
+    for (p, c) in points.iter().zip(&colors) {
+        assert_eq!(c, &expected, "点 ({}, {}) の色", p.x, p.y);
+    }
 }
 
 #[test]
