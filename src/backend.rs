@@ -979,6 +979,28 @@ mod tests {
         );
     }
 
+    /// 別々に開いたハンドルでも、同じスレッドなら同じ名前の錠を再帰で取れる (持ち主はスレッドで決まる)。
+    /// 片方を解いても、もう片方の持ち分が残る。TUI の錠と TUI の中の実行器の錠はこれに依る (D-147、D-113)
+    #[test]
+    fn real_input_lock_separate_handles_recurse_on_same_thread() {
+        let name = format!("Local\\ai-cu-input-test-{}-recurse", std::process::id());
+        let mut a = RealInputLock::with_name(&name);
+        let mut b = RealInputLock::with_name(&name);
+        assert_eq!(a.try_acquire(), Ok(true), "1 つ目のハンドルで取れない");
+        assert_eq!(
+            b.try_acquire(),
+            Ok(true),
+            "同じスレッドの別のハンドルで取り直せない"
+        );
+        b.release();
+        assert!(
+            !other_thread_can_take(&name),
+            "片方を解いただけで錠が空いた (もう片方の持ち分が消えた)"
+        );
+        a.release();
+        assert!(other_thread_can_take(&name), "両方を解いた後も錠が空かない");
+    }
+
     /// 錠を解けないときは、差し替えた書き先 (MCP では `mcp::log`) に警告を 1 行書いて続ける (D-113、D-061)
     #[test]
     fn real_input_lock_unlock_failure_warns_through_the_injected_sink() {

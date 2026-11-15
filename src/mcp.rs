@@ -646,8 +646,9 @@ pub fn tools_with_approval(require: &BTreeSet<String>) -> Vec<Value> {
 }
 
 /// 画面を変える操作の道具 (run と一手ずつの入力の道具) の説明に足す 1 句 (D-093)。別の ai-cu の錠を待つこと (D-113)
-/// も書く。待ちの上限の秒は `run::INPUT_LOCK_WAIT_MS` と同じ (テスト `lead_note_mentions_input_lock_wait` が見る)
-const LEAD_NOTE: &str = "動かす前に画面の縁に枠を出し、枠が出ていなければ lead_ms (status の indicator) 待つ。その間の人の入力で 10 (error.reason=lead_input。何も送っていない)。別の ai-cu が画面を操作中なら終わるまで (最大 30 秒) 待ち、待った後は枠が出ていても lead_ms 待つ。待ちきれなければ input_busy (16。何も送っていない)";
+/// も書く (人が TUI を開いている間も錠を持つ。D-147)。待ちの上限の秒は `run::INPUT_LOCK_WAIT_MS` と同じ
+/// (テスト `lead_note_mentions_input_lock_wait` が見る)
+const LEAD_NOTE: &str = "動かす前に画面の縁に枠を出し、枠が出ていなければ lead_ms (status の indicator) 待つ。その間の人の入力で 10 (error.reason=lead_input。何も送っていない)。別の ai-cu が画面を操作中か、人が TUI を開いているなら終わるまで (最大 30 秒) 待ち、待った後は枠が出ていても lead_ms 待つ。待ちきれなければ input_busy (16。何も送っていない)";
 
 /// 道具の一覧 (順序は固定)。
 pub fn tools() -> Vec<Value> {

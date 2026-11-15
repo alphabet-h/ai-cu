@@ -831,7 +831,8 @@ mod tests {
 
     /// 16 の既定の文 (D-113): 終了コード 16 と `input_busy`、CLI と MCP で同じ文で、空でなく、コマンドの書き方を
     /// 含まない (文に「別の ai-cu (」を含むので、`mcp_hints_never_mention_cli_syntax` と同じく「ai-cu 」の後ろが
-    /// 英字でないことで見る)。何も送っていないこと、1 回だけやり直すこと、続くなら人に確かめることを書く
+    /// 英字でないことで見る)。何も送っていないこと、1 回だけやり直すこと、続くなら人に確かめることを書く。
+    /// 人が TUI を開いている間も 16 になるので (D-147)、それも書く
     #[test]
     fn input_busy_exit_code_and_hint() {
         assert_eq!(ErrorKind::InputBusy.exit_code(), 16);
@@ -847,7 +848,7 @@ mod tests {
         assert!(!subcommand, "{mcp}");
         assert!(!mcp.contains("`ai-cu"), "{mcp}");
         assert!(!mcp.contains("--"), "{mcp}");
-        for word in ["何も送っていない", "別の ai-cu", "1 回だけ", "人間"] {
+        for word in ["何も送っていない", "別の ai-cu", "1 回だけ", "人間", "TUI"] {
             assert!(mcp.contains(word), "{word}: {mcp}");
         }
     }

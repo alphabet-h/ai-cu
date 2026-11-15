@@ -93,7 +93,7 @@ pub fn guide_summary() -> String {
     name = "ai-cu",
     version = crate::build_info::VERSION,
     about = "AI が Windows のデスクトップを操作するための CLI (一手ずつのサブコマンド、または JSON の操作列)",
-    after_help = "初めて使う AI は、まず `ai-cu guide` を読む (要点版。座標の注意、前面化、終了コードごとの次の手)。全文は `ai-cu guide --full` (使い方の流れ、一手ずつの操作、操作列 JSON)。\n一手ずつ操作するなら、click / double-click / drag / move / scroll / type / key / focus / close / wait-for の各サブコマンド (`--shot PATH --window PROCESS` か `--shot PATH --region X,Y,W,H` で操作の後に撮る。出力は run と同じ)。focus / close / wait-for の対象は位置引数で、`--window` は撮る対象 (`--shot` と組む)。\n要素の位置は `find --window PROCESS [--name TEXT] [--type TYPE]` (UI Automation) で取れ、`center` をそのまま click に渡せる。何があるか分からないときは、先に `tree --window PROCESS` で要素の木 (1 行 1 要素の字下げ、`@x,y` は center) を見る。文字列は `text`。\n引数なしで、標準入力と標準出力の両方が端末のときは、設定を編集する TUI を起動する。\n`mcp` は MCP サーバー (stdio) として待ち受ける。クライアントの設定に `ai-cu mcp` を登録する (README の「MCP サーバーモード」)。\n終了コード: 0 成功 / 1 内部 / 2 使い方 / 3 操作列 / 4 ポリシー / 5 設定 / 6 緊急停止 / 7 フォアグラウンドガード / 8 OS / 9 開発シェルでの実入力の拒否 / 10 人が操作中 (shot、pixel、focus を行わない) / 11 前面にできない (focus) / 12 対象のウィンドウが無い (window) / 13 文字列を持つ要素が無い (text) / 14 画面がロックかセーバー (何も送らない) / 15 条件が時間内に満たされない (wait_for、run の wait_stable と wait_change。何も送らない) / 16 別の ai-cu が画面を操作中で待ちきれない (何も送らない)"
+    after_help = "初めて使う AI は、まず `ai-cu guide` を読む (要点版。座標の注意、前面化、終了コードごとの次の手)。全文は `ai-cu guide --full` (使い方の流れ、一手ずつの操作、操作列 JSON)。\n一手ずつ操作するなら、click / double-click / drag / move / scroll / type / key / focus / close / wait-for の各サブコマンド (`--shot PATH --window PROCESS` か `--shot PATH --region X,Y,W,H` で操作の後に撮る。出力は run と同じ)。focus / close / wait-for の対象は位置引数で、`--window` は撮る対象 (`--shot` と組む)。\n要素の位置は `find --window PROCESS [--name TEXT] [--type TYPE]` (UI Automation) で取れ、`center` をそのまま click に渡せる。何があるか分からないときは、先に `tree --window PROCESS` で要素の木 (1 行 1 要素の字下げ、`@x,y` は center) を見る。文字列は `text`。\n引数なしで、標準入力と標準出力の両方が端末のときは、設定を編集する TUI を起動する。\n`mcp` は MCP サーバー (stdio) として待ち受ける。クライアントの設定に `ai-cu mcp` を登録する (README の「MCP サーバーモード」)。\n終了コード: 0 成功 / 1 内部 / 2 使い方 / 3 操作列 / 4 ポリシー / 5 設定 / 6 緊急停止 / 7 フォアグラウンドガード / 8 OS / 9 開発シェルでの実入力の拒否 / 10 人が操作中 (shot、pixel、focus を行わない) / 11 前面にできない (focus) / 12 対象のウィンドウが無い (window) / 13 文字列を持つ要素が無い (text) / 14 画面がロックかセーバー (何も送らない) / 15 条件が時間内に満たされない (wait_for、run の wait_stable と wait_change。何も送らない) / 16 別の ai-cu が画面を操作中か、人が TUI を開いていて待ちきれない (何も送らない)"
 )]
 pub struct Cli {
     /// 追加の設定ファイル。deny を足せるが allow は広げられない (人間の設定が基本の層)
@@ -928,13 +928,17 @@ fn setup_tui_steps(exe: &str) -> String {
         None => key.to_string(),
     };
     format!(
-        "端末で \"{exe}\" を引数なしで (--config も AI_CU_CONFIG も付けずに) 起動すると TUI が開く。{} と{} を決め、{} に操作させるアプリ (例 notepad.exe) を足し、必要なら{} で画面を絞って保存する。設定が無い間は何も許可されない",
+        "端末で \"{exe}\" を引数なしで (--config も AI_CU_CONFIG も付けずに) 起動すると TUI が開く。{} と{} を決め、{} に操作させるアプリ (例 notepad.exe) を足し、必要なら{} で画面を絞って保存する。設定が無い間は何も許可されない。{SETUP_CLOSE_TUI}",
         at("general.input_enabled"),
         at("general.capture_enabled"),
         at("allow.processes"),
         at("allow.regions"),
     )
 }
+/// 人を TUI へ送る導入の文に添える 1 句。TUI は開いている間ずっと入力の錠を持つので、その間の AI の画面を変える
+/// 操作は 16 になる (D-147)。文末の句点は呼ぶ側が付ける
+const SETUP_CLOSE_TUI: &str =
+    "保存したら TUI を閉じる (開いている間は AI の画面を変える操作が終了コード 16 で断られる)";
 /// 床の場所を引けないときの、TUI の開き方の注記
 const SETUP_NO_FLOOR_LOCATION: &str =
     "設定の場所を引けないので、TUI は --config=PATH を付けたときだけ開く";
@@ -985,7 +989,7 @@ pub fn setup_guide(exe: &Path, paths: &ConfigPaths) -> String {
             out.push_str(&format!("場所: `{}`\n\n", p.display()));
             if p.exists() {
                 out.push_str(&format!(
-                    "ファイルはある。直すときは、端末で \"{exe_s}\" を引数なしで (--config も AI_CU_CONFIG も付けずに) 起動した TUI で直す。\n"
+                    "ファイルはある。直すときは、端末で \"{exe_s}\" を引数なしで (--config も AI_CU_CONFIG も付けずに) 起動した TUI で直す。{SETUP_CLOSE_TUI}。\n"
                 ));
             } else {
                 out.push_str(&format!(
@@ -2557,7 +2561,23 @@ mod tests {
         // 表示名は policy::tui_label を通さず字で書く (D-080。TUI の左の一覧での場所)
         assert_eq!(
             setup_tui_steps(r"C:\x\ai-cu.exe"),
-            "端末で \"C:\\x\\ai-cu.exe\" を引数なしで (--config も AI_CU_CONFIG も付けずに) 起動すると TUI が開く。「全般 (総スイッチ) > 実入力 (マウスとキー)」(general.input_enabled) と「全般 (総スイッチ) > 画面撮影」(general.capture_enabled) を決め、「許可リスト (allow) > アプリ (プロセス)」(allow.processes) に操作させるアプリ (例 notepad.exe) を足し、必要なら「許可リスト (allow) > 画面領域」(allow.regions) で画面を絞って保存する。設定が無い間は何も許可されない"
+            "端末で \"C:\\x\\ai-cu.exe\" を引数なしで (--config も AI_CU_CONFIG も付けずに) 起動すると TUI が開く。「全般 (総スイッチ) > 実入力 (マウスとキー)」(general.input_enabled) と「全般 (総スイッチ) > 画面撮影」(general.capture_enabled) を決め、「許可リスト (allow) > アプリ (プロセス)」(allow.processes) に操作させるアプリ (例 notepad.exe) を足し、必要なら「許可リスト (allow) > 画面領域」(allow.regions) で画面を絞って保存する。設定が無い間は何も許可されない。保存したら TUI を閉じる (開いている間は AI の画面を変える操作が終了コード 16 で断られる)"
+        );
+    }
+
+    /// 人を TUI へ送る導入の文は、ファイルの有無のどちらでも、保存したら TUI を閉じることを添える (D-147)
+    #[test]
+    fn setup_guide_tells_closing_tui_after_save() {
+        let exe = Path::new(r"C:\x\ai-cu.exe");
+        let t = setup_guide(exe, &setup_paths(missing_floor()));
+        assert!(t.contains(SETUP_CLOSE_TUI), "{t}");
+        let dir = unique_temp_dir("setup-guide-close-tui");
+        let f = dir.join("config.toml");
+        std::fs::write(&f, "version = 1\n").unwrap();
+        let t = setup_guide(exe, &setup_paths(FloorSource::DevFloor(f)));
+        assert!(
+            t.contains(&format!("TUI で直す。{SETUP_CLOSE_TUI}。")),
+            "{t}"
         );
     }
 
