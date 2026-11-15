@@ -1122,7 +1122,7 @@ target/release/ai-cu.exe pixel --config=target/manual-check/s34.toml <P2.x>,<P2.
 - [ ] 1 つ目: 終了コード `4`、`error.rule` が `deny.regions`、`pixels` は無い (P2 も返さない。全か無か)
 - [ ] 2 つ目: 終了コード `0` (deny の矩形に重ならない点は読める)
 
-(c) deny の窓が見えている点は 7、点の間にあるだけなら読める。手順 23 と同じく、上書き層 `target/manual-check/s34-deny.toml` で文字コード表 (charmap.exe) だけを deny に足す (`version = 1`、`[general] capture_enabled = true`、`[deny] processes = ["charmap.exe"]` だけ)。人が文字コード表をメモ帳の中ほどに重ねて置き (Z 順でメモ帳の上)、端末に返事を打つ。端末の窓はメモ帳にかけない。AI は文字コード表の位置を人に聞き、文字コード表の上の点 Q (メモ帳の rect の中) と、文字コード表を挟んで左右にあるメモ帳の本文の 2 点 L、R を決める。
+(c) deny の窓が見えている点は 7、点の間にあるだけなら読める。手順 23 と同じく、上書き層 `target/manual-check/s34-deny.toml` で文字コード表 (charmap.exe) だけを deny に足す (`version = 1`、`[general] capture_enabled = true`、`[deny] processes = ["charmap.exe"]` だけ)。人が文字コード表をメモ帳の中ほどに重ねて置き (Z 順でメモ帳の上)、端末に返事を打つ。端末の窓はメモ帳にかけない。人が窓を置く間にメモ帳が動くことがあるので、AI は `windows` でメモ帳の `rect` を読み直してから、文字コード表の位置を人に聞き (1 点ずつの `pixel` が 7 になる範囲でも分かる)、文字コード表の上の点 Q (メモ帳の rect の中) と、文字コード表を挟んで左右にあるメモ帳の本文の 2 点 L、R を決める。
 
 ```
 target/release/ai-cu.exe pixel --config=target/manual-check/s34-deny.toml <L.x>,<L.y> <Q.x>,<Q.y>
