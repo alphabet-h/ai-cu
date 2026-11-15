@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 
 use crate::config::{EnvLookup, ProcessEnv, dev_forbid_active};
 use crate::device::{
-    BackendError, Desktop, FrameState, HeldInputs, HelperOutcome, HiddenWindow, Image, Indicator,
-    InputDesktop, InputEvent, InputLock, InputSink, StackWindow, TopWindow, WindowInfo,
+    BackendError, CoverTraits, Desktop, FrameState, HeldInputs, HelperOutcome, HiddenWindow, Image,
+    Indicator, InputDesktop, InputEvent, InputLock, InputSink, StackWindow, TopWindow, WindowInfo,
     WindowOwner, WindowPresence,
 };
 use crate::geometry::{Point, Rect};
@@ -331,6 +331,7 @@ impl Desktop for Win32Desktop {
         &self,
         process: &str,
         title: Option<&str>,
+        admit: &dyn Fn(&WindowInfo) -> bool,
     ) -> Result<Option<TopWindow>, BackendError> {
         focus_allowed(self.fixture_hwnd, &ProcessEnv)?;
         // フィクスチャ専用では候補をフィクスチャだけにする (ツールウィンドウなので一覧には出ない)
@@ -338,7 +339,14 @@ impl Desktop for Win32Desktop {
             Some(h) => win32::window::describe(h).into_iter().collect(),
             None => win32::window::top_level_windows_detailed(),
         };
-        Ok(crate::device::match_window(&candidates, process, title))
+        // ポップアップらしい窓 (ツールチップなど) は後に回す (D-143)。読むのは一致した窓だけ
+        Ok(crate::device::match_window(
+            &candidates,
+            process,
+            title,
+            admit,
+            &|w| win32::window::looks_popup(w.info.hwnd),
+        ))
     }
 
     fn set_foreground(&self, hwnd: usize) -> Result<bool, BackendError> {
@@ -393,6 +401,14 @@ impl Desktop for Win32Desktop {
 
     fn owner_root(&self, hwnd: usize) -> usize {
         win32::window::owner_root(hwnd)
+    }
+
+    fn cover_traits(&self, hwnd: usize) -> Option<CoverTraits> {
+        win32::window::cover_traits(hwnd)
+    }
+
+    fn window_thread(&self, hwnd: usize) -> Option<u32> {
+        win32::window::window_thread(hwnd)
     }
 
     fn ui_elements(
@@ -961,6 +977,28 @@ mod tests {
             other_thread_can_take(&name),
             "取り直した錠が release で空かない"
         );
+    }
+
+    /// 別々に開いたハンドルでも、同じスレッドなら同じ名前の錠を再帰で取れる (持ち主はスレッドで決まる)。
+    /// 片方を解いても、もう片方の持ち分が残る。TUI の錠と TUI の中の実行器の錠はこれに依る (D-147、D-113)
+    #[test]
+    fn real_input_lock_separate_handles_recurse_on_same_thread() {
+        let name = format!("Local\\ai-cu-input-test-{}-recurse", std::process::id());
+        let mut a = RealInputLock::with_name(&name);
+        let mut b = RealInputLock::with_name(&name);
+        assert_eq!(a.try_acquire(), Ok(true), "1 つ目のハンドルで取れない");
+        assert_eq!(
+            b.try_acquire(),
+            Ok(true),
+            "同じスレッドの別のハンドルで取り直せない"
+        );
+        b.release();
+        assert!(
+            !other_thread_can_take(&name),
+            "片方を解いただけで錠が空いた (もう片方の持ち分が消えた)"
+        );
+        a.release();
+        assert!(other_thread_can_take(&name), "両方を解いた後も錠が空かない");
     }
 
     /// 錠を解けないときは、差し替えた書き先 (MCP では `mcp::log`) に警告を 1 行書いて続ける (D-113、D-061)

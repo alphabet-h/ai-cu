@@ -33,7 +33,7 @@ use ai_cu::error::{AppError, ErrorKind};
 use ai_cu::estop::StopSet;
 use ai_cu::geometry::{Point, Rect};
 use ai_cu::hint::{Hint, LEAD_USER_ACTIVE_HINT, Surface, hint};
-use ai_cu::image::{PngFileWriter, decode_png, frame_diff, thumb};
+use ai_cu::image::{PngFileWriter, decode_png, frame_diff, hex_color, thumb};
 use ai_cu::policy::Policy;
 use ai_cu::run::{self, ExecOptions, Executor, RunReport};
 use ai_cu::runner::{DeviceFactory, RealDevices};
@@ -1132,6 +1132,37 @@ fn fixture_real_screenshot_of_fixture_region_only() {
     );
 }
 
+/// 点の色 (pixel、D-146) の芯: フィクスチャ限定の装置の 1x1 の撮影と `hex_color` の組が塗りの色を返す。
+/// 守りの順はモックのテストが、`pixel` の道具の経路は release の手動確認が受け持つ (`cli::pixel` は tests/ から呼べない)
+#[test]
+#[ignore = "実機のフィクスチャ限定。cargo test -- --ignored --test-threads=1"]
+fn fixture_real_pixel_reads_fixture_fill_color() {
+    let f = Fixture::open("pixel");
+    let desktop = Win32Desktop::for_fixture(f.scope());
+    let (r, g, b) = FIXTURE_RGB;
+    let expected = format!("#{r:02X}{g:02X}{b:02X}");
+    // 縁と枠の影響を避けて内寄りの 3 点 (左上寄り、中央、右下寄り)
+    let (w, h) = (f.client.w as i32, f.client.h as i32);
+    let points = [f.at(12, 12), f.at(w / 2, h / 2), f.at(w - 13, h - 13)];
+    let colors: Vec<String> = points
+        .iter()
+        .map(|p| {
+            let img = desktop
+                .capture(Rect::new(p.x, p.y, 1, 1))
+                .expect("1x1 の撮影");
+            assert_eq!((img.width, img.height), (1, 1));
+            hex_color(&img, 0, 0).expect("1x1 の画素")
+        })
+        .collect();
+    println!(
+        "FIXTURE pixel points={} colors={colors:?} expected={expected}",
+        points.len()
+    );
+    for (p, c) in points.iter().zip(&colors) {
+        assert_eq!(c, &expected, "点 ({}, {}) の色", p.x, p.y);
+    }
+}
+
 #[test]
 #[ignore = "実機のフィクスチャ限定。cargo test -- --ignored --test-threads=1"]
 fn fixture_real_window_list_reports_fixture_rect() {
@@ -1890,6 +1921,45 @@ fn fixture_real_at_point_root_is_listed_in_stack_windows() {
         listed.rect,
         listed.see_through,
         stack.len()
+    );
+}
+
+/// 撮影の隠れの判定の読みの口 (D-142): フィクスチャ A の一部に重ねてフィクスチャ B を開く (`FixtureWindow::open` は
+/// `WS_EX_TOPMOST | WS_EX_TOOLWINDOW` で、窓ごとに別のスレッドで動く)。重なりの点の窓は B で pid は A と同じ、
+/// B の `cover_traits` は `plain_top` が偽 (ツールウィンドウ) で `see_through` が偽、A と B のスレッドは
+/// どちらも読めて互いに違う (別のスレッドの同じ pid の窓は D-142 で飛ばさない、の前提)。読み取りだけ (入力も撮影もしない)
+#[test]
+#[ignore = "実機のフィクスチャ限定。cargo test -- --ignored --test-threads=1"]
+fn fixture_real_cover_traits_of_tool_window() {
+    let a = Fixture::open("cover-a");
+    let b = Fixture::open_at("cover-b", 320);
+    let (ha, hb) = (a.win.hwnd(), b.win.hwnd());
+    let frame_a = window::describe(ha)
+        .and_then(|d| d.rect)
+        .expect("A の枠の矩形");
+    let frame_b = window::describe(hb)
+        .and_then(|d| d.rect)
+        .expect("B の枠の矩形");
+    // B の左端の少し内側で、A の枠の中にもある点 (重なり)
+    let p = Point::new(frame_b.x + 10, frame_b.center().y);
+    assert!(frame_a.contains(p), "点が A の枠の中: {p:?} {frame_a}");
+    let at = window::at_point(p).expect("重なりの点の窓");
+    assert_eq!(at.hwnd, hb, "重なりの点の窓は後から開いた B");
+    // A の中央は B の左端の列に当たる (320 ずらしで幅 640) ので、B に掛からない A の左寄りの点で A を引く
+    let pa = Point::new(frame_a.x + 10, frame_a.center().y);
+    assert!(!frame_b.contains(pa), "点が B の枠の外: {pa:?} {frame_b}");
+    let a_info = window::at_point(pa).expect("A の左寄りの点の窓");
+    assert_eq!(a_info.hwnd, ha, "A の左寄りの点の窓は A");
+    assert_eq!(at.pid, a_info.pid, "A と B は同じ pid");
+    let traits = window::cover_traits(hb).expect("B の性質が読める");
+    assert!(!traits.plain_top, "B はツールウィンドウ: {traits:?}");
+    assert!(!traits.see_through, "B は透けない: {traits:?}");
+    let ta = window::window_thread(ha).expect("A のスレッドが読める");
+    let tb = window::window_thread(hb).expect("B のスレッドが読める");
+    assert_ne!(ta, tb, "A と B は別のスレッド");
+    println!(
+        "FIXTURE cover_traits point={},{} a={ha:#x} b={hb:#x} pid={} traits={traits:?} thread_a={ta} thread_b={tb}",
+        p.x, p.y, at.pid
     );
 }
 
@@ -3042,7 +3112,7 @@ fn fixture_real_wait_for_sees_fixture_window_and_element_and_times_out_on_absenc
     let desktop = Win32Desktop::for_fixture(f.scope());
     let started = Instant::now();
     let w = desktop
-        .find_window(&exe_name, Some(title))
+        .find_window(&exe_name, Some(title), &|_| true)
         .expect("find_window")
         .expect("フィクスチャ");
     let q = ElementQuery {

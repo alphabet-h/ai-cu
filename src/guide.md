@@ -52,8 +52,8 @@ ai-cu double-click X Y / ai-cu drag X1 Y1 X2 Y2 / ai-cu move X Y / ai-cu scroll 
 
 - `--shot PATH` は、操作の後に `--settle-ms` (既定 300 ミリ秒) 待ってから撮る (操作、待ち、撮影の 3 操作の操作列になるので、出力の `executed` は 3。`--settle-ms 0` なら待ちが無く 2。`auto` なら画面が落ち着くまで (最長 3 秒) 待って撮り、2。落ち着かずに撮れば `settled` が false)。この撮影は操作列の `screenshot` と同じ扱いで、無操作の判定 (終了コード 10) は掛からない。だから「押して撮る」は 1 回で済み、`shot` を別に呼んで 3 秒待たなくてよい
 - 撮る範囲は `--window PROCESS` (対象のウィンドウ。題名で絞るなら `--window-title TEXT`) か `--region X,Y,W,H` (`windows` の `rect`)。`--window` の矩形は撮る直前に解くので、ウィンドウが動いても追従する。出力の `screenshots[].window` で、撮ったウィンドウが意図したものかを確かめる。見つからない / 最小化 / 画面の外なら終了コード 12 (操作は済んでいる)。どちらも省くと全画面になる (既定の設定では拒否)
-- 撮影は「その矩形に見えているもの」を撮る (ウィンドウ自身の中身ではない)。対象の一部が別のウィンドウに隠れていると、そのウィンドウの中身 (人の作業中の画面) が写り込むので、`--window` は撮らずに終了コード 7 で止まる。先に `focus` で前面にしてから撮る。`--region` には隠れの確認が無い (拒否されたウィンドウが見えていれば、どちらも 7) ので、ウィンドウを撮るなら `--window` を使う
-- 隠れの 7 の `error.detail` は、覆っている窓の `window`、隠れを見つけた点の `point`、その窓の見えている部分の外接矩形の `visible`、`see_through`。`see_through` は、その窓が deny の窓の判定で覆いに数えない窓か (透けうる窓など。条件は ai-cu の安全機能の文書) を言う。隠れの判定はこの値を見ないので、真でも 7。撮影の対象の 12 (許可された窓が最小化、または画面の外) と、起動した側の窓を撮ろうとした 7 も `error.detail.window` を持つ。`focus` が通っても同じ 7 が続くなら、`focus` を繰り返さず `find` と `text` で読み、画像が要るならその窓 (`error.detail.window`) を片付けてもらうよう人間に頼む
+- 撮影は「その矩形に見えているもの」を撮る (ウィンドウ自身の中身ではない)。対象の一部が別のウィンドウに隠れていると、そのウィンドウの中身 (人の作業中の画面) が写り込むので、`--window` は撮らずに終了コード 7 で止まる。対象と同じアプリが対象の窓と同じスレッドで出した、題名が無いかツールウィンドウの窓 (ツールチップ、メニューなど) は、透けなければ隠れに数えない (設定で拒否された窓は機密の判定で断る)。先に `focus` で前面にしてから撮る。`--region` には隠れの確認が無い (拒否されたウィンドウが見えていれば、どちらも 7) ので、ウィンドウを撮るなら `--window` を使う
+- 隠れの 7 の `error.detail` は、覆っている窓の `window`、隠れを見つけた点の `point`、その窓の見えている部分の外接矩形の `visible`、`see_through`。`see_through` は、その窓が deny の窓の判定で覆いに数えない窓か (透けうる窓など。条件は ai-cu の安全機能の文書) を言う。真なら 7 (同じアプリの付属の窓を数えない例外も、透ける窓には効かない)。撮影の対象の 12 (許可された窓が最小化、または画面の外) も `error.detail.window` を持つ (許可の外と起動した側の窓は探さないので、見つからない 12 で `detail` は無い)。`focus` が通っても同じ 7 が続くなら、`focus` を繰り返さず `find` と `text` で読み、画像が要るならその窓 (`error.detail.window`) を片付けてもらうよう人間に頼む
 - `--scale 0.5` か `--max-edge N` (長辺の上限) で画像を縮めて保存できる
 - `--shot` は自分の操作の結果を見るためのもの。撮るためだけに操作を足さない (人が操作中なら `shot` が断るのと同じ理由)
 - 文字が複数行、または引用符を含むなら、`ai-cu type -` で標準入力から読む。座標は負でもよい (複数モニタ)
@@ -77,6 +77,7 @@ ai-cu text --window notepad.exe --type document    # 文書の本文を読む
 - 何があるか分からないときは、先に `tree` で木を見る。行は `種類 "名前" @x,y` で `@x,y` は center。名前の無い入れ物と画面外は畳む (`--all` で全部)。数の読み方は出力の `note`
 - 要素の名前は表示言語に依る (「保存」/ "Save")。`find` で実際の名前を見てから使う
 - 対象のウィンドウが見つからない / 最小化なら 12。別のウィンドウに隠れていても読める (撮影と違う)
+- 窓の名指し (`--window`、`focus` / `close` / `wait_for` の対象) は、`windows` に出る窓だけから探す。一致する窓のうち、ツールチップなどのポップアップらしい窓は後に回す (本体が一致すれば本体に解ける。D-143)。ポップアップの中身 (メニューやフライアウトの項目) を読むときと、狙いを確かにしたいときは `--window-title` (focus / close / wait-for では `--title`、操作列では `title`。例 PopupHost) で絞る。許可の外と ai-cu を起動した側の窓は、あっても見つからないときと同じ 12 (`focus` は 11 の `not_found`) で、`wait_for` では無いと数える (待つと 15)。12 が続くなら `windows` に対象が出ているかを確かめ、出ていなければ人間に許可を頼む。実行ファイル名が許可の外なら、窓が無くても 4
 - 起動の直後の窓では、`find` が `ok: true` の空の結果を返し、2 回目で取れた事例がある。空を「無い」と決めず、`wait_for` の `element` で待つか、1 回読み直す
 
 条件がそろうまで待つなら `wait_for` (読むだけ。許可は `find` と同じ)。起動やクリックの後に、固定の `wait` や「撮って見直す」往復の代わりに使う。
@@ -89,6 +90,15 @@ ai-cu wait-for notepad.exe --title "保存の確認" --absent                   
 - 操作列では `{"type": "wait_for", "process": "notepad.exe", "element": {"name": "保存", "type": "button"}}`。条件は一番細かい指定で決まる (`text` > `element` > ウィンドウ)。`absent` は「無くなるまで」
 - 250 ミリ秒の待ちを挟んで確かめ、`timeout_ms` (既定 10 秒。MCP ではクライアントの制限時間より短く) を超えると終了コード 15 (同じ条件で繰り返し待たず、状態と条件を見直す)。満たされると `waited[].element.center` をそのまま `click` に渡せる。`absent` が即時に満たされたら `note` を読む
 
+点の色を確かめるなら `pixel` (読むだけ。撮って画像から読む代わりに使う)。
+
+```
+ai-cu pixel 2546,965 2600,965    # 2 点の色を読む (点は X,Y の形。オプションは点の前に置く)
+```
+
+- 結果は `{"ok": true, "pixels": [{"x", "y", "color": "#RRGGBB"}]}` で入力の順 (MCP は `points: [{x, y}]`)。点は物理ピクセルの画面座標で 1〜64 個。`find` の `center` をそのまま渡せる。画面の外の点、`X,Y` でない形は 2
+- 許可と守りは `shot` と同じ (撮影の許可、ロック 14、`deny.regions` 4、人の操作中 10、deny の窓が点に見えていれば 7) で、点ごとの 1x1 に掛ける。どれか 1 点でも断れば何も読まない。7 なら `detail.visible` にかからない点を選び直す (窓を動かすのは人間に頼む)
+
 ## 座標 (最も間違えやすい)
 
 - 座標は、仮想デスクトップの物理ピクセル。`--scale` も `--max-edge` も無ければ、画像の 1 ピクセルは画面の 1 ピクセル (`scale` が 1)。MCP は既定で長辺 1568 に縮めるので、出力の `scale` を必ず使う
@@ -99,7 +109,7 @@ ai-cu wait-for notepad.exe --title "保存の確認" --absent                   
 ## ウィンドウを前面にする
 
 - キーと文字は前面のウィンドウに届く。マウスは座標の下のウィンドウに届く。ai-cu は送る直前に、その届く先が許可されたアプリかを確かめる
-- 手順は 1 つ: `ai-cu focus notepad.exe` を行う (操作列なら先頭に `{"type": "focus", "process": "notepad.exe"}` を置く)。同じアプリのウィンドウが複数あれば、`--title` (操作列では `title`) に題名の一部を書く (前面に近いものから最初に一致した 1 つを選ぶ)。既に前面なら何もしない。CLI として呼ぶたびに起動されるときは、あなたを動かしている端末が前面なら、対象が別のウィンドウの後ろに隠れていても効く (常駐の MCP では、断られたら補助プロセスで 1 回だけ試し直す。下の「MCP の道具として呼ばれているとき」)
+- 手順は 1 つ: `ai-cu focus notepad.exe` を行う (操作列なら先頭に `{"type": "focus", "process": "notepad.exe"}` を置く)。同じアプリのウィンドウが複数あれば、`--title` (操作列では `title`) に題名の一部を書く (ポップアップを後に回し前面に近い 1 つを選ぶ)。既に前面なら何もしない。CLI として呼ぶたびに起動されるときは、あなたを動かしている端末が前面なら、対象が別のウィンドウの後ろに隠れていても効く (常駐の MCP では、断られたら補助プロセスで 1 回だけ試し直す。下の「MCP の道具として呼ばれているとき」)
 - 成功の出力の `focused` に、前面にしたウィンドウ (`process`、`title`) が入る。意図したウィンドウかを確かめる (対象がダイアログを出していれば、そのダイアログになる)。`helper` は、MCP の focus が補助プロセスで前面にしたときだけ true
 - `focus` が終了コード 11 で止まったら、何も送っていない。メッセージと `error.reason` で理由が分かる
   - 見つからない (`not_found`)、または閉じられた (`closed`): `windows` で実行ファイル名と題名を確かめる
@@ -132,7 +142,7 @@ ai-cu wait-for notepad.exe --title "保存の確認" --absent                   
 - `type` は 1 文字ずつ 20 ミリ秒の間隔で送る (`interval_ms` で変えられる)。間隔を 0 にすると、アプリが文字を落とすことがある。改行 (`\n`) は Enter として送る
 - `type` の文字は Unicode として送る (改行とタブはキーとして送る)。メモ帳では IME がオンでも未確定に入らなかったが、IME がオンだと受け手によっては文字の順が乱れたり変換の窓が出たりする (GPUI の入力欄で観測)。先に `key` の `imeoff` で切ってから打ち、打った後に `text` か `shot` で確かめる。IME のキーは `key` の `kanji` (半角/全角)、`imeon`、`imeoff`、`convert` (変換)、`nonconvert` (無変換) で送る (反応は IME とアプリに依るので、送った後に撮って確かめる)。IME がオンのとき、`key` で 1 字ずつ送った文字は未確定に入る。使えるキーの名前は、未知のキーの失敗の出力の最上位の `issues[].message` に出る
 - 入力欄を `click` して続けて `type` / `key` を書くと、間に 200 ミリ秒待つ (最初の文字が落ちるのを避ける)。それでも先頭が欠けるアプリでは、間に `wait` (300〜500) を書く。`text` で値を読めない入力欄 (gpui など) は、撮って確かめる
-- `key` の例: `ctrl+s`、`alt+tab`、`enter`、`f5`、`shift+left`。`Win` を含む組み合わせ、`Alt+F4`、`Ctrl+Alt+` 系、`Ctrl+Shift+Esc`、`Ctrl+Esc` は常に拒否される (設定でも許可できない。`modifiers` に `ctrl` と `alt` を両方書いたクリックも)
+- `key` の例: `ctrl+s`、`alt+tab`、`enter`、`f5`、`shift+left`。`Win` を含む組み合わせ、`Alt+F4`、`Ctrl+Alt+` 系、`Ctrl+Shift+Esc`、`Ctrl+Esc`、`PrintScreen` (修飾キーにかかわらず。画面は `screenshot` か `shot` で撮る) は常に拒否される (設定でも許可できない。`modifiers` に `ctrl` と `alt` を両方書いたクリックも)
 - 窓のタイトルバーの `drag` は窓がカーソルの後から動くので、1 歩を掴んだ点から進む向きの窓の端までの距離の半分以下にする (`steps` を増やし、`duration_ms` は 1 歩 50 ms ほど)。各点の下が許可された窓かを見るため
 - 1 回の操作列は短く保つ (数個から十数個)。長い手順は、区切りごとに撮って確かめながら進める
 - `screenshot`、`wait_stable`、`wait_change` の `region` は必ず書く (省略すると全画面になる)。`path` は絶対パスで書く (相対パスは ai-cu を起動した作業ディレクトリが基準)
@@ -162,20 +172,20 @@ ai-cu wait-for notepad.exe --title "保存の確認" --absent                   
 | 4 | policy_denied | 設定で拒否された。回避せず、何を許可してほしいかを人間に伝える (`error.fix` があればそのまま人間に伝える。設定は書き換えない)。組み込みの拒否なら別の手段を使い、保存先の規則 (.png など) なら path を直す |
 | 5 | config | 設定ファイルが壊れている。人間に直してもらう |
 | 6 | stopped | 人間がマウスを動かした、または停止の目印などで止まった。勝手に再実行せず、人間に確かめる |
-| 7 | foreground_guard | `reason` が `target_changed` (`type` の途中で前面が別のアプリに変わった。残りだけを送り、全文を打ち直さない) か `partial` が true なら途中まで行った (入力か前面化を一部起こした。drag の途中で断られたときは `detail.point` が断った点で、押したボタンは離してある)。`partial` が false なら失敗した操作の入力は送っていない。届く先のウィンドウが許可されていないか、前面にない。`windows` で確かめる。`partial` が true なら打ち直さず `hint` に従う。`executed` が 1 以上なら操作ごと打ち直さない。`executed` が 0 で `partial` も false なら操作列の先頭に `focus` を置いて再試行する。`focus` 自体が 7 (対象が許可されていない) など許可の外れなら、`error.fix` があればそのまま人間に伝える (設定は書き換えない)。`reason` が `host_unknown` (MCP で、ai-cu を起動した側を特定できない) なら `focus` や再試行で変わらない。撮影の 7 (拒否されたウィンドウが見えている) も含め `hint` に従う |
+| 7 | foreground_guard | `reason` が `target_changed` (`type` の途中で前面が別のアプリに変わった。残りだけを送り、全文を打ち直さない) か `partial` が true なら途中まで行った (入力か前面化を一部起こした。drag の途中で断られたときは `detail.point` が断った点で、押したボタンは離してある)。`partial` が false なら失敗した操作の入力は送っていない。届く先のウィンドウが許可されていないか、前面にない。`windows` で確かめる。`partial` が true なら打ち直さず `hint` に従う。`executed` が 1 以上なら操作ごと打ち直さない。`executed` が 0 で `partial` も false なら操作列の先頭に `focus` を置いて再試行する。許可の外れなら、`error.fix` があればそのまま人間に伝える (設定は書き換えない)。`reason` が `host_unknown` (MCP で、ai-cu を起動した側を特定できない) なら `focus` や再試行で変わらない。撮影の 7 (拒否されたウィンドウが見えている) も含め `hint` に従う |
 | 8 | os_error | OS の呼び出しの失敗。少し待って 1 回だけ再試行し、だめなら人間に伝える |
 | 9 | forbidden_dev_env | ai-cu の開発用の環境で実行している。使う側では出ない。人間に伝える |
-| 10 | user_active | 何もしていない (`shot` は撮らず、`focus` は前面にしていない、`close` は前面で使われている対象を閉じていない)。人がマウスやキーボードを使っている最中 (自分の `run` の直後も)。数秒待って 1 回だけ再試行し、だめなら人間に確かめる。`reason` が `keys_held` なら、押されたままのキーやボタンを人間に確かめる |
+| 10 | user_active | 何もしていない (`shot` は撮らず、`pixel` は色を読まず、`focus` は前面にしていない、`close` は前面で使われている対象を閉じていない)。人がマウスやキーボードを使っている最中 (自分の `run` の直後も)。数秒待って 1 回だけ再試行し、だめなら人間に確かめる。`reason` が `keys_held` なら、押されたままのキーやボタンを人間に確かめる |
 | 11 | focus_failed | 入力は送っていない。`focus` の対象を前面にできなかった (理由は `reason`。上の「ウィンドウを前面にする」)。繰り返さず、人間に対象を前面に出してもらう |
 | 12 | window_not_found | 対象のウィンドウ (`--window`、`screenshot` の `window`、`find`、`tree`、`text`) が見つからない / 最小化 / 画面の外。撮影も読み取りもしていない (`--shot` と操作列の `screenshot` では `executed` を見る)。`windows` で実行ファイル名と題名を確かめる。起動した直後なら `wait_for` で出るのを待つ。最小化は人間に復元してもらう。`close` の 12 は、何も閉じていない (もう閉じている場合を含む) |
 | 13 | element_not_found | 何もしていない。`text` の条件で文字列を持つ要素が無い。`find` で要素の名前と種類を確かめる (name は部分一致) |
 | 14 | desktop_unavailable | 画面のロック (`reason` が `locked`)、スクリーンセーバー、UAC などの別の画面。待っても再試行しても直らない。人間に解除を頼み、解除されたと聞いてから状態を見直して続ける。撮影を付けない `close` と、`wait_for` だけの操作列はロック中も使える |
 | 15 | wait_timeout | `wait_for` (`wait_stable`、`wait_change`) の条件が時間内に満たされなかった。何も送っていない (それより前の操作は済んでいる。`executed` を見る)。同じ条件で繰り返し待たない。`windows`、`find`、`text`、`shot` で今の状態を見て、条件が実際の表示と合っているかと、画面が進まない原因 (ダイアログ、人の操作、アプリの停止) を確かめてから次を決める。画面の待ちなら `hint` に従う |
-| 16 | input_busy | 何も送っていない。別の ai-cu (別の AI か、人が動かしている ai-cu) が画面を変える操作の最中で、30 秒待っても終わらなかった。数十秒待ってから 1 回だけやり直す。続けて断られるなら、人間に別の AI の動きを確かめてもらう |
+| 16 | input_busy | 何も送っていない。別の ai-cu (別の AI か、人が動かしている ai-cu) が画面を変える操作の最中か、人が TUI を開いていて、30 秒待っても終わらなかった。数十秒待ってから 1 回だけやり直す。続けて断られるなら、人間に別の AI の動きを確かめてもらう |
 
 どこまで実行したか: 操作に入った後の失敗 (`run` と一手ずつの操作) には、最上位に成功と同じ `executed` (済んだ操作の数。`action_index` と等しい)、`screenshots`、`focused` などと、失敗した操作が入力や前面化を一部でも起こしたかの `partial` が付く。`executed` が無い失敗は、操作に入る前 (検証など) で、何も送っていない。`executed` が 1 以上か `partial` が true なら、`hint` の頭に実行済みの一文が付く。操作ごと打ち直さず (クリックが二重になる)、`windows` や `shot` で状態を見直してから残りを送る。
 
-`error.detail` の状況 (題名は入れない): 7 (入力のガード、`focus` と `close` の対象、撮影) は対象の `window` (`process`、`class`、`pid`、`hwnd`。無ければ null) と、マウスなら点の `point`。撮影の window は拒否された窓 (ゴーストなら class Ghost) か、隠れなら覆う窓 (`point`、`see_through` も) か、起動した側の窓で、前の 2 つは見えている部分の外接矩形の `visible`。6 の人のマウスでの停止は `cursor`、`from`、`expected`、`distance_px`。10 (`focus` と `close`) は `idle_ms` と `min_idle_ms`、10 の `keys_held` は `keys` と `buttons`。14 は `input_desktop` (名前か null。`reason` は `screensaver`、`other_desktop`、`locked` のどれか)。15 は `timeout_ms`、`checks`、`unmet` (`window` / `element` / `text`、画面の待ちは `stable` / `change`)、`window` (題名なし。無ければ null)、画面の待ちは `rect` と `last_changed_ratio` も。16 は待った長さの `waited_ms`。
+`error.detail` の状況 (題名は入れない): 7 (入力のガード、`focus` と `close` の対象、撮影) は対象の `window` (`process`、`class`、`pid`、`hwnd`。無ければ null) と、マウスなら点の `point`。撮影の window は拒否された窓 (ゴーストなら class Ghost) か、隠れなら覆う窓 (`point`、`see_through` も) で、どちらも見えている部分の外接矩形の `visible`。6 の人のマウスでの停止は `cursor`、`from`、`expected`、`distance_px`。10 (`focus` と `close`) は `idle_ms` と `min_idle_ms`、10 の `keys_held` は `keys` と `buttons`。14 は `input_desktop` (名前か null。`reason` は `screensaver`、`other_desktop`、`locked` のどれか)。15 は `timeout_ms`、`checks`、`unmet` (`window` / `element` / `text`、画面の待ちは `stable` / `change`)、`window` (題名なし。無ければ null)、画面の待ちは `rect` と `last_changed_ratio` も。16 は待った長さの `waited_ms`。
 
 `error.fix` が無いときに許可を頼むなら、設定の書き方で伝える。アプリは実行ファイル名 (例 `notepad.exe`)、領域は `x,y,w,h`、キーは `ctrl+s` の形。
 
@@ -188,14 +198,15 @@ ai-cu wait-for notepad.exe --title "保存の確認" --absent                   
 
 ## MCP の道具として呼ばれているとき
 
-ai-cu は MCP サーバー (`ai-cu mcp`) としても動く。そのときは、CLI のサブコマンド (全文 `guide --full` の「一手ずつ操作する」) が同じ名前の道具 (`windows`、`shot`、`find`、`tree`、`text`、`wait_for`、`focus`、`click`、`double_click`、`drag`、`move`、`scroll`、`type`、`key`、`close`、`run`、`config`、`guide`) になり、引数は道具の inputSchema のとおり (一手ずつの `--shot` は `shot` オブジェクト)。結果は CLI と同じ JSON が text で返り、撮った画像は成功なら `image` としてそのまま見える (既定で長辺 1568 に縮む。`max_edge`。`path` を書けばファイルにも保存する)。失敗は `isError` の結果に CLI と同じ `error` (`exit_code` と `hint`) と最上位の `executed`、`partial` が入るので、この手引きの終了コードの表がそのまま使える。
-クライアントの制限時間 (Codex は既定 60 秒) に収まるよう、`run` は短く保つ。制限時間で切れた呼び出しをそのまま再発行せず、`windows` や `shot` で状態を見直す。人が実行を止めた直後 (cooldown) を含め、10 や 14 で断られたら、再試行の前に MCP だけの道具 `status` で原因と待つ時間 (`retry_after_ms`) を読む。人から青枠が出ないと言われたとき、または画面を変える道具が毎回 `lead_ms` ほど長くかかるときは、`status` の `indicator.frame` を読む (枠は撮影に写らないので、自分では気づけない)。別の ai-cu が画面を操作している間は、その終わりまで錠を待ってから `lead_ms` をまるごと待つので長くなる (30 秒で待ちきれなければ 16)。ai-cu を起動した側のウィンドウは、設定にかかわらず対象にならない (7)。MCP の `hint` は、CLI の書き方ではなく道具の名前で書いてある。道具が終了コードも無く拒否されるならクライアントの判定 (auto モードで allow か ask のルールが無い、dontAsk モードで毎回人の確認が要る `mcp.require_approval` の道具)。人間にルールかモードを見直してもらう。
+ai-cu は MCP サーバー (`ai-cu mcp`) としても動く。そのときは、CLI のサブコマンド (全文 `guide --full` の「一手ずつ操作する」) が同じ名前の道具 (`windows`、`shot`、`pixel`、`find`、`tree`、`text`、`wait_for`、`focus`、`click`、`double_click`、`drag`、`move`、`scroll`、`type`、`key`、`close`、`run`、`config`、`guide`) になり、引数は道具の inputSchema のとおり (一手ずつの `--shot` は `shot` オブジェクト)。結果は CLI と同じ JSON が text で返り、撮った画像は成功なら `image` としてそのまま見える (既定で長辺 1568 に縮む。`max_edge`。`path` を書けばファイルにも保存する)。失敗は `isError` の結果に CLI と同じ `error` (`exit_code` と `hint`) と最上位の `executed`、`partial` が入るので、この手引きの終了コードの表がそのまま使える。
+クライアントの制限時間 (Codex は既定 60 秒) に収まるよう、`run` は短く保つ。制限時間で切れた呼び出しをそのまま再発行せず、`windows` や `shot` で状態を見直す。人が実行を止めた直後 (cooldown) を含め、10 や 14 で断られたら、再試行の前に MCP だけの道具 `status` で原因と待つ時間 (`retry_after_ms`) を読む。人から青枠が出ないと言われたとき、または画面を変える道具が毎回 `lead_ms` ほど長くかかるときは、`status` の `indicator.frame` を読む (枠は撮影に写らないので、自分では気づけない)。別の ai-cu が画面を操作している間は、その終わりまで錠を待ってから `lead_ms` をまるごと待つので長くなる (30 秒で待ちきれなければ 16)。ai-cu を起動した側のウィンドウには、設定にかかわらず送らない (7)。MCP の `hint` は、CLI の書き方ではなく道具の名前で書いてある。道具が終了コードも無く拒否されるならクライアントの判定 (auto モードで allow か ask のルールが無い、dontAsk モードで毎回人の確認が要る `mcp.require_approval` の道具)。人間にルールかモードを見直してもらう。
 
 前面化について: 常駐の MCP サーバーは、起動の後に人が何か入力すると、前面化の権利を失う。そこで `focus` は、自分の呼び出しが断られて前面があなたの端末 (ai-cu を起動した側) なら、使い捨ての補助プロセスを起動して前面化を 1 回だけ頼む。前面が人の使っている別のアプリなら、補助プロセスも使わない (人の操作を奪わない)。補助を使ったかは、失敗の `error.detail` の `helper` と `helper_result` で分かる。それでも 11 (`reason` が `refused_host_front`) なら、`focus` を繰り返さず、人間に対象のウィンドウを前面に出してもらい (クリックでよい)、`windows` で対象の `foreground` が true になったのを確かめてから続ける。中身を読むだけなら、前面でなくても `find` と `text` で読める。起動した側を特定できないとき (7、`reason` が `host_unknown`) は、実入力の道具がすべて断られる (表の 7)。片付けで閉じるなら `close` (前面にしなくてよい)。
 
 ## ほかのコマンド
 
 - `ai-cu wait-for PROCESS [--title TEXT] [--name TEXT] [--type TYPE] [--text TEXT] [--absent] [--timeout-ms MS]`: 条件がそろうまで待つ (撮影の許可が要る)
+- `ai-cu pixel X,Y [X,Y ...]`: 画面の点の色を `#RRGGBB` で読む (撮影の許可が要る。上の「要素を探す (find) と文字列を読む (text)」)
 - `ai-cu config show`: いま有効な許可と拒否
 - `ai-cu validate <file>`: 実行せずに検証する
 - `ai-cu run <file> --dry-run`: 検証と、何が送られるかの確認

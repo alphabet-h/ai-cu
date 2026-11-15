@@ -70,6 +70,17 @@ pub fn downscale(img: &Image, scale: f64) -> Image {
     }
 }
 
+/// 画像の点 (x, y) の色を `#RRGGBB` (大文字の 16 進) で返す (D-146)。アルファは見ない。
+/// 画像の外、または画素の数が大きさに足りなければ None
+pub fn hex_color(img: &Image, x: u32, y: u32) -> Option<String> {
+    if x >= img.width || y >= img.height {
+        return None;
+    }
+    let i = ((y as usize) * (img.width as usize) + (x as usize)) * 4;
+    let p = img.rgba.get(i..i + 3)?;
+    Some(format!("#{:02X}{:02X}{:02X}", p[0], p[1], p[2]))
+}
+
 /// 実際に使う縮尺 (D-072): `scale` と `max_edge / 長辺` の小さい方。縮める向きだけで、
 /// `max_edge` が無い、長辺が 0、長辺が `max_edge` 以下なら `scale` のまま。長辺は撮る矩形の `max(w, h)` (物理ピクセル)。
 /// `Some(0)` は呼び出し側の形の確認で弾く (debug では panic)。
@@ -156,20 +167,29 @@ pub fn decode_png(bytes: &[u8]) -> Result<Image, String> {
 /// PNG のファイルの先頭 8 バイトの署名。
 const PNG_SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
 
-/// `\\?\` か `\\.\` で始まるか (D-075)。区切りは `\` と `/` の両方 (`//?/C:/s` も真)。
-/// 字面の正規化と部品の比較を逃れる書き方なので、撮影の保存先と設定の save_dirs の両方で断る。
+/// 断るパスの形の並び (`\\?\`、`\\.\`、`\??\`) を文に書くときの字面 (D-075、D-140)。
+/// 撮影の保存先、`--log` のファイル、設定の save_dirs の断りの文で使う。
+pub const DEVICE_PREFIXES_TEXT: &str = "\\\\?\\、\\\\.\\、\\??\\";
+
+/// `\\?\` か `\\.\` か `\??\` で始まるか (D-075、D-140)。区切りは `\` と `/` の両方 (`//?/C:/s` も
+/// `/??/UNC/s/x` も真)。字面の正規化と部品の比較を逃れる書き方なので、撮影の保存先、設定の save_dirs、
+/// `--log` のファイルで断る。
 pub fn is_verbatim_or_device(path: &str) -> bool {
     let b = path.as_bytes();
     let sep = |c: u8| c == b'\\' || c == b'/';
-    b.len() >= 4 && sep(b[0]) && sep(b[1]) && (b[2] == b'?' || b[2] == b'.') && sep(b[3])
+    if b.len() < 4 || !sep(b[0]) || !sep(b[3]) {
+        return false;
+    }
+    (sep(b[1]) && (b[2] == b'?' || b[2] == b'.')) || (b[1] == b'?' && b[2] == b'?')
 }
 
-/// 撮影の保存先のパスの形の規則 (D-075。設定に関係なく常に効く)。順に、`\\?\` / `\\.\`、
-/// ドライブの `X:` の後の `:` (代替データストリーム)、拡張子が `.png` (大文字小文字を問わない) か。
-pub fn check_save_path_shape(path: &str) -> Result<(), String> {
+/// ファイルのパスの形の規則 (D-075、D-140。設定に関係なく常に効く)。順に、`\\?\` / `\\.\` / `\??\`、
+/// ドライブの `X:` の後の `:` (代替データストリーム)、拡張子が `.{ext}` (大文字小文字を問わない) か。
+/// `what` は文の主語 (例「撮影の保存先」「ログのファイル」)。
+pub fn check_path_shape(path: &str, ext: &str, what: &str) -> Result<(), String> {
     if is_verbatim_or_device(path) {
         return Err(format!(
-            "撮影の保存先に \\\\?\\ や \\\\.\\ で始まるパスは使えない: {path}"
+            "{what}に {DEVICE_PREFIXES_TEXT} で始まるパスは使えない: {path}"
         ));
     }
     let b = path.as_bytes();
@@ -180,16 +200,21 @@ pub fn check_save_path_shape(path: &str) -> Result<(), String> {
     };
     if rest.contains(':') {
         return Err(format!(
-            "撮影の保存先のファイル名に : は使えない (代替データストリーム): {path}"
+            "{what}のファイル名に : は使えない (代替データストリーム): {path}"
         ));
     }
-    let is_png = Path::new(path)
+    let has_ext = Path::new(path)
         .extension()
-        .is_some_and(|e| e.eq_ignore_ascii_case("png"));
-    if !is_png {
-        return Err(format!("撮影の保存先は .png のファイルに限る: {path}"));
+        .is_some_and(|e| e.eq_ignore_ascii_case(ext));
+    if !has_ext {
+        return Err(format!("{what}は .{ext} のファイルに限る: {path}"));
     }
     Ok(())
+}
+
+/// 撮影の保存先のパスの形の規則 (D-075)。`check_path_shape` を `.png` と「撮影の保存先」で呼ぶ。
+pub fn check_save_path_shape(path: &str) -> Result<(), String> {
+    check_path_shape(path, "png", "撮影の保存先")
 }
 
 /// 保存先を `cwd` に足し (絶対やドライブ付きのパスは `join` が置き換える)、字面で `.` を捨てて `..` で 1 つ戻る
@@ -317,6 +342,31 @@ impl ImageWriter for PngFileWriter {
 mod tests {
     use super::*;
 
+    /// 点の色 (D-146): RGBA の R・G・B を大文字の 16 進で `#RRGGBB` にし、アルファは見ない。画像の外は None
+    #[test]
+    fn hex_color_reads_rgb_uppercase_and_none_outside() {
+        let img = Image {
+            width: 2,
+            height: 2,
+            rgba: vec![
+                0x19, 0x23, 0x1e, 0xff, 0x00, 0x00, 0x00, 0x00, //
+                0x01, 0xab, 0xcd, 0x10, 0xff, 0xff, 0xff, 0xff,
+            ],
+        };
+        assert_eq!(hex_color(&img, 0, 0).as_deref(), Some("#19231E"));
+        assert_eq!(hex_color(&img, 1, 0).as_deref(), Some("#000000"));
+        assert_eq!(hex_color(&img, 0, 1).as_deref(), Some("#01ABCD"));
+        assert_eq!(hex_color(&img, 1, 1).as_deref(), Some("#FFFFFF"));
+        assert_eq!(hex_color(&img, 2, 0), None);
+        assert_eq!(hex_color(&img, 0, 2), None);
+        let short = Image {
+            width: 1,
+            height: 1,
+            rgba: vec![1, 2],
+        };
+        assert_eq!(hex_color(&short, 0, 0), None, "画素が足りなければ None");
+    }
+
     #[test]
     fn png_roundtrip() {
         let img = Image {
@@ -438,7 +488,7 @@ mod tests {
         assert!(!is_changed(0.0, 0.0));
     }
 
-    /// 保存先の形 (D-075): .png だけ。代替データストリームと \\?\ / \\.\ は断る
+    /// 保存先の形 (D-075、D-140): .png だけ。代替データストリームと \\?\ / \\.\ / \??\ は断る
     #[test]
     fn save_path_shape_accepts_png_only() {
         for ok in ["a.png", "A.PNG", "dir/x.Png", "C:\\a\\b.png"] {
@@ -455,8 +505,49 @@ mod tests {
             let e = check_save_path_shape(dev).unwrap_err();
             assert!(e.contains("\\\\?\\"), "{dev}: {e}");
         }
+        // `:` を含まない \??\ の形は、形の規則で断る (代替データストリームの規則ではない)
+        let e = check_save_path_shape("\\??\\UNC\\server\\share\\a.png").unwrap_err();
+        assert!(e.contains("で始まるパスは使えない"), "{e}");
         assert!(is_verbatim_or_device("//?/C:/s"));
+        assert!(is_verbatim_or_device("\\??\\C:\\x"));
+        assert!(is_verbatim_or_device("/??/UNC/s/x"));
+        assert!(!is_verbatim_or_device("\\?x\\a"));
         assert!(!is_verbatim_or_device("\\\\server\\share\\a.png"));
+    }
+
+    /// `--log` のファイルの形 (D-140): .log だけ (大小を問わない)。ADS と \\?\ / \\.\ / \??\ は断る
+    #[test]
+    fn check_path_shape_for_log() {
+        let check = |p: &str| check_path_shape(p, "log", "ログのファイル");
+        for ok in [
+            "target/m.log",
+            "C:\\x\\a.LOG",
+            "a.Log",
+            "\\\\server\\share\\a.log",
+        ] {
+            assert!(check(ok).is_ok(), "{ok}");
+        }
+        for bad in [
+            "a.cmd",
+            "a.log.cmd",
+            "a",
+            ".log",
+            "dir.log\\x.txt",
+            "a.log:ads",
+            "\\\\?\\C:\\a.log",
+            "\\\\.\\a.log",
+            "\\??\\C:\\a.log",
+            "//?/C:/a.log",
+            "\\/.\\pipe\\x.log",
+            "/\\?\\C:\\a.log",
+        ] {
+            let e = check(bad).unwrap_err();
+            assert!(e.starts_with("ログのファイル"), "{bad}: {e}");
+        }
+        for dev in ["\\??\\UNC\\server\\share\\a.log", "/??/UNC/s/a.log"] {
+            let e = check(dev).unwrap_err();
+            assert!(e.contains("で始まるパスは使えない"), "{dev}: {e}");
+        }
     }
 
     /// 字面の正規化 (D-075): cwd に足して . と .. を畳む。根より上には戻らない。ドライブ相対は絶対にならない

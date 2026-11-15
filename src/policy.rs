@@ -353,12 +353,26 @@ impl Policy {
         Ok(())
     }
 
+    /// 窓の判定 (入力のガード、名指しと一覧の述語の共通の門)。層ごとに窓の deny、名前の読めない窓 (層に
+    /// `deny.processes` があれば断る。D-145)、allow のプロセス、allow のクラスの順に見る。
     pub fn check_window(&self, w: &WindowInfo) -> Check {
         let process = normalize_process(&w.process);
         let class = normalize_class(&w.class);
         for l in &self.layers {
             if let Some(d) = self.window_deny(l, w, &process, &class) {
                 return Err(d);
+            }
+            // 名前を読めない窓は deny.processes に当たるかを確かめられないので断る (D-145)。
+            // 直す 1 文が「deny を空にする」しか無いので fix は付けない (denied() を通さない)
+            if process.is_empty() && !l.deny.processes.is_empty() {
+                return Err(Denied {
+                    message: format!(
+                        "プロセス名を読めないウィンドウ (pid={}, class={:?}) は、deny.processes に当たるかを確かめられないので通さない: {}",
+                        w.pid, w.class, l.source
+                    ),
+                    rule: Some("deny.processes"),
+                    fix: None,
+                });
             }
             if !l.allow.processes.is_empty() && !l.allow.processes.contains(&process) {
                 return Err(self.denied(
@@ -1002,6 +1016,54 @@ mod tests {
         assert!(policy(&["[deny]\nclasses=[\"X\"]\n", ENABLED]).has_window_deny());
     }
 
+    /// 名前の読めない窓 (D-145): どれかの層に deny.processes があればその層で断る (rule は deny.processes、
+    /// fix なし)。deny.processes の無い設定と、撮る矩形の判定 (check_window_deny、D-077) は今までどおり
+    #[test]
+    fn check_window_refuses_unreadable_name_when_a_layer_denies_processes() {
+        let unreadable = win("", "Other");
+        let p = policy(&[ENABLED, "[deny]\nprocesses=[\"zed\"]\n"]);
+        let d = p.check_window(&unreadable).unwrap_err();
+        assert_eq!(d.rule, Some("deny.processes"));
+        assert_eq!(d.fix, None);
+        for part in ["pid=2", "\"Other\"", "test"] {
+            assert!(d.message.contains(part), "{part}: {}", d.message);
+        }
+        // 撮る矩形の判定は名前の読めない窓をクラスだけで見る (D-077)
+        assert!(p.check_window_deny(&unreadable).is_ok());
+        // 名前が読めれば deny に当たらない限り通る
+        assert!(p.check_window(&win("notepad.exe", "Other")).is_ok());
+
+        // deny の無い設定、クラスの deny だけの設定では通る (確かめる相手が無い)
+        assert!(policy(&[ENABLED]).check_window(&unreadable).is_ok());
+        assert!(
+            policy(&[ENABLED, "[deny]\nclasses=[\"X\"]\n"])
+                .check_window(&unreadable)
+                .is_ok()
+        );
+
+        // 同じ層でクラスの deny が先に当たればクラスの文
+        let both = policy(&[&format!(
+            "{ENABLED}[deny]\nprocesses=[\"zed\"]\nclasses=[\"Other\"]\n"
+        )]);
+        let d = both.check_window(&unreadable).unwrap_err();
+        assert_eq!(d.rule, Some("deny.classes"));
+
+        // 2 層目にだけ deny.processes があれば、その層の source で断る
+        let cfg = Config::parse("version = 1\n[deny]\nprocesses=[\"zed\"]\n").unwrap();
+        let two = Policy::new(vec![
+            layer(ENABLED),
+            Layer::from_config(&cfg, "second").unwrap(),
+        ]);
+        let d = two.check_window(&unreadable).unwrap_err();
+        assert_eq!(d.rule, Some("deny.processes"));
+        assert!(d.message.ends_with(": second"), "{}", d.message);
+
+        // allow だけの層は従来どおり allow.processes で断る (新しい分岐は deny の無い層では効かない)
+        let allow_only = policy(&[&format!("{ENABLED}[allow]\nprocesses=[\"notepad\"]\n")]);
+        let d = allow_only.check_window(&unreadable).unwrap_err();
+        assert_eq!(d.rule, Some("allow.processes"));
+    }
+
     /// window_deny を切り出した後も、check_window は層ごとに deny → allow の順で見る
     /// (全層の deny を先に見ると、床の allow の文ではなく上の層の deny の文になる)
     #[test]
@@ -1101,10 +1163,18 @@ mod tests {
     #[test]
     fn policy_builtin_key_deny_cannot_be_allowed() {
         let p = policy(&[&format!(
-            "{ENABLED}[allow]\nkeys=[\"alt+f4\", \"win+r\", \"ctrl+alt+delete\"]\n"
+            "{ENABLED}[allow]\nkeys=[\"alt+f4\", \"win+r\", \"ctrl+alt+delete\", \"printscreen\", \"alt+printscreen\"]\n"
         )]);
-        for k in ["alt+f4", "win+r", "ctrl+alt+delete", "ctrl+shift+esc"] {
-            assert!(p.check_key(&key(k)).is_err(), "{k}");
+        for k in [
+            "alt+f4",
+            "win+r",
+            "ctrl+alt+delete",
+            "ctrl+shift+esc",
+            "printscreen",
+            "alt+printscreen",
+        ] {
+            let d = p.check_key(&key(k)).unwrap_err();
+            assert_eq!(d.rule, Some(RULE_BUILTIN), "{k}: {}", d.message);
         }
     }
 

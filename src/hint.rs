@@ -84,10 +84,14 @@ pub enum Hint {
     /// ドラッグの途中 (実行器が押したままのボタンを持つ) のマウスの束がガードに断られた (7。D-132)。
     /// 途中まで送ってあり、窓を動かす drag は窓がカーソルの後から動くので、組み直し方を hint が持つ
     DragGuardMidway,
+    /// pixel: 読む点に、設定で拒否されたウィンドウが見えている (7。D-146)。shot 向けの region / window を示さない
+    PixelSensitive,
+    /// pixel: 人が操作中 (10。D-146)
+    PixelUserActive,
 }
 
 impl Hint {
-    pub const ALL: [Hint; 29] = [
+    pub const ALL: [Hint; 31] = [
         Hint::MouseGuard,
         Hint::KeyboardGuard,
         Hint::Elevated,
@@ -117,8 +121,19 @@ impl Hint {
         Hint::LeadUserActive,
         Hint::TargetChanged,
         Hint::DragGuardMidway,
+        Hint::PixelSensitive,
+        Hint::PixelUserActive,
     ];
 }
+
+/// pixel: 読む点に deny のウィンドウが見えている (CLI。D-146)
+pub const PIXEL_SENSITIVE_HINT: &str = "何も読んでいない。読む点 (文の 1x1 の矩形) に、設定で拒否されたウィンドウ (error.detail の window。見えている部分は visible) が見えている。detail.visible にかからない点を選んで読み直す。そのウィンドウを動かす・閉じるのは人間に頼む。設定を緩めるよう頼まない";
+/// pixel: 読む点に deny のウィンドウが見えている (MCP。D-146)。コマンドの書き方を含まないので CLI と同じ文
+const MCP_PIXEL_SENSITIVE_HINT: &str = PIXEL_SENSITIVE_HINT;
+/// pixel: 人が操作中 (CLI。D-146)
+pub const PIXEL_USER_ACTIVE_HINT: &str = "何も読んでいない。人がマウスやキーボードを使っている最中 (ai-cu 自身の run の直後も含む)。数秒待って 1 回だけ再試行し、だめなら人間に確かめる";
+/// pixel: 人が操作中 (MCP。D-073、D-146)。待つ時間は `status` の `retry_after_ms`
+const MCP_PIXEL_USER_ACTIVE_HINT: &str = "何も読んでいない。人がマウスやキーボードを使っている最中 (ai-cu 自身の run の直後も含む)。status の道具の retry_after_ms だけ待って 1 回だけ再試行し、だめなら人間に確かめる";
 
 /// ドラッグの途中でガードに断られた (CLI。D-132)。D-065 の前置き (「操作ごと打ち直さない」) の後に読まれる
 pub const DRAG_GUARD_MIDWAY_HINT: &str = "途中まで送った。ドラッグの途中の点の下に許可された窓が無かったので、残りの点を送らず、押したボタンを離して止めた (断った点は error.detail.point)。窓を動かす drag (タイトルバーを掴むなど) なら、窓が途中まで動いていることがあるので `ai-cu windows` で rect を読み直す。窓はカーソルの後から動くので、1 歩を、掴んだ点から進む向きの窓の端までの距離の半分以下にする (`--steps` を増やし、`--duration-ms` も 1 歩 50 ms ほどに。操作列なら `steps` と `duration_ms`)。同じ始点と終点で送り直さず、読み直した rect から新しい始点で作る。窓の外へ運ぶ drag なら、途中の点と終点の下が許可された窓になる経路にするか、人間に頼む (設定は書き換えない)。組み直しは各点が同じガードを通すもので、ガードの回避ではない。組み直しは 1 回だけで、また断られたら繰り返さず人間に頼む";
@@ -156,7 +171,7 @@ pub const FOCUS_HOST_FRONT_HINT: &str = "何も送っていない。前面は ai
 /// focus: 断られ、前面を確かめられない (CLI)
 pub const FOCUS_REFUSED_UNKNOWN_HINT: &str = "何も送っていない。Windows が前面の切り替えを断った (前面のウィンドウを確かめられない)。繰り返さず、人間に対象を前面に出してもらう。タスクバーや Alt+Tab、他のツールで前面にしようとしない";
 /// 起動した側を特定できない (CLI)
-pub const HOST_UNKNOWN_HINT: &str = "何も送っていない。ai-cu を起動した側のプロセスを特定できないので、実入力をすべて止めている。focus や再試行では変わらない。読むだけのコマンド (windows、shot、find、tree、text) は使える。人間に ai-cu の起動のしかたを確かめてもらう";
+pub const HOST_UNKNOWN_HINT: &str = "何も送っていない。ai-cu を起動した側のプロセスを特定できないので、実入力をすべて止めている。focus や再試行では変わらない。読むだけのコマンド (windows、shot、pixel、find、tree、text) は使える。人間に ai-cu の起動のしかたを確かめてもらう";
 /// windows: 一覧が空で、許可済みのプロセスの窓が隠れている (CLI。D-074)
 pub const WINDOWS_HIDDEN_ALLOWED_HINT: &str = "許可されたアプリの見えるウィンドウが無い。hidden_allowed のプロセスは動いているが、ウィンドウが隠れている (タスクトレイ、非表示、別の仮想デスクトップ)。起動した直後なら ai-cu wait-for で出るのを待ち、変わらなければ人間にウィンドウを出してもらう。隠れた窓 (見えないか cloaked) の題名とクラスは ai-cu windows --include-hidden で読める。見えているが題名の無い窓やツールウィンドウは出ない";
 /// windows: 一覧が空で、隠れた許可済みのプロセスも無い (CLI。D-074)
@@ -168,7 +183,7 @@ const MCP_HOST_WINDOW_HINT: &str = "何も送っていない。届く先が ai-c
 const MCP_CAPTURE_OCCLUDED_HINT: &str = "何も撮っていない。対象のウィンドウの一部が別のウィンドウ (error.detail の window。見えている部分は visible) に隠れていて、矩形で撮るとそのウィンドウの中身が写り込む。中身を読むだけなら find と text の道具で足りる (隠れていても読める)。画像が要るなら focus の道具を 1 回試し、focus_failed なら人間に前面に出してもらう。focus が通っても同じ foreground_guard が続くなら、繰り返さず find と text で読み、画像が要るならその窓を片付けてもらうよう人間に頼む";
 /// 撮る矩形に、設定で拒否されたウィンドウが見えている (MCP。D-077)
 const MCP_CAPTURE_SENSITIVE_HINT: &str = "何も撮っていない。撮る矩形に、設定で拒否されたウィンドウ (error.detail の window。見えている部分は visible) が見えている。region (と全画面) なら、そのウィンドウにかからないよう region を狭めるか、window で対象のウィンドウだけを撮る。window で撮っていて対象の手前に重なっているなら、先に focus の道具で対象を前面にしてから撮る (focus は 1 回だけ。focus_failed なら繰り返さない)。中身を読むだけなら find と text の道具で足りる。そのウィンドウを閉じる・動かすのは人間に頼む。設定を緩めるよう頼まない";
-const MCP_HOST_UNKNOWN_HINT: &str = "何も送っていない。ai-cu を起動した側のプロセスを特定できないので、実入力をすべて止めている。focus や再試行では変わらない。読むだけの道具 (windows、shot、find、tree、text、status) は使える。人間に ai-cu の起動のしかたを確かめてもらう";
+const MCP_HOST_UNKNOWN_HINT: &str = "何も送っていない。ai-cu を起動した側のプロセスを特定できないので、実入力をすべて止めている。focus や再試行では変わらない。読むだけの道具 (windows、shot、pixel、find、tree、text、status) は使える。人間に ai-cu の起動のしかたを確かめてもらう";
 const MCP_FOCUS_NOT_FOUND_HINT: &str = "何も送っていない。その実行ファイル名 (と題名) の見えているウィンドウが無い。windows の道具で名前と題名を確かめる。起動した直後なら数秒待って windows を見直す";
 const MCP_FOCUS_REFUSED_HINT: &str = "何も送っていない。人が別のアプリ (前面のプロセスは message と error.detail にある) を使っているので、Windows が前面の切り替えを断った。繰り返さず、人間に対象を前面に出してもらう。タスクバーや Alt+Tab、click、他のツールで前面にしようとしない";
 const MCP_FOCUS_HOST_FRONT_HINT: &str = "何も送っていない。前面はあなたの端末なのに、Windows が前面の切り替えを断った (前面化の補助プロセスを試したかと、その結果は error.detail の helper と helper_result にある)。focus を繰り返さず、人間に対象のウィンドウを前面に出してもらい (クリックでよい)、windows で対象の foreground が true になったのを確かめてから続ける。タスクバー、Alt+Tab、click、他のツールで前面にしようとしない。find と text は前面でなくても読める";
@@ -245,6 +260,10 @@ pub fn hint(kind: Hint, surface: Surface) -> &'static str {
         Hint::TargetChanged => TARGET_CHANGED_HINT,
         Hint::DragGuardMidway if mcp => MCP_DRAG_GUARD_MIDWAY_HINT,
         Hint::DragGuardMidway => DRAG_GUARD_MIDWAY_HINT,
+        Hint::PixelSensitive if mcp => MCP_PIXEL_SENSITIVE_HINT,
+        Hint::PixelSensitive => PIXEL_SENSITIVE_HINT,
+        Hint::PixelUserActive if mcp => MCP_PIXEL_USER_ACTIVE_HINT,
+        Hint::PixelUserActive => PIXEL_USER_ACTIVE_HINT,
     }
 }
 
@@ -555,6 +574,8 @@ mod tests {
                 Hint::LeadUserActive => 26,
                 Hint::TargetChanged => 27,
                 Hint::DragGuardMidway => 28,
+                Hint::PixelSensitive => 29,
+                Hint::PixelUserActive => 30,
             }
         }
         let mut seen: Vec<usize> = Hint::ALL.iter().map(|h| index(*h)).collect();
@@ -596,6 +617,7 @@ mod tests {
             Hint::LeadUserActive,
             Hint::TargetChanged,
             Hint::DragGuardMidway,
+            Hint::PixelUserActive,
         ] {
             assert_ne!(hint(h, Surface::Cli), hint(h, Surface::Mcp), "{h:?}");
         }
@@ -639,6 +661,10 @@ mod tests {
                 hint(Hint::LeadUserActive, Surface::Mcp),
                 hint(Hint::LeadUserActive, Surface::Cli),
             ),
+            (
+                hint(Hint::PixelUserActive, Surface::Mcp),
+                hint(Hint::PixelUserActive, Surface::Cli),
+            ),
         ];
         for (mcp, cli) in pairs {
             assert!(mcp.contains("status"), "{mcp}");
@@ -649,6 +675,7 @@ mod tests {
             Hint::FocusUserActive,
             Hint::CloseUserActive,
             Hint::LeadUserActive,
+            Hint::PixelUserActive,
         ] {
             assert!(hint(h, Surface::Mcp).contains("retry_after_ms"), "{h:?}");
         }
@@ -804,7 +831,8 @@ mod tests {
 
     /// 16 の既定の文 (D-113): 終了コード 16 と `input_busy`、CLI と MCP で同じ文で、空でなく、コマンドの書き方を
     /// 含まない (文に「別の ai-cu (」を含むので、`mcp_hints_never_mention_cli_syntax` と同じく「ai-cu 」の後ろが
-    /// 英字でないことで見る)。何も送っていないこと、1 回だけやり直すこと、続くなら人に確かめることを書く
+    /// 英字でないことで見る)。何も送っていないこと、1 回だけやり直すこと、続くなら人に確かめることを書く。
+    /// 人が TUI を開いている間も 16 になるので (D-147)、それも書く
     #[test]
     fn input_busy_exit_code_and_hint() {
         assert_eq!(ErrorKind::InputBusy.exit_code(), 16);
@@ -820,7 +848,7 @@ mod tests {
         assert!(!subcommand, "{mcp}");
         assert!(!mcp.contains("`ai-cu"), "{mcp}");
         assert!(!mcp.contains("--"), "{mcp}");
-        for word in ["何も送っていない", "別の ai-cu", "1 回だけ", "人間"] {
+        for word in ["何も送っていない", "別の ai-cu", "1 回だけ", "人間", "TUI"] {
             assert!(mcp.contains(word), "{word}: {mcp}");
         }
     }

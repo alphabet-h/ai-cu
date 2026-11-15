@@ -7,9 +7,9 @@ use std::rc::Rc;
 
 use crate::config::EnvLookup;
 use crate::device::{
-    BackendError, Clock, Desktop, FrameState, HeldInputs, HelperOutcome, HiddenWindow, Image,
-    Indicator, InputDesktop, InputEvent, InputLock, InputSink, StackWindow, TopWindow, WindowInfo,
-    WindowOwner, WindowPresence,
+    BackendError, Clock, CoverTraits, Desktop, FrameState, HeldInputs, HelperOutcome, HiddenWindow,
+    Image, Indicator, InputDesktop, InputEvent, InputLock, InputSink, StackWindow, TopWindow,
+    WindowInfo, WindowOwner, WindowPresence,
 };
 use crate::geometry::{Point, Rect};
 use crate::run::ImageWriter;
@@ -59,6 +59,12 @@ pub struct World {
     pub foreground_reads: usize,
     /// 所有関係 (ウィンドウ, 所有者の根)。無ければ自分自身が根
     pub owners: Vec<(usize, usize)>,
+    /// 覆う窓の性質 (ウィンドウ, 性質)。無ければ `cover_traits` は None (D-142)。既定は空
+    pub cover_traits: Vec<(usize, CoverTraits)>,
+    /// 窓を作ったスレッド (ウィンドウ, スレッドの id)。無ければ `window_thread` は None (D-142)。既定は空
+    pub threads: Vec<(usize, u32)>,
+    /// ポップアップらしい窓 (名指しで後に回す。D-143)。既定は空
+    pub popup: Vec<usize>,
     /// `set_foreground` に渡されたハンドル (呼ばれた順)
     pub focus_calls: Vec<usize>,
     /// 前面化の補助プロセスの結果 (D-057)。`Accepted` なら、その `top` のウィンドウが前面になる。既定は `Refused`
@@ -145,6 +151,9 @@ pub struct World {
     pub frames: Vec<usize>,
     /// `capture` に渡された矩形 (呼ばれた順。D-081)
     pub capture_rects: Vec<Rect>,
+    /// 画面の点 (絶対座標) の色 (D-146)。`capture` は `frames` の塗りの後に、矩形の中に入る点をこの色
+    /// (アルファ 0xFF) で上書きする。同じ点が重なれば後のものが勝つ。既定は空
+    pub pixel_colors: Vec<(Point, [u8; 3])>,
     /// UI Automation の木 (ウィンドウの hwnd, 深さ, 要素)。hwnd ごとに前順で、根が深さ 0 (D-084)
     pub tree: Vec<(usize, usize, crate::elements::UiElement)>,
     /// `describe` が失敗する要素 (その hwnd の木の中の添字。D-084)
@@ -241,6 +250,9 @@ impl World {
             foreground_reads_after_focus: None,
             foreground_reads: 0,
             owners: Vec::new(),
+            cover_traits: Vec::new(),
+            threads: Vec::new(),
+            popup: Vec::new(),
             focus_calls: Vec::new(),
             helper: HelperOutcome::Refused,
             helper_no_effect: false,
@@ -281,6 +293,7 @@ impl World {
             stack_err: false,
             frames: Vec::new(),
             capture_rects: Vec::new(),
+            pixel_colors: Vec::new(),
             tree: Vec::new(),
             tree_unreadable: Vec::new(),
             tree_timed_out: Vec::new(),
@@ -442,6 +455,14 @@ impl Desktop for MockDesktop {
         let mut rgba = vec![0x7f; n];
         let k = dark.saturating_mul(4).min(n);
         rgba[..k].fill(0x00);
+        // 設定した点の色 (D-146)。矩形の中の点だけを、矩形の左上からの位置に塗る
+        for (p, [r, g, b]) in &w.pixel_colors {
+            if rect.contains(*p) {
+                let i =
+                    (((p.y - rect.y) as usize) * (rect.w as usize) + ((p.x - rect.x) as usize)) * 4;
+                rgba[i..i + 4].copy_from_slice(&[*r, *g, *b, 0xFF]);
+            }
+        }
         Ok(Image {
             width: rect.w,
             height: rect.h,
@@ -525,6 +546,7 @@ impl Desktop for MockDesktop {
         &self,
         process: &str,
         title: Option<&str>,
+        admit: &dyn Fn(&WindowInfo) -> bool,
     ) -> Result<Option<TopWindow>, BackendError> {
         let mut w = self.0.borrow_mut();
         let n = w.find_window_calls;
@@ -536,7 +558,14 @@ impl Desktop for MockDesktop {
         {
             w.top = list;
         }
-        Ok(crate::device::match_window(&w.top, process, title))
+        let popup = &w.popup;
+        Ok(crate::device::match_window(
+            &w.top,
+            process,
+            title,
+            admit,
+            &|t| popup.contains(&t.info.hwnd),
+        ))
     }
 
     fn set_foreground(&self, hwnd: usize) -> Result<bool, BackendError> {
@@ -645,6 +674,24 @@ impl Desktop for MockDesktop {
             .iter()
             .find(|(h, _)| *h == hwnd)
             .map_or(hwnd, |(_, root)| *root)
+    }
+
+    fn cover_traits(&self, hwnd: usize) -> Option<CoverTraits> {
+        self.0
+            .borrow()
+            .cover_traits
+            .iter()
+            .find(|(h, _)| *h == hwnd)
+            .map(|(_, t)| *t)
+    }
+
+    fn window_thread(&self, hwnd: usize) -> Option<u32> {
+        self.0
+            .borrow()
+            .threads
+            .iter()
+            .find(|(h, _)| *h == hwnd)
+            .map(|(_, t)| *t)
     }
 
     fn ui_elements(

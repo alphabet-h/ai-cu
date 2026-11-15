@@ -20,7 +20,7 @@ use ratatui::widgets::{Block, BorderType, Clear, List, ListItem, ListState, Para
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::config::{self, Config, normalize_class, normalize_process};
-use crate::device::WindowInfo;
+use crate::device::{InputLock, WindowInfo};
 use crate::error::AppError;
 use crate::geometry::Rect;
 use crate::keys::KeyCombo;
@@ -317,8 +317,8 @@ impl Field {
                 "無効なら、対象のウィンドウなど一部の領域しか撮れない (作業中の画面が丸ごと写るのを防ぐ)。",
             ],
             Field::CaptureIdleMs => vec![
-                "shot と focus (操作列でウィンドウを前面にする) の直前に、人の最後の入力からこれ以上の無操作を求める (ミリ秒)。",
-                "満たさなければ撮らず、前面にもせずに終了コード 10 で断る。0 なら求めない。ai-cu 自身の run の直後も数える。",
+                "shot、pixel、focus (操作列でウィンドウを前面にする) の直前に、人の最後の入力からこれ以上の無操作を求める (ミリ秒)。",
+                "満たさなければ撮らず、色も読まず、前面にもせずに終了コード 10 で断る。0 なら求めない。ai-cu 自身の run の直後も数える。",
             ],
             Field::CaptureSaveDirs => vec![
                 "撮影の保存先を、このフォルダのどれかの下に限る。",
@@ -625,7 +625,7 @@ pub fn widening_changes(old: &Config, new: &Config) -> Vec<String> {
     }
     if new.capture.min_idle_ms < old.capture.min_idle_ms {
         out.push(format!(
-            "無操作の時間を短くする (人の操作中でも shot と focus を断りにくくなる。{} → {} ms)",
+            "無操作の時間を短くする (人の操作中でも shot、pixel、focus を断りにくくなる。{} → {} ms)",
             old.capture.min_idle_ms, new.capture.min_idle_ms
         ));
     }
@@ -898,6 +898,19 @@ pub enum StatusKind {
     Error,
 }
 
+/// 入力の錠 (D-113) の持ち方 (D-147)。TUI は開いている間ずっと錠を持ち、別の ai-cu の画面を変える操作を
+/// TUI の編集に届かせない。判断は `hold_input_lock` の 1 か所で、`run` は試す・解くだけ
+#[derive(Debug, Clone, PartialEq)]
+pub enum LockState {
+    /// 持っている (`App::new` の既定)
+    Held,
+    /// 持てていない (別の ai-cu の実行中か、別の TUI が開いている)。Ctrl+C 以外の打鍵を捨てる
+    Waiting,
+    /// 錠を開けない・試せない (権限の違う ai-cu が先に作った錠など)。編集は許し、警告を出し続ける。
+    /// その TUI の間は取り直さない
+    Unavailable { error: String },
+}
+
 /// 確認のあとに行う操作。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Pending {
@@ -1030,10 +1043,35 @@ pub struct App {
     last_script: Option<PathBuf>,
     /// 配色の選び方が頼る環境 (`NO_COLOR`、VT の可否)。`run` が 1 回だけ読んで入れる (D-129)
     pub env: ThemeEnv,
+    /// 入力の錠の持ち方 (D-147)。`run` が起動で `begin_lock_wait` にし、`hold_input_lock` が進める
+    pub lock: LockState,
+    /// 待ちの知らせで上書きした前の知らせ (文と種類)。Some なら待ちの知らせを出している (D-147)
+    lock_saved_status: Option<(String, StatusKind)>,
+    /// `Unavailable` の間にメッセージの行へ出し続ける警告の文 (`hold_input_lock` の Err の腕が組む。D-147)
+    lock_unavailable_notice: String,
 }
 
 /// RGB の配色を選んだのに VT が使えず、ansi で描いているときの知らせ (D-129)
 const FELL_BACK_MSG: &str = "VT が使えないので ansi の配色で表示している";
+
+/// 入力の錠を持てていない間の知らせ (D-147)
+const LOCK_WAIT_MSG: &str = "別の ai-cu が画面を操作中か、別の TUI が開いている。終わるまでキーを受け付けない (Ctrl+C で終了)";
+
+/// 入力の錠を開けない・試せないときの警告の頭 (D-147)。後ろに理由が付く
+const LOCK_UNAVAILABLE_MSG: &str = "入力の錠を開けないので、別の ai-cu の打鍵を防げない";
+
+/// 雛形 (`config::TEMPLATE`。D-117 の deny.processes つき) の値。
+/// 読めることは `config_template_parses_to_default` が保証するが、万一のときも TUI を落とさず既定に落とす
+fn template_config() -> Config {
+    Config::parse(config::TEMPLATE).unwrap_or_default()
+}
+
+/// 新規と読めない設定の置き換えで、編集の値を雛形にする (D-117)。基準 (`saved`) は既定のまま。
+/// 取り消しの積みに既定を入れるので、`u` で既定 (ディスクで効いている値) に戻れる
+fn open_with_template(app: &mut App) {
+    app.undo.push(app.config.clone());
+    app.config = template_config();
+}
 
 impl App {
     pub fn new(target: Target, config: Config) -> App {
@@ -1054,7 +1092,28 @@ impl App {
             scripts: None,
             last_script: None,
             env: ThemeEnv::default(),
+            lock: LockState::Held,
+            lock_saved_status: None,
+            lock_unavailable_notice: String::new(),
         }
+    }
+
+    /// 錠を待つ状態にする (D-147)。メッセージの行には触れない (知らせは取れなかったときに `hold_input_lock` が出す)。
+    /// `run` の起動とテストの前準備に使う
+    pub fn begin_lock_wait(&mut self) {
+        self.lock = LockState::Waiting;
+    }
+
+    /// `run` がイベントを時間つきで待つか (真なら `poll`、偽なら `read`)。カウントダウンの間と、
+    /// 錠を待つ間 (取り直しの試みを周回させる。D-147)
+    pub fn wants_tick(&self) -> bool {
+        matches!(self.overlay, Overlay::Countdown { .. }) || self.lock == LockState::Waiting
+    }
+
+    /// `Unavailable` の警告をメッセージの行に出し直す (文は `hold_input_lock` が組んだもの。D-147)
+    fn show_lock_unavailable(&mut self) {
+        let text = self.lock_unavailable_notice.clone();
+        self.set_status(StatusKind::Warn, text);
     }
 
     /// 描画に使う配色。編集中の設定の `[tui] theme` と環境から選ぶ (その場で反映。D-129)
@@ -1062,14 +1121,16 @@ impl App {
         theme::resolve(self.config.tui.theme, self.env)
     }
 
-    /// ファイルから読む。無ければ既定値。読めなければ既定値で開き、復旧の導線を状態行に出す (D-018)。
+    /// ファイルから読む。無ければ・読めなければ雛形 (D-117) の値で開く。
+    /// 基準 (saved) は既定 (ディスクで効いている値。D-018 の閉じる側)。読めなければ復旧の導線を状態行に出す。
     pub fn load(target: Target) -> App {
         let path = target.path.clone();
         if !path.exists() {
             let mut app = App::new(target, Config::default());
+            open_with_template(&mut app);
             app.set_status(
                 StatusKind::Info,
-                "新しい設定ファイル (まだ無い)。s で作成する",
+                "新しい設定ファイル (まだ無い)。雛形の値で表示中。s で作成する",
             );
             return app;
         }
@@ -1077,10 +1138,11 @@ impl App {
             Ok(cfg) => App::new(target, cfg),
             Err(e) => {
                 let mut app = App::new(target, Config::default());
+                open_with_template(&mut app);
                 app.replace_broken = true;
                 app.set_status(
                     StatusKind::Warn,
-                    format!("読めない: {} / 既定値で表示中。s で保存すると置き換え、元は .broken-<時刻>.bak に残る", e.message),
+                    format!("読めない: {} / 雛形の値で表示中。s で保存すると置き換え、元は .broken-<時刻>.bak に残る", e.message),
                 );
                 app
             }
@@ -1375,6 +1437,14 @@ impl App {
         match ev {
             // Windows は 1 回の打鍵で Press と Release の両方を流すので、Release は無視する (D-023)
             Event::Key(k) if k.kind == KeyEventKind::Release => Effect::None,
+            // 錠を持てていない間は、Ctrl+C (終了と強制終了) の Press 以外の打鍵を捨てる。届いた打鍵が
+            // 別の ai-cu の送ったものかもしれず、保存の経路 (s、Ctrl+S、終了の確認の s) を通さない (D-147)
+            Event::Key(k)
+                if self.lock == LockState::Waiting
+                    && !(k.kind == KeyEventKind::Press && is_ctrl_c(k)) =>
+            {
+                Effect::None
+            }
             Event::Key(k) => self.on_key(*k),
             _ => Effect::None,
         }
@@ -1382,10 +1452,17 @@ impl App {
 
     fn on_key(&mut self, k: KeyEvent) -> Effect {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
-        let is_ctrl_c = ctrl && matches!(k.code, KeyCode::Char('c') | KeyCode::Char('C'));
-        // メッセージの行の一時的なメッセージは、次のキーで消す (キーの案内は別の行に常に出る。D-130)
-        if self.status_kind != StatusKind::Info || !self.status.is_empty() {
-            self.set_status(StatusKind::Info, "");
+        let is_ctrl_c = is_ctrl_c(&k);
+        // メッセージの行の一時的なメッセージは、次のキーで消す (キーの案内は別の行に常に出る。D-130)。
+        // 錠を待つ間は待ちの知らせを残し、錠を開けない間は消す代わりに警告へ戻す (D-147)
+        match self.lock {
+            LockState::Waiting => {}
+            LockState::Unavailable { .. } => self.show_lock_unavailable(),
+            LockState::Held => {
+                if self.status_kind != StatusKind::Info || !self.status.is_empty() {
+                    self.set_status(StatusKind::Info, "");
+                }
+            }
         }
         // 実行中と結果の画面では、届いた打鍵 (読み捨てをすり抜けた操作列の ctrl+c など) で終了しない (D-045)
         if matches!(
@@ -2185,6 +2262,57 @@ impl App {
             pending: Pending::Save { then_quit },
         };
         Effect::None
+    }
+}
+
+/// Ctrl+C か (raw モードではキーとして届く)。押下か繰り返しかは見ない
+fn is_ctrl_c(k: &KeyEvent) -> bool {
+    k.modifiers.contains(KeyModifiers::CONTROL)
+        && matches!(k.code, KeyCode::Char('c') | KeyCode::Char('C'))
+}
+
+/// 入力の錠 (D-113) を待っている TUI で、1 回だけ取る試みをする (D-147)。端末には触れない。
+/// 待っている → 取れた の移り目でだけ真を返す (`run` はそのとき端末の入力を読み捨てる)。
+/// 持っている間と、錠を開けない (`Unavailable`) 間は試みずに偽を返す。
+/// 取れなければ待ちの知らせを出し (前の知らせは退避して、取れたら戻す)、Err なら編集を許して警告を出し続ける
+pub fn hold_input_lock(app: &mut App, lock: &mut dyn InputLock) -> bool {
+    if app.lock != LockState::Waiting {
+        return false;
+    }
+    match lock.try_acquire() {
+        Ok(true) => {
+            app.lock = LockState::Held;
+            if let Some((text, kind)) = app.lock_saved_status.take() {
+                app.set_status(kind, text);
+            }
+            true
+        }
+        Ok(false) => {
+            // 前の待ちの知らせを退避し直さない (元の知らせを失わない)
+            if app.lock_saved_status.is_none() {
+                app.lock_saved_status = Some((app.status.clone(), app.status_kind));
+            }
+            app.set_status(StatusKind::Warn, LOCK_WAIT_MSG);
+            false
+        }
+        Err(e) => {
+            // 読み込みの知らせ (読めない設定の復旧の導線など) は消さずに、後ろへ足す
+            let before = match app.lock_saved_status.take() {
+                Some((text, _)) => text,
+                None => app.status.clone(),
+            };
+            let warn = format!("{LOCK_UNAVAILABLE_MSG} (理由: {e})");
+            app.lock_unavailable_notice = if before.is_empty() {
+                warn
+            } else {
+                format!("{before} / {warn}")
+            };
+            app.lock = LockState::Unavailable {
+                error: e.to_string(),
+            };
+            app.show_lock_unavailable();
+            false
+        }
     }
 }
 
@@ -3551,6 +3679,7 @@ fn help_lines() -> Vec<String> {
         "判定の規則: 組み込みの拒否 > 拒否リスト > 許可リスト",
         "許可リストが空 = その次元は制限なし。1 件でもあれば一致したものだけ",
         "組み込みの拒否: Win を含む組み合わせ、Alt+F4、Ctrl+Alt+ (修飾キーつきのクリックも)、Ctrl+Shift+Esc、Ctrl+Esc",
+        "PrintScreen は修飾キーにかかわらず組み込みで拒否 (画面は shot で撮る)",
         "--config と AI_CU_CONFIG の層は、基本の層 (既定の場所) より許可を広げられない",
     ]
     .iter()
@@ -3564,7 +3693,13 @@ fn help_lines() -> Vec<String> {
 
 /// 端末で TUI を動かす。呼び出し側は、標準入力と標準出力の両方がコンソールであることを確かめておく (D-023)。
 /// 操作列の実行は `runner` に頼む (CLI の `run` と同じ経路。D-044)。
-pub fn run(target: &Target, runner: &mut dyn ScriptRunner) -> i32 {
+///
+/// 開いている間ずっと入力の錠 `lock` (D-113) を持ち、別の ai-cu の画面を変える操作を TUI の編集に届かせない (D-147)。
+/// 持てていない間は周回ごとに取り直しを試み (判断は `hold_input_lock`)、取れた瞬間に端末の入力を読み捨てる。
+/// 終わるときにこのスレッドで解く。TUI の中の実行は、実行器が別に開いたハンドルで同じ錠をこのスレッドから取り直す。
+/// 名前付きミューテックスの持ち主はスレッドで決まるので、ハンドルが別でも再帰で取れて待たない
+/// (`backend` の `real_input_lock_separate_handles_recurse_on_same_thread`)。実行器を別のスレッドに移すと崩れる
+pub fn run(target: &Target, runner: &mut dyn ScriptRunner, lock: &mut dyn InputLock) -> i32 {
     let mut app = App::load(target.clone());
     // 配色の環境は 1 回だけ読む。RGB のテーマを選んだのに VT が無ければ、ansi で描くことを知らせる (D-129)
     app.env = ThemeEnv::detect();
@@ -3598,13 +3733,21 @@ pub fn run(target: &Target, runner: &mut dyn ScriptRunner) -> i32 {
             return 2;
         }
     };
+    // 起動の 1 回目は知らせを出さずに試す (取れなかったときだけ hold_input_lock が待ちの知らせを出す。D-147)
+    app.begin_lock_wait();
     let code = 'outer: loop {
+        // 錠を持てていなければ取り直しを試み、取れた瞬間に、待つ間に届いた打鍵 (別の ai-cu の最後の打鍵を含む) を捨てる
+        if hold_input_lock(&mut app, lock)
+            && let Err(e) = drain_input()
+        {
+            break report_io(e);
+        }
         if let Err(e) = terminal.draw(|f| render(&app, f)) {
             break report_io(e);
         }
         let started = std::time::Instant::now();
-        // カウントダウンの間だけ、キーを待ちながら時間を進める
-        let ev = if matches!(app.overlay, Overlay::Countdown { .. }) {
+        // カウントダウンの間と錠を待つ間だけ、キーを待ちながら周回する (時間を進める・取り直しを試みる)
+        let ev = if app.wants_tick() {
             match event::poll(Duration::from_millis(TICK_MS)) {
                 Ok(true) => match event::read() {
                     Ok(ev) => Some(ev),
@@ -3636,6 +3779,8 @@ pub fn run(target: &Target, runner: &mut dyn ScriptRunner) -> i32 {
             }
         }
     };
+    // 持っていれば解く (持っていなければ何もしない)。取ったのと同じこのスレッドで解く (D-147)
+    lock.release();
     ratatui::restore();
     code
 }
@@ -4241,7 +4386,7 @@ mod tests {
     }
 
     /// ヘルプの組み込みの拒否の行は修飾キーつきのクリックの Ctrl+Alt にも触れ (D-137)、
-    /// 120x32 のヘルプで折られずに 1 行に収まり、最後の行まで省略されずに出る
+    /// 120x32 のヘルプで折られずに 1 行に収まり、次の PrintScreen の行 (D-141) と最後の行まで省略されずに出る
     #[test]
     fn help_builtin_deny_line_mentions_click_modifiers_and_fits() {
         let lines = help_lines();
@@ -4254,6 +4399,16 @@ mod tests {
         a.update(&press(KeyCode::F(1)));
         let text = draw(&a, 120, 32);
         assert!(has(&text, builtin), "{text}");
+        // PrintScreen は既存の行を伸ばさず次の行に置き、それも省略されずに出る (D-141)
+        let printscreen: Vec<&String> =
+            lines.iter().filter(|l| l.contains("PrintScreen")).collect();
+        assert_eq!(printscreen.len(), 1, "{lines:?}");
+        assert!(
+            printscreen[0].contains("修飾キーにかかわらず"),
+            "{}",
+            printscreen[0]
+        );
+        assert!(has(&text, printscreen[0]), "{text}");
         assert!(has(&text, lines.last().unwrap()), "{text}");
         assert!(!text.contains("…(省略)"), "{text}");
     }
@@ -6106,7 +6261,14 @@ mod tests {
         assert_eq!(a.update(&press(KeyCode::Char('s'))), Effect::Save);
         config::save_with(&a.target.path, &a.config, a.replace_broken).unwrap();
         a.on_saved(Ok(()));
-        assert_eq!(Config::load(&f).unwrap(), Config::default());
+        // 置き換えた設定は雛形 (D-117) の値で、雛形の deny.processes が残る
+        let loaded = Config::load(&f).unwrap();
+        assert_eq!(loaded, Config::parse(config::TEMPLATE).unwrap());
+        assert!(
+            loaded.deny.processes.iter().any(|p| p == "cmd.exe"),
+            "{:?}",
+            loaded.deny.processes
+        );
         let broken: Vec<_> = std::fs::read_dir(&dir)
             .unwrap()
             .filter_map(|e| e.ok())
@@ -6120,6 +6282,78 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(broken[0].path()).unwrap(),
             "version = 1\n[general\n"
+        );
+    }
+
+    /// 一時ディレクトリの中の、まだ無い設定ファイル
+    fn missing_target(tag: &str) -> Target {
+        let dir = crate::testing::unique_temp_dir(tag);
+        Target {
+            path: dir.join("config.toml"),
+            overlay: false,
+        }
+    }
+
+    /// 新規は雛形 (D-117) の値で開き、基準は既定のまま。開いた時点で未保存で、s で雛形の値のファイルを作る
+    #[test]
+    fn tui_load_missing_file_opens_template_and_creates_it() {
+        let t = missing_target("tui-new");
+        let f = t.path.clone();
+        assert!(!f.exists());
+        let mut a = App::load(t);
+        assert!(a.status.contains("s で作成する"), "{}", a.status);
+        assert_eq!(a.config, template_config());
+        assert!(!a.config.deny.processes.is_empty());
+        assert_eq!(a.saved, Config::default());
+        assert!(a.dirty());
+        assert!(widening_changes(&a.saved, &a.config).is_empty());
+        assert_eq!(a.update(&press(KeyCode::Char('s'))), Effect::Save);
+        config::save_with(&a.target.path, &a.config, a.replace_broken).unwrap();
+        a.on_saved(Ok(()));
+        assert_eq!(Config::load(&f).unwrap(), template_config());
+        assert!(!a.dirty());
+    }
+
+    /// 新規ですぐ終了すると確認が出る (雛形の deny を黙って捨てない)。u で既定に戻ると未保存が消える
+    #[test]
+    fn tui_new_file_quit_asks_and_undo_returns_to_default() {
+        let mut a = App::load(missing_target("tui-new-quit"));
+        assert_eq!(a.update(&press(KeyCode::Char('q'))), Effect::None);
+        assert_eq!(a.overlay, Overlay::QuitDialog);
+        a.update(&press(KeyCode::Esc));
+        assert_eq!(a.overlay, Overlay::None);
+        a.update(&press(KeyCode::Char('u')));
+        assert_eq!(a.config, Config::default());
+        assert!(!a.dirty());
+    }
+
+    /// 新規は開いた時点で右のペインに雛形の deny.processes が見え、題名の行に未保存が出る。
+    /// 題名の行は折り返さないので、target/ の下の短い相対パスで開く (D-010。保存しないので何も作らない)
+    #[test]
+    fn tui_new_file_draws_template_deny_and_unsaved() {
+        let path = PathBuf::from("target/test-tmp/no-such/config.toml");
+        assert!(!path.exists());
+        let mut a = App::load(Target {
+            path,
+            overlay: false,
+        });
+        select(&mut a, Field::List(Side::Deny, ListKind::Processes));
+        let text = draw(&a, 120, 32);
+        assert!(has(&text, "cmd.exe"), "{text}");
+        assert!(has(&text, "未保存"), "{text}");
+    }
+
+    /// 最初の保存の前に雛形の deny を消しても、許可を広げる確認には出さない (基準の既定より deny は減らない)
+    #[test]
+    fn tui_new_file_removing_template_deny_saves_without_widening_confirm() {
+        let mut a = App::load(missing_target("tui-new-remove"));
+        a.config.deny.processes.retain(|p| p != "cmd.exe");
+        assert!(!a.config.deny.processes.iter().any(|p| p == "cmd.exe"));
+        assert_eq!(a.update(&press(KeyCode::Char('s'))), Effect::Save);
+        assert!(
+            !matches!(a.overlay, Overlay::Confirm { .. }),
+            "{:?}",
+            a.overlay
         );
     }
 
@@ -6151,5 +6385,219 @@ mod tests {
                 "{rule}"
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // 入力の錠 (D-147)
+    // -----------------------------------------------------------------------
+
+    /// 錠のモックと、その呼び出しを数える World
+    fn mock_lock(
+        busy: usize,
+        err: Option<crate::device::BackendError>,
+    ) -> (
+        crate::testing::MockInputLock,
+        std::rc::Rc<std::cell::RefCell<crate::testing::World>>,
+    ) {
+        let mut w = crate::testing::World::new();
+        w.lock_busy = busy;
+        w.lock_err = err;
+        let w = w.shared();
+        (crate::testing::MockInputLock(w.clone()), w)
+    }
+
+    const LOAD_NOTICE: &str = "読めない: 1 行目 / 雛形の値で表示中";
+
+    /// 錠を待つ間は、Ctrl+C 以外のキー (保存、追加、確定、終了) が何も起こさない
+    #[test]
+    fn lock_waiting_discards_keys_except_ctrl_c() {
+        let mut a = app();
+        a.begin_lock_wait();
+        let config = a.config.clone();
+        for code in [
+            KeyCode::Char('s'),
+            KeyCode::Char('a'),
+            KeyCode::Enter,
+            KeyCode::Esc,
+            KeyCode::Char('q'),
+        ] {
+            assert_eq!(a.update(&press(code)), Effect::None, "{code:?}");
+            assert_eq!(a.config, config, "{code:?}");
+            assert_eq!(a.overlay, Overlay::None, "{code:?}");
+        }
+        // 繰り返しの Ctrl+C は押下ではないので捨てる (通すのは Press だけ)
+        let repeat_ctrl_c = Event::Key(KeyEvent::new_with_kind_and_state(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL,
+            KeyEventKind::Repeat,
+            KeyEventState::NONE,
+        ));
+        assert_eq!(a.update(&repeat_ctrl_c), Effect::None);
+        assert_eq!(a.overlay, Overlay::None);
+        assert_eq!(a.update(&ctrl('c')), Effect::Quit);
+    }
+
+    /// 錠を待つ間は、未保存の変更があっても保存の経路 (s、Ctrl+S) が通らない (攻撃そのものの経路)
+    #[test]
+    fn lock_waiting_blocks_save_paths() {
+        let mut a = dirty_app();
+        a.begin_lock_wait();
+        let config = a.config.clone();
+        assert_eq!(a.update(&press(KeyCode::Char('s'))), Effect::None);
+        assert_eq!(a.overlay, Overlay::None, "保存の確認に進まない");
+        assert_eq!(a.update(&ctrl('s')), Effect::None);
+        assert_eq!(a.overlay, Overlay::None, "保存の確認に進まない");
+        assert_eq!(a.config, config);
+        assert!(a.dirty());
+    }
+
+    /// 錠を待つ間の Ctrl+C: 未保存なら終了の確認に回り、確認の画面の s と y も捨て、もう一度の Ctrl+C で終了する。
+    /// 待ちの知らせは確認の画面を出しても残る
+    #[test]
+    fn lock_waiting_ctrl_c_with_unsaved_changes_asks_first() {
+        let mut a = dirty_app();
+        a.begin_lock_wait();
+        let (mut lock, _w) = mock_lock(usize::MAX, None);
+        assert!(!hold_input_lock(&mut a, &mut lock));
+        assert!(a.status.starts_with(LOCK_WAIT_MSG), "{}", a.status);
+        assert_eq!(a.update(&ctrl('c')), Effect::None);
+        assert_eq!(a.overlay, Overlay::QuitDialog);
+        assert!(a.status.starts_with(LOCK_WAIT_MSG), "{}", a.status);
+        assert_eq!(a.status_kind, StatusKind::Warn);
+        assert_eq!(a.update(&press(KeyCode::Char('s'))), Effect::None);
+        assert_eq!(a.overlay, Overlay::QuitDialog);
+        assert_eq!(a.update(&press(KeyCode::Char('y'))), Effect::None);
+        assert_eq!(a.overlay, Overlay::QuitDialog);
+        assert!(a.status.starts_with(LOCK_WAIT_MSG), "{}", a.status);
+        assert_eq!(a.update(&ctrl('c')), Effect::Quit);
+    }
+
+    /// 時間つきで待つのは、錠を待つ間 (とカウントダウンの間) だけ
+    #[test]
+    fn wants_tick_while_lock_waiting() {
+        let mut a = app();
+        assert!(!a.wants_tick());
+        a.begin_lock_wait();
+        assert!(a.wants_tick());
+        let (mut lock, _w) = mock_lock(0, None);
+        assert!(hold_input_lock(&mut a, &mut lock));
+        assert_eq!(a.lock, LockState::Held);
+        assert!(!a.wants_tick());
+    }
+
+    /// 待っている → 取れた の移り目でだけ真。持ったままの周回では試みもしない
+    #[test]
+    fn hold_input_lock_transitions_once() {
+        let mut a = app();
+        a.begin_lock_wait();
+        let (mut lock, w) = mock_lock(2, None);
+        assert!(!hold_input_lock(&mut a, &mut lock));
+        assert_eq!(a.lock, LockState::Waiting);
+        assert!(!hold_input_lock(&mut a, &mut lock));
+        assert_eq!(a.lock, LockState::Waiting);
+        assert!(hold_input_lock(&mut a, &mut lock));
+        assert_eq!(a.lock, LockState::Held);
+        assert!(!hold_input_lock(&mut a, &mut lock));
+        assert_eq!(w.borrow().lock_try_calls, 3);
+    }
+
+    /// 錠を開けないときは編集を許し、警告を出し続ける (本人の決定)。以後は試みない
+    #[test]
+    fn hold_input_lock_error_allows_editing_with_warning() {
+        let mut a = app();
+        a.begin_lock_wait();
+        let (mut lock, w) = mock_lock(0, Some(crate::device::BackendError::Os("x".into())));
+        assert!(!hold_input_lock(&mut a, &mut lock));
+        assert!(
+            matches!(a.lock, LockState::Unavailable { .. }),
+            "{:?}",
+            a.lock
+        );
+        assert!(a.status.starts_with(LOCK_UNAVAILABLE_MSG), "{}", a.status);
+        assert!(a.status.contains('x'), "{}", a.status);
+        assert_eq!(a.status_kind, StatusKind::Warn);
+        // 編集が効く
+        select(&mut a, Field::MaxActions);
+        a.update(&press(KeyCode::Enter));
+        type_str(&mut a, "25");
+        a.update(&press(KeyCode::Enter));
+        assert_eq!(a.config.limits.max_actions, 25);
+        assert!(a.dirty());
+        // 次のキーで一時のメッセージを消しても、警告に戻る
+        a.update(&press(KeyCode::Down));
+        assert!(a.status.starts_with(LOCK_UNAVAILABLE_MSG), "{}", a.status);
+        assert_eq!(a.status_kind, StatusKind::Warn);
+        assert_eq!(a.update(&press(KeyCode::Char('s'))), Effect::Save);
+        // 取り直さない
+        assert!(!hold_input_lock(&mut a, &mut lock));
+        assert_eq!(w.borrow().lock_try_calls, 1);
+    }
+
+    /// 錠を開けないときの警告は、読み込みの知らせを消さずに後ろへ足す。待ちを経てからでも、元の知らせを含む
+    #[test]
+    fn hold_input_lock_error_keeps_load_notice() {
+        let err = || Some(crate::device::BackendError::Os("x".into()));
+        // すぐ Err
+        let mut a = app();
+        a.set_status(StatusKind::Warn, LOAD_NOTICE);
+        a.begin_lock_wait();
+        let (mut lock, _w) = mock_lock(0, err());
+        assert!(!hold_input_lock(&mut a, &mut lock));
+        assert!(a.status.contains(LOAD_NOTICE), "{}", a.status);
+        assert!(a.status.contains(LOCK_UNAVAILABLE_MSG), "{}", a.status);
+        a.update(&press(KeyCode::Down));
+        assert!(a.status.contains(LOAD_NOTICE), "{}", a.status);
+        assert!(a.status.contains(LOCK_UNAVAILABLE_MSG), "{}", a.status);
+        // 1 回待ってから Err
+        let mut b = app();
+        b.set_status(StatusKind::Warn, LOAD_NOTICE);
+        b.begin_lock_wait();
+        let (mut lock, w) = mock_lock(1, None);
+        assert!(!hold_input_lock(&mut b, &mut lock));
+        assert!(b.status.starts_with(LOCK_WAIT_MSG), "{}", b.status);
+        w.borrow_mut().lock_err = err();
+        assert!(!hold_input_lock(&mut b, &mut lock));
+        assert!(b.status.contains(LOAD_NOTICE), "{}", b.status);
+        assert!(b.status.contains(LOCK_UNAVAILABLE_MSG), "{}", b.status);
+        assert!(!b.status.contains(LOCK_WAIT_MSG), "{}", b.status);
+    }
+
+    /// 錠がすぐ取れる普通の起動では、読み込みの知らせを消さない
+    #[test]
+    fn hold_input_lock_keeps_load_notice_when_free() {
+        let mut a = app();
+        a.set_status(StatusKind::Warn, LOAD_NOTICE);
+        a.begin_lock_wait();
+        let (mut lock, _w) = mock_lock(0, None);
+        assert!(hold_input_lock(&mut a, &mut lock));
+        assert_eq!(a.status, LOAD_NOTICE);
+        assert_eq!(a.status_kind, StatusKind::Warn);
+    }
+
+    /// 待った後に取れたら、待ちの知らせを元の知らせに戻す
+    #[test]
+    fn hold_input_lock_restores_notice_after_wait() {
+        let mut a = app();
+        a.set_status(StatusKind::Warn, LOAD_NOTICE);
+        a.begin_lock_wait();
+        let (mut lock, _w) = mock_lock(2, None);
+        assert!(!hold_input_lock(&mut a, &mut lock));
+        assert_eq!(a.status, LOCK_WAIT_MSG);
+        assert!(!hold_input_lock(&mut a, &mut lock));
+        assert_eq!(a.status, LOCK_WAIT_MSG);
+        assert!(hold_input_lock(&mut a, &mut lock));
+        assert_eq!(a.status, LOAD_NOTICE);
+        assert_eq!(a.status_kind, StatusKind::Warn);
+    }
+
+    /// 待ちの知らせがメッセージの行に描かれる
+    #[test]
+    fn render_shows_lock_wait_message() {
+        let mut a = app();
+        a.begin_lock_wait();
+        let (mut lock, _w) = mock_lock(usize::MAX, None);
+        assert!(!hold_input_lock(&mut a, &mut lock));
+        let text = draw(&a, 200, 40);
+        assert!(has(&text, "別の ai-cu が画面を操作中"), "{text}");
     }
 }

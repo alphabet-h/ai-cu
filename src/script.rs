@@ -115,7 +115,7 @@ fn default_scale() -> f64 {
     DEFAULT_SHOT_SCALE
 }
 
-/// 撮る対象のウィンドウ (D-053)。`focus` と同じ探し方 (実行ファイル名の正規化、題名の部分一致、前面に近いもの)
+/// 撮る対象のウィンドウ (D-053)。`focus` と同じ探し方 (実行ファイル名の正規化、題名の部分一致、前面に近いもの。ポップアップらしい窓は後に回す。D-143)
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WindowTarget {

@@ -65,12 +65,14 @@ const KEYS: [(&[&str], &str); 8] = [
     (&["ctrl", "alt"], "del"),
 ];
 /// 組み込みで拒否するキーの組 (src/keys.rs の `builtin_denied`)
-const BUILTIN_KEYS: [(&[&str], &str); 5] = [
+const BUILTIN_KEYS: [(&[&str], &str); 7] = [
     (&["win"], "r"),
     (&["ctrl", "alt"], "del"),
     (&["alt"], "f4"),
     (&["ctrl", "shift"], "esc"),
     (&["ctrl"], "esc"),
+    (&[], "printscreen"),
+    (&["alt"], "printscreen"),
 ];
 
 #[derive(Debug, Clone, Copy)]

@@ -13,21 +13,22 @@ use windows_sys::Win32::Security::{
     GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation,
 };
 use windows_sys::Win32::System::Threading::{
-    GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_NAME_WIN32,
+    GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_NAME_NATIVE, PROCESS_NAME_WIN32,
     PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GA_ROOT, GA_ROOTOWNER, GWL_EXSTYLE, GetAncestor, GetClassNameW,
+    EnumWindows, GA_ROOT, GA_ROOTOWNER, GWL_EXSTYLE, GWL_STYLE, GetAncestor, GetClassNameW,
     GetForegroundWindow, GetLayeredWindowAttributes, GetWindowDisplayAffinity, GetWindowLongW,
     GetWindowRect, GetWindowThreadProcessId, HTCAPTION, InternalGetWindowText, IsHungAppWindow,
     IsIconic, IsWindow, IsWindowVisible, LWA_ALPHA, LWA_COLORKEY, PostMessageW, SMTO_ABORTIFHUNG,
     SendMessageTimeoutW, SetForegroundWindow, WDA_EXCLUDEFROMCAPTURE, WM_CLOSE, WM_NCHITTEST,
-    WS_EX_LAYERED, WS_EX_LAYOUTRTL, WS_EX_TOOLWINDOW, WindowFromPoint,
+    WS_CAPTION, WS_EX_LAYERED, WS_EX_LAYOUTRTL, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
+    WindowFromPoint,
 };
 
 use crate::device::{
-    HiddenWindow, StackWindow, TopWindow, WindowInfo, WindowOwner, WindowPresence,
+    CoverTraits, HiddenWindow, StackWindow, TopWindow, WindowInfo, WindowOwner, WindowPresence,
 };
 use crate::geometry::{Point, Rect};
 
@@ -179,22 +180,45 @@ fn open_limited(pid: u32) -> Option<OwnedHandle> {
     }
 }
 
-/// 開いたプロセスの実行ファイル名。読めなければ空。
-fn image_name(h: &OwnedHandle) -> String {
-    let mut buf = vec![0u16; 1024];
-    let mut len = buf.len() as u32;
-    // SAFETY: h は PROCESS_QUERY_LIMITED_INFORMATION で開いた有効なハンドル。buf は len 要素の書き込み可能な領域で、
-    // len は入力で容量、出力で書いた文字数 (NUL を除く) になる。
-    let ok =
-        unsafe { QueryFullProcessImageNameW(h.0, PROCESS_NAME_WIN32, buf.as_mut_ptr(), &mut len) };
-    if ok == 0 {
-        return String::new();
+/// 名前を読む最初の容量 (文字数)。普段はこの 1 回で読める。
+const IMAGE_NAME_CAP: usize = 1024;
+/// 最初の読みが失敗したときに 1 回だけ読み直す容量 (文字数。拡張パスの上限)。
+const IMAGE_NAME_CAP_WIDE: usize = 32768;
+
+/// 実行ファイル名を読む手順 (unsafe なし。D-145)。`query(flag, cap)` は形 `flag`
+/// (`PROCESS_NAME_WIN32` か `PROCESS_NAME_NATIVE`) と容量 `cap` (文字数) でパスを読み、失敗なら誤りの値を返す。
+/// 形は WIN32 → NATIVE の順。各形で `IMAGE_NAME_CAP` で読み、失敗なら誤りの値を問わず `IMAGE_NAME_CAP_WIDE` で
+/// 1 回だけ読み直す (足りないときの誤りの値は QueryFullProcessImageNameW の文書に無いので、値で絞らない)。
+/// 読めたパスの `\` 区切りの最後の要素が空でなければそれを返し、空なら次の形へ進む。どちらも駄目なら空の文字列。
+fn image_name_from(mut query: impl FnMut(u32, usize) -> Result<OsString, u32>) -> String {
+    for flag in [PROCESS_NAME_WIN32, PROCESS_NAME_NATIVE] {
+        let path = query(flag, IMAGE_NAME_CAP).or_else(|_| query(flag, IMAGE_NAME_CAP_WIDE));
+        let Ok(path) = path else { continue };
+        let path = path.to_string_lossy();
+        let last = path.rsplit('\\').next().unwrap_or_default();
+        if !last.is_empty() {
+            return last.to_owned();
+        }
     }
-    let path = OsString::from_wide(&buf[..(len as usize).min(buf.len())]);
-    std::path::Path::new(&path)
-        .file_name()
-        .map(|f| f.to_string_lossy().into_owned())
-        .unwrap_or_default()
+    String::new()
+}
+
+/// 開いたプロセスの実行ファイル名。読めなければ空 (読みの手順は `image_name_from`)。
+/// `h` は `open_limited` で開いたハンドルだけを渡す (下の SAFETY の前提)。
+fn image_name(h: &OwnedHandle) -> String {
+    image_name_from(|flag, cap| {
+        let mut buf = vec![0u16; cap];
+        let mut len = cap as u32;
+        // SAFETY: h は PROCESS_QUERY_LIMITED_INFORMATION で開いた有効なハンドル。flag は PROCESS_NAME_WIN32 か
+        // PROCESS_NAME_NATIVE。buf は cap 文字 (u16 で cap 要素) の書き込み可能な領域で、len は入力で容量 (文字数)、
+        // 成功時の出力で書いた文字数 (NUL を除く) になる。失敗時の len の値は文書に無いので使わない。
+        let ok = unsafe { QueryFullProcessImageNameW(h.0, flag, buf.as_mut_ptr(), &mut len) };
+        if ok == 0 {
+            // 失敗の直後、他の Win32 を呼ぶ前に読む
+            return Err(super::last_error());
+        }
+        Ok(OsString::from_wide(&buf[..(len as usize).min(buf.len())]))
+    })
 }
 
 /// 実行ファイル名だけ (管理者権限かは読まない)。開けないプロセスは空。
@@ -362,16 +386,78 @@ pub fn top_level_windows_detailed() -> Vec<TopWindow> {
         .filter(|&h| {
             // 見えていて cloaked でない (判定の元は `hidden_state`。D-099)
             let visible = shown(h);
-            // SAFETY: 列挙で得たハンドルを渡すだけ。GWL_EXSTYLE の読み取りだけで、既に無いウィンドウなら 0 が返る。
-            let ex = unsafe { GetWindowLongW(h, GWL_EXSTYLE) } as u32;
+            let ex = ex_style(h);
             // ツールウィンドウかを見る前に全部の窓の題名を読むのはわざと (短絡させない): 自プロセスの
             // ツールウィンドウにもメッセージを送らない読みを、実機テスト
             // `fixture_real_window_reads_do_not_wait_on_stalled_own_window` で撃つため (D-105)
             let titled = !window_title(h).is_empty();
-            visible && titled && ex & WS_EX_TOOLWINDOW == 0
+            visible && listed_style(titled, ex)
         })
         .filter_map(|h| describe(h as usize))
         .collect()
+}
+
+/// 窓の拡張スタイル (`GWL_EXSTYLE`)。無効なハンドル (既に無い窓) なら 0。読み取りだけ。
+fn ex_style(h: HWND) -> u32 {
+    // SAFETY: ハンドルの値を渡すだけ。GWL_EXSTYLE の読み取りだけで、既に無いウィンドウなら 0 が返る。
+    unsafe { GetWindowLongW(h, GWL_EXSTYLE) as u32 }
+}
+
+/// 窓のスタイル (`GWL_STYLE`)。無効なハンドル (既に無い窓) なら 0。読み取りだけ。
+fn win_style(h: HWND) -> u32 {
+    // SAFETY: ハンドルの値を渡すだけ。GWL_STYLE の読み取りだけで、既に無いウィンドウなら 0 が返る。
+    unsafe { GetWindowLongW(h, GWL_STYLE) as u32 }
+}
+
+/// ポップアップらしい窓の形か (名指しで後に回す印。D-143)。`WS_EX_NOACTIVATE` を持つか、`WS_POPUP` で題名の帯
+/// (`WS_CAPTION` = `WS_BORDER | WS_DLGFRAME` の両方) がそろわないとき真。所有者と `WS_EX_TOPMOST` は見ない
+/// (普通のダイアログと、常に手前にした本体を後に回さない)。経験則で、確かめたのは Windows 11 のメモ帳の
+/// ツールチップ (PopupHost) だけ
+pub fn popup_style(style: u32, ex: u32) -> bool {
+    ex & WS_EX_NOACTIVATE != 0 || (style & WS_POPUP != 0 && style & WS_CAPTION != WS_CAPTION)
+}
+
+/// 窓がポップアップらしいか (`popup_style`。D-143)。スタイルを 1 回だけ読み、0 なら真: 無効なハンドルは 0 に読め、
+/// 列挙の時点で見えていたトップレベルの窓は `WS_POPUP` か `WS_CAPTION` を持つので 0 にならない (隠されて
+/// `WS_VISIBLE` が落ちても 0 にはならない。推定)。読めない窓は後に回す側に倒す (列挙の後に消えた
+/// ツールチップを本体より前に出さない)。メッセージを送らない (止まった窓でも止まらない。D-105)。読み取りだけ
+pub fn looks_popup(hwnd: usize) -> bool {
+    let h = hwnd as HWND;
+    let st = win_style(h);
+    if st == 0 {
+        return true;
+    }
+    popup_style(st, ex_style(h))
+}
+
+/// 題名があり、ツールウィンドウ (`WS_EX_TOOLWINDOW`) でない窓の形か (`windows` の一覧に入る形。設定は見ない)。
+/// `top_level_windows_detailed` の絞り込みと、撮影の隠れの判定の読み (`cover_traits`。D-142) の両方が使う
+pub fn listed_style(titled: bool, ex: u32) -> bool {
+    titled && ex & WS_EX_TOOLWINDOW == 0
+}
+
+/// 覆う窓の性質 (撮影の隠れの判定。D-142)。`see_through` は `stack_window` の読みのまま (見えない、cloaked、最小化、
+/// 枠が取れない、読む途中で閉じられた窓は None)。`plain_top` は題名 (`window_title`。メッセージを送らない) と
+/// 拡張スタイルから `listed_style` で決める。題名と拡張スタイルは `stack_window` より先に読む: 読む途中で閉じられた
+/// 窓は題名が空や拡張スタイルが 0 に読めうる。`plain_top` が真に転ぶ側 (拡張スタイルが 0 でツールウィンドウの印が
+/// 消える) は隠れに数える向きなので安全で、偽に転ぶ側 (題名が空に読める) は `stack_window` の最後の `IsWindow`
+/// などで None に落ちる (None で、隠れに数える向き)。読み取りだけ。
+pub fn cover_traits(hwnd: usize) -> Option<CoverTraits> {
+    let h = hwnd as HWND;
+    let plain_top = listed_style(!window_title(h).is_empty(), ex_style(h));
+    let see_through = stack_window(hwnd)?.see_through;
+    Some(CoverTraits {
+        plain_top,
+        see_through,
+    })
+}
+
+/// 窓を作ったスレッドの id (`GetWindowThreadProcessId` の戻り値)。0 (無効なハンドル) なら None (D-142)。読み取りだけ。
+pub fn window_thread(hwnd: usize) -> Option<u32> {
+    // SAFETY: ハンドルの値を渡すだけ。pid の出力先は省略可能な引数 ([out, optional]) で、null なら書き込まない
+    // (Microsoft Learn の GetWindowThreadProcessId)。無効なハンドルなら 0 が返る。
+    let tid = unsafe { GetWindowThreadProcessId(hwnd as HWND, std::ptr::null_mut()) };
+    (tid != 0).then_some(tid)
 }
 
 /// 窓が下の窓を透かして写しうるか (D-077)。`ex` は拡張スタイル、`layered` は `GetLayeredWindowAttributes` の
@@ -549,8 +635,7 @@ pub fn stack_window(hwnd: usize) -> Option<StackWindow> {
         return None;
     }
     let (rect, exact_frame) = frame_rect_with_source(h)?;
-    // SAFETY: 同上。GWL_EXSTYLE の読み取りだけ (無効なハンドルなら 0 が返る)。
-    let ex = unsafe { GetWindowLongW(h, GWL_EXSTYLE) } as u32;
+    let ex = ex_style(h);
     let layered = if ex & WS_EX_LAYERED != 0 {
         layered_attributes(h)
     } else {
@@ -751,6 +836,59 @@ mod tests {
     use super::*;
     use windows_sys::Win32::UI::WindowsAndMessaging::{WDA_MONITOR, WS_EX_TRANSPARENT};
 
+    /// (形, 容量) とその読みの答え
+    type Answer<'a> = ((u32, usize), Result<&'a str, u32>);
+
+    /// 名前の読み直し (D-145)。`answers` は (flag, cap) ごとの答えで、無い組は 5 で失敗する。呼び出しを記録する
+    fn read_name(answers: &[Answer<'_>]) -> (String, Vec<(u32, usize)>) {
+        let mut calls = Vec::new();
+        let name = image_name_from(|flag, cap| {
+            calls.push((flag, cap));
+            answers
+                .iter()
+                .find(|(k, _)| *k == (flag, cap))
+                .map(|(_, v)| v.map(OsString::from))
+                .unwrap_or(Err(5))
+        });
+        (name, calls)
+    }
+
+    /// 1024 で読めればそれだけ。失敗なら誤りの値を問わず 32768 で 1 回読み直し、WIN32 が駄目なら NATIVE。
+    /// 最後の要素が空なら次の形へ進み、どちらも駄目なら空 (D-145)
+    #[test]
+    fn image_name_from_widens_and_falls_back_to_native() {
+        const W: u32 = PROCESS_NAME_WIN32;
+        const N: u32 = PROCESS_NAME_NATIVE;
+        const NATIVE_X: &str = r"\Device\HarddiskVolume3\Apps\x.exe";
+        // 1 回で読める
+        let (name, calls) = read_name(&[((W, 1024), Ok(r"C:\Windows\notepad.exe"))]);
+        assert_eq!(name, "notepad.exe");
+        assert_eq!(calls, vec![(W, 1024)]);
+        // 1024 が 122 (足りない)、32768 で読める。NATIVE は呼ばれない
+        let (name, calls) = read_name(&[
+            ((W, 1024), Err(122)),
+            ((W, 32768), Ok(r"C:\long\path\app.exe")),
+        ]);
+        assert_eq!(name, "app.exe");
+        assert_eq!(calls, vec![(W, 1024), (W, 32768)]);
+        // WIN32 が 5 で失敗、NATIVE で読める
+        let (name, _) = read_name(&[((N, 1024), Ok(NATIVE_X))]);
+        assert_eq!(name, "x.exe");
+        // WIN32 の最後の要素が空なら NATIVE へ進む
+        let (name, calls) = read_name(&[((W, 1024), Ok(r"C:\dir\")), ((N, 1024), Ok(NATIVE_X))]);
+        assert_eq!(name, "x.exe");
+        assert_eq!(calls, vec![(W, 1024), (N, 1024)]);
+        // 両方が 1024 でも 32768 でも失敗 → 空
+        let (name, calls) = read_name(&[]);
+        assert_eq!(name, "");
+        assert_eq!(calls, vec![(W, 1024), (W, 32768), (N, 1024), (N, 32768)]);
+        // NATIVE の末尾が `\` → 空。NATIVE が空の文字列 → 空
+        let (name, _) = read_name(&[((N, 1024), Ok(r"\Device\HarddiskVolume3\dir\"))]);
+        assert_eq!(name, "");
+        let (name, _) = read_name(&[((N, 1024), Ok(""))]);
+        assert_eq!(name, "");
+    }
+
     /// 透けうるかは層の属性で決まる (D-077)。失敗 (ピクセルごとのアルファ)、色キー、255 未満の alpha は透ける。
     /// alpha 255 の層付きの窓と `LWA_ALPHA` の無い層付きの窓は不透明 (層付きのアプリのたびに断らない)。
     /// `WS_EX_TRANSPARENT` (ヒットテストだけ) は見ない
@@ -778,6 +916,54 @@ mod tests {
             WS_EX_LAYERED | WS_EX_TRANSPARENT,
             Some((LWA_ALPHA, 255))
         ));
+    }
+
+    /// 一覧に入る形 (題名があり、ツールウィンドウでない) の判定 (D-142)。題名が無いか、ツールウィンドウなら偽
+    #[test]
+    fn listed_style_needs_title_and_no_tool_window() {
+        assert!(listed_style(true, 0));
+        assert!(listed_style(true, WS_EX_LAYERED));
+        assert!(!listed_style(false, 0));
+        assert!(!listed_style(true, WS_EX_TOOLWINDOW));
+        assert!(!listed_style(false, WS_EX_TOOLWINDOW));
+    }
+
+    /// 無効なハンドル (0) では覆う窓の性質もスレッドも読めない (D-142。読めなければ隠れに数える向き)
+    #[test]
+    fn cover_traits_is_none_for_invalid_handle() {
+        assert_eq!(cover_traits(0), None);
+        assert_eq!(window_thread(0), None);
+    }
+
+    /// ポップアップらしさの印 (D-143): NOACTIVATE か、題名の帯 (BORDER と DLGFRAME の両方) のそろわない POPUP。
+    /// 帯のそろったポップアップ (ダイアログ) と普通の窓は当たらない。値はメモ帳で読んだもの (spec の実測)
+    #[test]
+    fn popup_style_marks_noactivate_and_captionless_popup() {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            WS_BORDER, WS_DLGFRAME, WS_OVERLAPPEDWINDOW,
+        };
+        assert!(popup_style(0, WS_EX_NOACTIVATE));
+        assert!(popup_style(WS_OVERLAPPEDWINDOW, WS_EX_NOACTIVATE));
+        assert!(popup_style(WS_POPUP, 0));
+        assert!(popup_style(WS_POPUP | WS_BORDER, 0), "帯の片方 (BORDER)");
+        assert!(
+            popup_style(WS_POPUP | WS_DLGFRAME, 0),
+            "帯の片方 (DLGFRAME)"
+        );
+        assert!(
+            popup_style(0x9400_0000, 0x0820_0000),
+            "メモ帳のツールチップ"
+        );
+        assert!(!popup_style(WS_POPUP | WS_CAPTION, 0), "ダイアログ");
+        assert!(!popup_style(WS_OVERLAPPEDWINDOW, 0));
+        assert!(!popup_style(0x14cf_0000, 0x110), "メモ帳の本体");
+        assert!(!popup_style(0, 0));
+    }
+
+    /// 読めない窓 (無効なハンドル) はポップアップらしい側に倒す (D-143)
+    #[test]
+    fn looks_popup_is_true_for_invalid_handle() {
+        assert!(looks_popup(0));
     }
 
     /// 見えているかの判定の元 (D-099): 見えて cloaked でなければ入れない (None)。見えて cloaked なら cloaked、

@@ -423,7 +423,7 @@ fn mcp_child_discover_list_guide_click_then_eof_exits_0_with_json_only_stdout() 
         serde_json::json!(["2026-07-28"])
     );
     assert_eq!(lines[0]["result"]["resultType"], "complete");
-    assert_eq!(lines[1]["result"]["tools"].as_array().unwrap().len(), 19);
+    assert_eq!(lines[1]["result"]["tools"].as_array().unwrap().len(), 20);
     // tools/list は設定 (承認の印) で変わるので private、server/discover は public のまま (D-078)
     assert_eq!(lines[1]["result"]["cacheScope"], "private");
     assert_eq!(lines[0]["result"]["cacheScope"], "public");
@@ -480,7 +480,7 @@ fn mcp_child_legacy_initialize_initialized_tools_list_ping_then_eof() {
         by_id(1)["result"]["capabilities"],
         serde_json::json!({ "tools": {} })
     );
-    assert_eq!(by_id(2)["result"]["tools"].as_array().unwrap().len(), 19);
+    assert_eq!(by_id(2)["result"]["tools"].as_array().unwrap().len(), 20);
     assert_eq!(by_id(3)["result"], serde_json::json!({}));
 }
 
@@ -526,6 +526,56 @@ fn mcp_child_log_file_records_start_cancel_and_eof() {
     );
 }
 
+/// clientInfo.name の改行はログの出口でエスケープされ、行を割らない (D-140)
+#[test]
+fn mcp_child_log_escapes_client_name() {
+    let dir = temp_dir("mcp-log-escape");
+    let log = dir.join("mcp.log");
+    let log_s = log.display().to_string();
+    let input = format!(
+        "{}\n",
+        serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18", "capabilities": {},
+                "clientInfo": { "name": "evil\nINJECT & calc", "version": "1" }
+            }
+        })
+    );
+    let (code, _, stderr) = run(&["mcp", "--log", &log_s], &[], input.as_bytes());
+    assert_eq!(code, 0, "stderr={stderr}");
+    let text = std::fs::read_to_string(&log).expect("ログのファイル");
+    let lines: Vec<&str> = text.lines().collect();
+    assert!(
+        lines
+            .iter()
+            .all(|l| l.contains("Z (") && l.contains("ai-cu mcp: ")),
+        "{text}"
+    );
+    assert!(!lines.iter().any(|l| l.starts_with("INJECT")), "{text}");
+    assert!(lines.iter().any(|l| l.contains("\\u{a}INJECT")), "{text}");
+}
+
+/// `--log` の拡張子が .log でなければ書かずに続け、MCP は応える (D-140、D-061)
+#[test]
+fn mcp_child_log_refuses_non_log_extension() {
+    let dir = temp_dir("mcp-log-ext");
+    let target = dir.join("x.cmd");
+    let target_s = target.display().to_string();
+    let input = concat!(
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}"#,
+        "\n",
+    );
+    let (code, stdout, stderr) = run(&["mcp", "--log", &target_s], &[], input.as_bytes());
+    assert_eq!(code, 0, "stderr={stderr}");
+    let lines = mcp_lines(&stdout);
+    assert_eq!(lines.len(), 1, "{stdout}");
+    assert!(lines[0].get("result").is_some(), "{stdout}");
+    assert!(stderr.contains("ログなしで続ける"), "{stderr}");
+    assert!(stderr.contains(".log"), "{stderr}");
+    assert!(!target.exists(), "断った先のファイルは作らない");
+}
+
 #[test]
 fn mcp_child_shot_in_dev_shell_is_refused_and_writes_no_file() {
     let dir = temp_dir("mcp-shot");
@@ -552,4 +602,31 @@ fn mcp_child_shot_in_dev_shell_is_refused_and_writes_no_file() {
     let exit = v["error"]["exit_code"].as_i64();
     assert!(matches!(exit, Some(9) | Some(14)), "{v}");
     assert!(std::fs::metadata(&png).is_err(), "撮っていない");
+}
+
+/// MCP の pixel (D-146) も、開発のシェル (実入力を禁じる環境変数つき) では撮影が断られ、色を返さない。
+/// 意図と受ける終了コードは shot の子プロセスのテストと同じ (9、または実画面がロック中なら 14)
+#[test]
+fn mcp_child_pixel_in_dev_shell_is_refused() {
+    let dir = temp_dir("mcp-pixel");
+    let floor = dir.join("floor.toml");
+    std::fs::write(
+        &floor,
+        "version = 1\n[general]\ncapture_enabled = true\n[capture]\nmin_idle_ms = 0\n",
+    )
+    .unwrap();
+    let input = format!(
+        "{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{{\"name\":\"pixel\",\"arguments\":{{\"points\":[{{\"x\":0,\"y\":0}}]}},{META}}}}}\n"
+    );
+    let floor_s = floor.display().to_string();
+    let (code, stdout, stderr) = run(&["mcp"], &[("AI_CU_DEV_FLOOR", &floor_s)], input.as_bytes());
+    assert_eq!(code, 0, "stderr={stderr}");
+    let lines = mcp_lines(&stdout);
+    assert_eq!(lines.len(), 1, "{stdout}");
+    assert_eq!(lines[0]["result"]["isError"], true, "{stdout}");
+    let v: serde_json::Value =
+        serde_json::from_str(lines[0]["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    let exit = v["error"]["exit_code"].as_i64();
+    assert!(matches!(exit, Some(9) | Some(14)), "{v}");
+    assert!(v.get("pixels").is_none(), "色を返さない: {v}");
 }
