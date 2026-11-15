@@ -204,13 +204,14 @@ fn image_name_from(mut query: impl FnMut(u32, usize) -> Result<OsString, u32>) -
 }
 
 /// 開いたプロセスの実行ファイル名。読めなければ空 (読みの手順は `image_name_from`)。
+/// `h` は `open_limited` で開いたハンドルだけを渡す (下の SAFETY の前提)。
 fn image_name(h: &OwnedHandle) -> String {
     image_name_from(|flag, cap| {
         let mut buf = vec![0u16; cap];
         let mut len = cap as u32;
         // SAFETY: h は PROCESS_QUERY_LIMITED_INFORMATION で開いた有効なハンドル。flag は PROCESS_NAME_WIN32 か
         // PROCESS_NAME_NATIVE。buf は cap 文字 (u16 で cap 要素) の書き込み可能な領域で、len は入力で容量 (文字数)、
-        // 成功時の出力で書いた文字数 (NUL を除く) になる。
+        // 成功時の出力で書いた文字数 (NUL を除く) になる。失敗時の len の値は文書に無いので使わない。
         let ok = unsafe { QueryFullProcessImageNameW(h.0, flag, buf.as_mut_ptr(), &mut len) };
         if ok == 0 {
             // 失敗の直後、他の Win32 を呼ぶ前に読む
