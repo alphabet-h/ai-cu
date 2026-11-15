@@ -13,7 +13,7 @@ use windows_sys::Win32::Security::{
     GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation,
 };
 use windows_sys::Win32::System::Threading::{
-    GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_NAME_WIN32,
+    GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_NAME_NATIVE, PROCESS_NAME_WIN32,
     PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled;
@@ -180,22 +180,44 @@ fn open_limited(pid: u32) -> Option<OwnedHandle> {
     }
 }
 
-/// 開いたプロセスの実行ファイル名。読めなければ空。
-fn image_name(h: &OwnedHandle) -> String {
-    let mut buf = vec![0u16; 1024];
-    let mut len = buf.len() as u32;
-    // SAFETY: h は PROCESS_QUERY_LIMITED_INFORMATION で開いた有効なハンドル。buf は len 要素の書き込み可能な領域で、
-    // len は入力で容量、出力で書いた文字数 (NUL を除く) になる。
-    let ok =
-        unsafe { QueryFullProcessImageNameW(h.0, PROCESS_NAME_WIN32, buf.as_mut_ptr(), &mut len) };
-    if ok == 0 {
-        return String::new();
+/// 名前を読む最初の容量 (文字数)。普段はこの 1 回で読める。
+const IMAGE_NAME_CAP: usize = 1024;
+/// 最初の読みが失敗したときに 1 回だけ読み直す容量 (文字数。拡張パスの上限)。
+const IMAGE_NAME_CAP_WIDE: usize = 32768;
+
+/// 実行ファイル名を読む手順 (unsafe なし。D-145)。`query(flag, cap)` は形 `flag`
+/// (`PROCESS_NAME_WIN32` か `PROCESS_NAME_NATIVE`) と容量 `cap` (文字数) でパスを読み、失敗なら誤りの値を返す。
+/// 形は WIN32 → NATIVE の順。各形で `IMAGE_NAME_CAP` で読み、失敗なら誤りの値を問わず `IMAGE_NAME_CAP_WIDE` で
+/// 1 回だけ読み直す (足りないときの誤りの値は QueryFullProcessImageNameW の文書に無いので、値で絞らない)。
+/// 読めたパスの `\` 区切りの最後の要素が空でなければそれを返し、空なら次の形へ進む。どちらも駄目なら空の文字列。
+fn image_name_from(mut query: impl FnMut(u32, usize) -> Result<OsString, u32>) -> String {
+    for flag in [PROCESS_NAME_WIN32, PROCESS_NAME_NATIVE] {
+        let path = query(flag, IMAGE_NAME_CAP).or_else(|_| query(flag, IMAGE_NAME_CAP_WIDE));
+        let Ok(path) = path else { continue };
+        let path = path.to_string_lossy();
+        let last = path.rsplit('\\').next().unwrap_or_default();
+        if !last.is_empty() {
+            return last.to_owned();
+        }
     }
-    let path = OsString::from_wide(&buf[..(len as usize).min(buf.len())]);
-    std::path::Path::new(&path)
-        .file_name()
-        .map(|f| f.to_string_lossy().into_owned())
-        .unwrap_or_default()
+    String::new()
+}
+
+/// 開いたプロセスの実行ファイル名。読めなければ空 (読みの手順は `image_name_from`)。
+fn image_name(h: &OwnedHandle) -> String {
+    image_name_from(|flag, cap| {
+        let mut buf = vec![0u16; cap];
+        let mut len = cap as u32;
+        // SAFETY: h は PROCESS_QUERY_LIMITED_INFORMATION で開いた有効なハンドル。flag は PROCESS_NAME_WIN32 か
+        // PROCESS_NAME_NATIVE。buf は cap 文字 (u16 で cap 要素) の書き込み可能な領域で、len は入力で容量 (文字数)、
+        // 成功時の出力で書いた文字数 (NUL を除く) になる。
+        let ok = unsafe { QueryFullProcessImageNameW(h.0, flag, buf.as_mut_ptr(), &mut len) };
+        if ok == 0 {
+            // 失敗の直後、他の Win32 を呼ぶ前に読む
+            return Err(super::last_error());
+        }
+        Ok(OsString::from_wide(&buf[..(len as usize).min(buf.len())]))
+    })
 }
 
 /// 実行ファイル名だけ (管理者権限かは読まない)。開けないプロセスは空。
@@ -812,6 +834,59 @@ pub fn self_elevated() -> bool {
 mod tests {
     use super::*;
     use windows_sys::Win32::UI::WindowsAndMessaging::{WDA_MONITOR, WS_EX_TRANSPARENT};
+
+    /// (形, 容量) とその読みの答え
+    type Answer<'a> = ((u32, usize), Result<&'a str, u32>);
+
+    /// 名前の読み直し (D-145)。`answers` は (flag, cap) ごとの答えで、無い組は 5 で失敗する。呼び出しを記録する
+    fn read_name(answers: &[Answer<'_>]) -> (String, Vec<(u32, usize)>) {
+        let mut calls = Vec::new();
+        let name = image_name_from(|flag, cap| {
+            calls.push((flag, cap));
+            answers
+                .iter()
+                .find(|(k, _)| *k == (flag, cap))
+                .map(|(_, v)| v.map(OsString::from))
+                .unwrap_or(Err(5))
+        });
+        (name, calls)
+    }
+
+    /// 1024 で読めればそれだけ。失敗なら誤りの値を問わず 32768 で 1 回読み直し、WIN32 が駄目なら NATIVE。
+    /// 最後の要素が空なら次の形へ進み、どちらも駄目なら空 (D-145)
+    #[test]
+    fn image_name_from_widens_and_falls_back_to_native() {
+        const W: u32 = PROCESS_NAME_WIN32;
+        const N: u32 = PROCESS_NAME_NATIVE;
+        const NATIVE_X: &str = r"\Device\HarddiskVolume3\Apps\x.exe";
+        // 1 回で読める
+        let (name, calls) = read_name(&[((W, 1024), Ok(r"C:\Windows\notepad.exe"))]);
+        assert_eq!(name, "notepad.exe");
+        assert_eq!(calls, vec![(W, 1024)]);
+        // 1024 が 122 (足りない)、32768 で読める。NATIVE は呼ばれない
+        let (name, calls) = read_name(&[
+            ((W, 1024), Err(122)),
+            ((W, 32768), Ok(r"C:\long\path\app.exe")),
+        ]);
+        assert_eq!(name, "app.exe");
+        assert_eq!(calls, vec![(W, 1024), (W, 32768)]);
+        // WIN32 が 5 で失敗、NATIVE で読める
+        let (name, _) = read_name(&[((N, 1024), Ok(NATIVE_X))]);
+        assert_eq!(name, "x.exe");
+        // WIN32 の最後の要素が空なら NATIVE へ進む
+        let (name, calls) = read_name(&[((W, 1024), Ok(r"C:\dir\")), ((N, 1024), Ok(NATIVE_X))]);
+        assert_eq!(name, "x.exe");
+        assert_eq!(calls, vec![(W, 1024), (N, 1024)]);
+        // 両方が 1024 でも 32768 でも失敗 → 空
+        let (name, calls) = read_name(&[]);
+        assert_eq!(name, "");
+        assert_eq!(calls, vec![(W, 1024), (W, 32768), (N, 1024), (N, 32768)]);
+        // NATIVE の末尾が `\` → 空。NATIVE が空の文字列 → 空
+        let (name, _) = read_name(&[((N, 1024), Ok(r"\Device\HarddiskVolume3\dir\"))]);
+        assert_eq!(name, "");
+        let (name, _) = read_name(&[((N, 1024), Ok(""))]);
+        assert_eq!(name, "");
+    }
 
     /// 透けうるかは層の属性で決まる (D-077)。失敗 (ピクセルごとのアルファ)、色キー、255 未満の alpha は透ける。
     /// alpha 255 の層付きの窓と `LWA_ALPHA` の無い層付きの窓は不透明 (層付きのアプリのたびに断らない)。
