@@ -100,7 +100,9 @@ fn real_main() -> i32 {
                 dpi,
                 host_pids,
             };
-            ai_cu::tui::run(&target, &mut runner)
+            // TUI は開いている間ずっと入力の錠を持つ (D-147)。実行器の錠とは別のハンドルで、同じスレッドから取る
+            let mut lock = ai_cu::backend::RealInputLock::default();
+            ai_cu::tui::run(&target, &mut runner, &mut lock)
         }
         Outcome::Text(text) => {
             print!("{text}");

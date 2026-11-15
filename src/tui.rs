@@ -3693,7 +3693,13 @@ fn help_lines() -> Vec<String> {
 
 /// 端末で TUI を動かす。呼び出し側は、標準入力と標準出力の両方がコンソールであることを確かめておく (D-023)。
 /// 操作列の実行は `runner` に頼む (CLI の `run` と同じ経路。D-044)。
-pub fn run(target: &Target, runner: &mut dyn ScriptRunner) -> i32 {
+///
+/// 開いている間ずっと入力の錠 `lock` (D-113) を持ち、別の ai-cu の画面を変える操作を TUI の編集に届かせない (D-147)。
+/// 持てていない間は周回ごとに取り直しを試み (判断は `hold_input_lock`)、取れた瞬間に端末の入力を読み捨てる。
+/// 終わるときにこのスレッドで解く。TUI の中の実行は、実行器が別に開いたハンドルで同じ錠をこのスレッドから取り直す。
+/// 名前付きミューテックスの持ち主はスレッドで決まるので、ハンドルが別でも再帰で取れて待たない
+/// (`backend` の `real_input_lock_separate_handles_recurse_on_same_thread`)。実行器を別のスレッドに移すと崩れる
+pub fn run(target: &Target, runner: &mut dyn ScriptRunner, lock: &mut dyn InputLock) -> i32 {
     let mut app = App::load(target.clone());
     // 配色の環境は 1 回だけ読む。RGB のテーマを選んだのに VT が無ければ、ansi で描くことを知らせる (D-129)
     app.env = ThemeEnv::detect();
@@ -3727,13 +3733,21 @@ pub fn run(target: &Target, runner: &mut dyn ScriptRunner) -> i32 {
             return 2;
         }
     };
+    // 起動の 1 回目は知らせを出さずに試す (取れなかったときだけ hold_input_lock が待ちの知らせを出す。D-147)
+    app.begin_lock_wait();
     let code = 'outer: loop {
+        // 錠を持てていなければ取り直しを試み、取れた瞬間に、待つ間に届いた打鍵 (別の ai-cu の最後の打鍵を含む) を捨てる
+        if hold_input_lock(&mut app, lock)
+            && let Err(e) = drain_input()
+        {
+            break report_io(e);
+        }
         if let Err(e) = terminal.draw(|f| render(&app, f)) {
             break report_io(e);
         }
         let started = std::time::Instant::now();
-        // カウントダウンの間だけ、キーを待ちながら時間を進める
-        let ev = if matches!(app.overlay, Overlay::Countdown { .. }) {
+        // カウントダウンの間と錠を待つ間だけ、キーを待ちながら周回する (時間を進める・取り直しを試みる)
+        let ev = if app.wants_tick() {
             match event::poll(Duration::from_millis(TICK_MS)) {
                 Ok(true) => match event::read() {
                     Ok(ev) => Some(ev),
@@ -3765,6 +3779,8 @@ pub fn run(target: &Target, runner: &mut dyn ScriptRunner) -> i32 {
             }
         }
     };
+    // 持っていれば解く (持っていなければ何もしない)。取ったのと同じこのスレッドで解く (D-147)
+    lock.release();
     ratatui::restore();
     code
 }
