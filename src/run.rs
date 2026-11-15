@@ -4,8 +4,8 @@
 use serde::Serialize;
 
 use crate::device::{
-    BackendError, Clock, Desktop, HelperOutcome, Image, Indicator, InputDesktop, InputEvent,
-    InputLock, InputSink, StackWindow, TopWindow, WindowInfo, WindowPresence,
+    BackendError, Clock, CoverTraits, Desktop, HelperOutcome, Image, Indicator, InputDesktop,
+    InputEvent, InputLock, InputSink, StackWindow, TopWindow, WindowInfo, WindowPresence,
 };
 use crate::elements::{
     ElementQuery, UiElement, element_json, first_text, normalize_newlines, parse_control_type,
@@ -63,11 +63,13 @@ pub const SCREEN_WAIT_HINT: &str = "画面が時間内に落ち着かなかっ�
 /// 矩形の中を間引いて見て、対象 (と対象に所有されたウィンドウ) 以外のウィンドウが上にあれば、それを返す (D-053 の追記)。
 /// 画面の矩形の撮影は、そこに見えているものを撮る (ウィンドウ自身の中身ではない) ので、隠れている部分には
 /// 別のアプリ (deny の端末など) の中身が写り込む。角の丸み (Windows 11) を避けて内側から見る。
-/// 見つけた点も返す (隠れの 7 の `error.detail.point`。D-135)
+/// 見つけた点も返す (隠れの 7 の `error.detail.point`。D-135)。
+/// 対象と同じアプリが対象の窓と同じスレッドで出した付属の窓 (`same_app_popup`。ツールチップ、メニューなど) も
+/// 数えず、その点を飛ばして次の点を見る (D-142)
 fn occluding_window(
     desktop: &dyn Desktop,
     rect: &Rect,
-    target: usize,
+    target: &WindowInfo,
 ) -> Result<Option<(WindowInfo, Point)>, BackendError> {
     const INSET: i64 = 8;
     const STEP: usize = 64;
@@ -88,14 +90,41 @@ fn occluding_window(
         for x in axis(x0, x1) {
             let p = Point::new(x as i32, y as i32);
             if let Some(w) = desktop.window_at(p)?
-                && w.hwnd != target
-                && desktop.owner_root(w.hwnd) != target
+                && w.hwnd != target.hwnd
+                && desktop.owner_root(w.hwnd) != target.hwnd
+                && !same_app_popup(desktop, &w, target)
             {
                 return Ok(Some((w, p)));
             }
         }
     }
     Ok(None)
+}
+
+/// 点の下の窓 `w` が、対象 `target` と同じ pid で、対象の窓と同じスレッドが作った、題名が無いかツールウィンドウの
+/// 透けない窓か (D-142)。同じ UI スレッドが作った付属の表示 (ツールチップ、メニュー) は対象のアプリ自身の中身なので、
+/// 撮影の隠れに数えない。同じプロセスの別スレッドの窓 (explorer のタスクバーのサムネイルなど)、題名がありツール
+/// ウィンドウでない主窓、透ける窓 (下の別の窓が写りうる) は数える。スレッドか性質が読めなければ数える (断る向き)。
+/// 設定 (deny) は見ない: deny の窓は、この後に必ず通る機密の判定 (D-077) が断る
+fn same_app_popup(desktop: &dyn Desktop, w: &WindowInfo, target: &WindowInfo) -> bool {
+    if w.pid != target.pid {
+        return false;
+    }
+    let same_thread = match (
+        desktop.window_thread(w.hwnd),
+        desktop.window_thread(target.hwnd),
+    ) {
+        (Some(a), Some(b)) => a == b,
+        _ => false,
+    };
+    same_thread
+        && matches!(
+            desktop.cover_traits(w.hwnd),
+            Some(CoverTraits {
+                plain_top: false,
+                see_through: false
+            })
+        )
 }
 
 /// 待ちの途中で停止要因を確かめる間隔
@@ -326,7 +355,8 @@ fn capture_target_shown(target: &WindowTarget) -> String {
 /// ときの待った時間 (D-082)。message の末尾に添えるだけで、kind と hint は同じ。
 /// `error.detail` に、覆う窓の `window` (題名なし) と隠れを見つけた `point` を入れる。重なりの一覧
 /// (`stack_windows`) をこの失敗のときだけ 1 回読み (deny の有無によらない)、覆う窓が一覧にあれば `see_through`
-/// (deny の窓の判定で覆いに数えない窓か。隠れの判定はこの値を見ない) を、見えている部分が残れば
+/// (deny の窓の判定で覆いに数えない窓か。隠れの判定は、真なら 7 のまま。同じアプリの付属の窓を数えない
+/// 例外 (D-142) は偽のときだけ) を、見えている部分が残れば
 /// その外接矩形の `visible` (機密の 7 と同じ定義) を足す。読めなければ省き、7 のまま (D-135)
 fn occluded_error(
     desktop: &dyn Desktop,
@@ -425,7 +455,7 @@ fn resolve_capture_window_parts(
     })?;
     // 隠れている部分には別のウィンドウの中身が写り込むので、撮らない (前面にしてから撮る)
     if let Some((cover, point)) =
-        occluding_window(desktop, &rect, w.info.hwnd).map_err(backend_error)?
+        occluding_window(desktop, &rect, &w.info).map_err(backend_error)?
     {
         return Ok(Resolved::Occluded { cover, point, rect });
     }
@@ -4901,22 +4931,7 @@ mod tests {
 
     /// `resolve_capture_window` を直接呼び、隠れの 7 を返す (kind も確かめる)
     fn resolve_occluded(world: &Rc<RefCell<World>>) -> AppError {
-        let desktop = MockDesktop(world.clone());
-        let screen = world.borrow().screen;
-        let target = WindowTarget {
-            process: "notepad.exe".into(),
-            title: None,
-        };
-        let e = resolve_capture_window(
-            &desktop,
-            &notepad_policy(),
-            screen,
-            &target,
-            &[],
-            None,
-            Surface::Cli,
-        )
-        .unwrap_err();
+        let e = resolve_capture(world, &notepad_policy(), "notepad.exe", &[]).unwrap_err();
         assert_eq!(e.kind, ErrorKind::ForegroundGuard, "{e}");
         assert_eq!(e.hint.as_deref(), Some(CAPTURE_OCCLUDED_HINT));
         e
@@ -5012,6 +5027,140 @@ mod tests {
         assert_eq!(d["see_through"], false);
     }
 
+    // --- 対象と同じアプリの付属の窓を隠れに数えない (D-142) ---
+
+    /// 対象のメモ帳 (0x20、pid 4242) と同じ pid とプロセスの、題名が無いツールチップ (0x21)
+    fn popup() -> WindowInfo {
+        let mut p = window("Notepad.exe", "tooltips_class32");
+        p.hwnd = 0x21;
+        p.title = String::new();
+        p
+    }
+
+    fn traits(plain_top: bool, see_through: bool) -> CoverTraits {
+        CoverTraits {
+            plain_top,
+            see_through,
+        }
+    }
+
+    /// `occluded_world` の覆い (枠 `OCC_COVER`) を `cover` にし、その性質を `traits` (None なら登録しない) にした世界。
+    /// 対象 0x20 と `cover` のスレッドはどちらも 7
+    fn popup_world(cover: WindowInfo, traits: Option<CoverTraits>) -> World {
+        let mut w = occluded_world(Vec::new());
+        if let Some(t) = traits {
+            w.cover_traits.push((cover.hwnd, t));
+        }
+        w.threads = vec![(0x20, 7), (cover.hwnd, 7)];
+        w.windows_at = vec![(OCC_COVER, cover)];
+        w
+    }
+
+    /// 同じ pid・同じスレッドの、題名が無いかツールウィンドウの透けない窓は隠れに数えず、撮る
+    #[test]
+    fn same_process_popup_does_not_occlude() {
+        let world = popup_world(popup(), Some(traits(false, false))).shared();
+        let (rect, shot) = resolve_capture(&world, &notepad_policy(), "notepad.exe", &[]).unwrap();
+        assert_eq!(rect, OCC_RECT);
+        assert_eq!(shot.hwnd, 0x20);
+    }
+
+    /// 同じ pid でも、題名がありツールウィンドウでない窓 (Chrome の別の窓の形) は 7
+    #[test]
+    fn same_process_plain_top_window_still_occludes() {
+        let world = popup_world(popup(), Some(traits(true, false))).shared();
+        resolve_occluded(&world);
+    }
+
+    /// 同じ pid の付属の窓でも、透けるなら 7 (下の別の窓が写りうる)
+    #[test]
+    fn same_process_see_through_popup_still_occludes() {
+        let world = popup_world(popup(), Some(traits(false, true))).shared();
+        resolve_occluded(&world);
+    }
+
+    /// 性質が読めなければ (None) 7 (断る向き)
+    #[test]
+    fn same_process_popup_without_traits_still_occludes() {
+        let world = popup_world(popup(), None).shared();
+        resolve_occluded(&world);
+    }
+
+    /// 別の pid (同じ実行ファイル名の別のインスタンス) の付属の窓は 7。スレッドは同じ値にして pid の項だけを撃つ
+    #[test]
+    fn other_process_popup_still_occludes() {
+        let mut cover = popup();
+        cover.pid = 4243;
+        let world = popup_world(cover, Some(traits(false, false))).shared();
+        let e = resolve_occluded(&world);
+        assert_eq!(detail(&e)["window"]["pid"], 4243);
+    }
+
+    /// 同じ pid でも別のスレッドの窓は 7 (explorer のタスクバーのサムネイルの形)
+    #[test]
+    fn same_process_other_thread_popup_still_occludes() {
+        let mut w = popup_world(popup(), Some(traits(false, false)));
+        w.threads = vec![(0x20, 7), (0x21, 8)];
+        resolve_occluded(&w.shared());
+    }
+
+    /// 付属の窓のスレッドが読めなければ 7
+    #[test]
+    fn same_process_popup_without_thread_still_occludes() {
+        let mut w = popup_world(popup(), Some(traits(false, false)));
+        w.threads = vec![(0x20, 7)];
+        resolve_occluded(&w.shared());
+    }
+
+    /// 対象の窓のスレッドだけが読めなくても 7
+    #[test]
+    fn same_process_popup_target_thread_unknown_still_occludes() {
+        let mut w = popup_world(popup(), Some(traits(false, false)));
+        w.threads = vec![(0x21, 7)];
+        resolve_occluded(&w.shared());
+    }
+
+    /// どちらのスレッドも読めなければ 7 (None 同士を等しいとみなさない)
+    #[test]
+    fn same_process_popup_both_threads_unknown_still_occludes() {
+        let mut w = popup_world(popup(), Some(traits(false, false)));
+        w.threads.clear();
+        resolve_occluded(&w.shared());
+    }
+
+    /// 付属の窓を飛ばした後の点で別のアプリの窓が見つかれば 7 (最初の点で抜けない)
+    #[test]
+    fn popup_is_skipped_but_later_cover_is_found() {
+        let mut w = popup_world(popup(), Some(traits(false, false)));
+        w.windows_at = vec![
+            (Rect::new(100, 50, 200, 100), popup()),
+            (OCC_COVER, chrome()),
+        ];
+        let e = resolve_occluded(&w.shared());
+        assert_eq!(detail(&e)["window"]["process"], "chrome.exe");
+    }
+
+    /// deny のクラスの付属の窓は隠れの判定を素通りし、撮る直前の機密の判定 (D-077) が機密の 7 で断る
+    #[test]
+    fn denied_class_popup_is_refused_as_sensitive() {
+        let mut w = popup_world(popup(), Some(traits(false, false)));
+        let np = w.top[0].info.clone();
+        w.stack = vec![
+            stacked(popup(), OCC_COVER, false),
+            stacked(np, OCC_RECT, false),
+        ];
+        let world = w.shared();
+        let p = policy(&format!(
+            "{ENABLED}[allow]\nprocesses=[\"notepad\"]\n[deny]\nclasses=[\"tooltips_class32\"]\n"
+        ));
+        let (r, images) = exec(&world, &p, &mut StopSet::new(), &script(NOTEPAD_SHOT));
+        let e = r.unwrap_err();
+        assert_eq!(e.kind, ErrorKind::ForegroundGuard, "{e}");
+        assert_eq!(e.hint.as_deref(), Some(CAPTURE_SENSITIVE_HINT));
+        assert_eq!(detail(&e)["window"]["class"], "tooltips_class32");
+        assert!(images.written.is_empty());
+    }
+
     // --- 撮影の対象の 7 と 12 の error.detail.window (D-135) ---
 
     /// メモ帳 (0x20、pid 4242) だけがある世界。`edit` で窓を変える
@@ -5023,13 +5172,13 @@ mod tests {
         w.shared()
     }
 
-    /// `resolve_capture_window` を直接呼び、失敗を返す
-    fn resolve_capture_err(
+    /// `resolve_capture_window` を直接呼ぶ (題名の指定なし、TUI の端末なし、CLI 向け)
+    fn resolve_capture(
         world: &Rc<RefCell<World>>,
         policy: &Policy,
         process: &str,
         host_pids: &[u32],
-    ) -> AppError {
+    ) -> Result<(Rect, ShotWindow), AppError> {
         let desktop = MockDesktop(world.clone());
         let screen = world.borrow().screen;
         let target = WindowTarget {
@@ -5045,7 +5194,16 @@ mod tests {
             None,
             Surface::Cli,
         )
-        .unwrap_err()
+    }
+
+    /// `resolve_capture` の失敗を返す
+    fn resolve_capture_err(
+        world: &Rc<RefCell<World>>,
+        policy: &Policy,
+        process: &str,
+        host_pids: &[u32],
+    ) -> AppError {
+        resolve_capture(world, policy, process, host_pids).unwrap_err()
     }
 
     /// 見つけた窓の window (題名なし)

@@ -2145,6 +2145,23 @@ mod tests {
         }
     }
 
+    /// 全文の撮影の節は、対象と同じアプリの付属の窓 (ツールチップ、メニュー) を透けなければ隠れに数えないことと、
+    /// deny の窓は機密の判定で断ることを書く。`see_through` が真なら 7 のまま (D-142)
+    #[test]
+    fn guide_full_says_same_app_popups_do_not_occlude() {
+        let lines: Vec<&str> = GUIDE
+            .lines()
+            .filter(|l| l.contains("隠れに数えない"))
+            .collect();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        let line = lines[0];
+        for word in ["同じスレッド", "ツールチップ", "透けなければ", "機密の判定"]
+        {
+            assert!(line.contains(word), "{word}: {line}");
+        }
+        assert!(!GUIDE.contains("この値を見ない"), "{GUIDE}");
+    }
+
     /// 全文の `find` の節は、起動の直後の空の結果を「無い」と決めず `wait_for` で待つよう書く (D-135)
     #[test]
     fn guide_says_find_empty_right_after_launch_is_not_absent() {
