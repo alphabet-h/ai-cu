@@ -1,7 +1,7 @@
 # ai-cu 手動確認チェックリスト
 
 自動テスト (`cargo test`、フィクスチャ限定の `cargo test -- --ignored`) では確かめられないことを、本物の端末と本物のアプリで確かめる手順。
-TUI の手順 (5、13、32) は人が自分の Windows Terminal (PowerShell) で行う。それ以外の CLI の手順は、末尾の節のとおり AI のセッションに任せられる。
+TUI の手順 (5、13、32、35 の TUI の部分) は人が自分の Windows Terminal (PowerShell) で行う。それ以外の CLI の手順は、末尾の節のとおり AI のセッションに任せられる。
 各コマンドの後に `$LASTEXITCODE` で終了コードを確かめる。実施したら、末尾の「実施の記録」に日付と結果を足す。
 
 ```powershell
@@ -1086,6 +1086,52 @@ target/release/ai-cu.exe text --window notepad.exe --type document
 
 結果が違ったときは、D-131 の覆る条件に戻る: (a) で `kanji` に反応しなければ VK_OEM_AUTO / VK_OEM_ENLW を試す、(b) で `imeon` / `imeoff` に反応しなければ表から外す、どのキーも届かなければスキャンコードの指定を考える、(d) で文字が未確定に入ったら手引き、参照、説明の文を直す。(c) で未確定に入ると確かめられたら、手引きに足す。
 
+## 35. TUI が開いている間の入力の錠 (D-147)
+
+人が開いた TUI が入力の錠 (D-113) を開いている間ずっと持ち、その間の別の ai-cu の画面を変える操作が 16 になること、TUI が錠を待つ間はキーを受け付けないこと、TUI の中の実行は自分の錠で 16 にならないこと、閉じた後に錠が残らないことを確かめる。
+TUI は人が別の端末の窓で起動する (AI は TUI を起動しない)。利用者の実際の設定は開かない: AI が `target/manual-check/s35-config.toml` を書き (`version = 1` と、`[general]` に `input_enabled = true` だけ。allow を広げない追加の層)、人は `--config=` でそれを指して起動する (題名に「[追加の層: …]」が付く)。(b) で保存されるのはこの一時のファイルだけ。基本の層は触れない。
+基本の層は手順 0 の設定 (allow に notepad) のまま。メモ帳は手順 31 と同じく基本の層で許可済み。手順 31 と同じく、基本の層の `allow.actions` を書いているなら `focus` と `type` が並んでいることを `config show` で確かめ (無ければ (a) と (d) が 4 になる。AI は設定を書き換えず、そのまま記録して止まる)、合成の `indicator` の `lead_ms` を記録する (3000 以外なら (d) の上限の 10000 の内の 3000 をその `lead_ms` に読み替える)。TUI の端末あての `focus` は、追加の層で許可を広げられず検証で断られて錠を取らないので、この節では確かめない。
+メモ帳に実入力を送るので、準備と GO と背景での起動の書き方は手順 31 と同じ: `AI_CU_MANUAL_CHECK=1` のセッションで、release のパスを文字どおり書き、GO を 1 回もらってから行う。AI の送る入力はメモ帳の中だけ (`focus` と `type`)。撮影はしない。本文は `text` で読む。
+
+準備:
+- 人が空の新しいメモ帳のウィンドウを開く (手順 31 と同じ。題名「タイトルなし」のウィンドウが 1 つだけであることを `windows` で確かめる)
+- 操作列 (AI が `target/manual-check/` に書く):
+  - `s35-type.json`: `{"version": 1, "actions": [{"type": "focus", "process": "notepad.exe", "title": "メモ帳"}, {"type": "type", "text": "aaaaa\n"}]}`
+  - `s35-hold.json` ((b) 用に錠を約 20 秒持つ): `{"version": 1, "actions": [{"type": "focus", "process": "notepad.exe", "title": "メモ帳"}, {"type": "wait", "ms": 20000}]}`
+  - `s35-tui.json` ((c) で TUI から実行する): `{"version": 1, "actions": [{"type": "focus", "process": "notepad.exe", "title": "メモ帳"}, {"type": "type", "text": "ccccc\n"}]}`
+- 人は TUI を起動する端末の窓 (Windows Terminal) を別に開き、リポジトリの直下で `$cu = "<repo>\target\release\ai-cu.exe"; $cfg = "<repo>\target\manual-check\s35-config.toml"` を打っておく
+
+(a) TUI を開いたまま、別の ai-cu の画面を変える操作は 16 になり、メモ帳に何も入らない: 人が `& $cu --config=$cfg` で TUI を開き、メッセージの行に待ちの知らせが出ていないことを確かめてから手を離す。AI は Bash ツールの `run_in_background` で次を打つ:
+
+```
+s=$(date +%s%N); target/release/ai-cu.exe run target/manual-check/s35-type.json > target/manual-check/s35-a.out; echo "exit=$? wall_ms=$(( ($(date +%s%N) - s) / 1000000 ))"
+```
+- [ ] 終了コードが `16`。`s35-a.out` の `error.code` が `input_busy`、`error.detail.waited_ms` が 30000 以上、`executed` が無い。`hint` が設定の画面 (TUI) を開いたままにしていないかを人に確かめるよう言う
+- [ ] `target/release/ai-cu.exe text --window notepad.exe --type document` の本文が空 (`aaaaa` が入っていない)
+- [ ] (人の目) TUI の画面は変わらず、キーが効く (錠を持っているので待ちの知らせは出ない)
+
+(b) TUI が錠を待つ間はキーを受け付けず、錠が解けると効く: 人は (a) の TUI を `q` で閉じ、同じ端末の窓に `& $cu --config=$cfg` を打っておく (Enter はまだ押さない)。AI が `target/release/ai-cu.exe run target/manual-check/s35-hold.json` を背景で打ち、メモ帳が前面になった後 (予告の間の約 3 秒の後)、人はマウスに触れずにキーボードだけで端末の窓へ切り替え (`Alt+Tab`)、Enter で TUI を起動する (マウスを動かすと AI の実行が 6 で止まる。`wait` の間は入力を送らないので、前面が端末に移っても実行は止まらない)
+- [ ] (人の目) TUI のメッセージの行に「別の ai-cu が画面を操作中か、別の TUI が開いている。終わるまでキーを受け付けない (Ctrl+C で終了)」が出る
+- [ ] (人の目) 待ちの知らせが出ている間、`s`、`q`、`Esc`、`↓`、`Enter` を押しても何も起きない (保存の確認も終了の確認も出ず、選択も動かない)
+- [ ] AI の実行の終了コードが `0`。その直後に待ちの知らせが消え、`↓` などのキーが効く。許可に関わらない項目 (「表示 > テーマ」など。総スイッチの「実入力」は変えない。変えると (c) が 4 になる) を 1 つ変えて `s` で保存できる (保存先は `s35-config.toml`)
+
+(c) TUI の中の実行は自分の錠で 16 にならない: (b) の TUI で未保存の変更が無いことを確かめ、`r` → パスに `target/manual-check/s35-tui.json` を入れて `Enter` → 確認の画面で `y` → カウントダウンの間にマウスから手を離す
+- [ ] TUI の結果の画面が成功 (終了コード 0) で、`input_busy` にならない。カウントダウンの後、30 秒も待たずに動いた
+- [ ] `text` の本文に `ccccc` の行が入った
+
+(d) TUI を閉じた直後に、錠が残っていない: 人が TUI を `q` で閉じて手を離す。AI はすぐに次を打つ:
+
+```
+s=$(date +%s%N); target/release/ai-cu.exe run target/manual-check/s35-type.json > target/manual-check/s35-d.out; echo "exit=$? wall_ms=$(( ($(date +%s%N) - s) / 1000000 ))"
+```
+- [ ] 終了コードが `0`、`wall_ms` が 10000 より短い (錠を待っていない。予告の間 3000 ms と入力の分)
+- [ ] `text` の本文に `aaaaa` の行が増えた
+
+記録する値: 使った release の版 (`target/release/ai-cu.exe --version`)、(a) と (d) の終了コードと `wall_ms`、(a) の `waited_ms`、(b) と (c) の人の目の結果、`text` の本文。「実施の記録」の節のとおり、手元に日付つきで書く。
+後片付け: メモ帳を保存せずに閉じる。`target/manual-check/s35-*` は残してよい (git 管理外)
+
+結果が違ったときは、D-147 の実装を疑う: (a) で 16 にならずに入力が届いたら TUI が錠を持てていない、(b) でキーが効いたら待ちの間の読み捨てが効いていない、(c) で 16 になったら同じスレッドの再帰が成り立っていない、(d) で 16 になるか待ったら錠が残っている。
+
 ## 結果が違ったとき
 
 - 手順 1 で `dev_mode: true`: この端末に `AI_CU_DEV_FORBID_REAL_INPUT` がある。`Remove-Item Env:AI_CU_DEV_FORBID_REAL_INPUT` で外す
@@ -1095,15 +1141,15 @@ target/release/ai-cu.exe text --window notepad.exe --type document
 
 ## AI のセッションから CLI の手順を確かめるとき
 
-TUI の手順 (5 と 13 の本体、14 の TUI の部分、32) は端末が要るので人が行う。それ以外は、AI のセッションから release の
+TUI の手順 (5 と 13 の本体、14 の TUI の部分、32、35 の TUI の部分) は端末が要るので人が行う。それ以外は、AI のセッションから release の
 ai-cu.exe を呼んで確かめられる。開発セッション (このリポジトリ) からは、`/verify` の全手順を通した `target/release/ai-cu.exe` を
 パスで呼ぶときだけ hook が通す (D-051)。それも、人が Claude Code を起動したシェルに `AI_CU_MANUAL_CHECK=1` を付けた
 セッションに限る (PowerShell なら `$env:AI_CU_MANUAL_CHECK = "1"` の後に `claude`)。実機に触れる一連の手順の前に、人の GO を 1 回もらい、その間は人がマウスとキーボードから
 手を離す。別のディレクトリで開いたセッション (hook 無し) に頼む形も使える (2026-10-08 に実施)。そのときの依頼文に書くこと:
 
 - 使うのは release の ai-cu.exe だけ。リポジトリを編集しない、cargo を走らせない
-- 実際の設定ファイルは読むだけ。手順 9 と 10 は `--config=` の上書き層 (deny と stop だけを足す。`version = 1` と `[general] input_enabled = true` が要る) で行い、allow を広げる設定は作らない。手順 23 も上書き層で行う (`version = 1`、`[general] capture_enabled = true`、deny だけ)。手順 24 も上書き層で行う (`version = 1`、`[general] capture_enabled = true`、`[mcp] require_approval = ["windows"]` だけ。登録と確認の画面は人が行う)。手順 25 は `guide --setup` と `validate` だけで、設定ファイルを作らない (TUI の左の一覧で fix の場所を探すのは人)。手順 26 は基本の層のまま行い、設定ファイルを作らない (基本の層の `allow.actions` を書いた設定では `wait_stable` / `wait_change` を並べないと 4 になる。そのときは記録して止まる)。手順 27 は基本の層のまま行い、設定ファイルを作らない (撮影の許可が要る。実入力は送らない)。手順 28 は確認専用のアプリ pw-probe (`tools/pw-probe`、D-092) で行う。人がビルドし、基本の層の `allow.processes` に `pw-probe.exe` がある (入れたままでよい。無ければ人が TUI で足す) ことを確かめてから、(a) の読み取りは GO 無しで、(b) から (d) は GO をもらって行い、設定ファイルを作らない (`general.password_input` は書かない)。送る文字は無害な 1 文字 (`x`、`a`、`b`、`y`)。読めないアプリでは 4 にならず文字が入るので、先に (a) の `find` で `secret` の `password` が true になることを確かめてから (b) を行う。pw-probe は AI が起動してよい (起動は実入力ではない)。手順 29 は基本の層のまま行い、(d) だけ上書き層 (`version = 1`、`[general] input_enabled = true`、`[indicator] sound = true` だけ) を `target/manual-check/` に作る。枠は撮影に写らないので、枠と札の見え方と音は人に聞いて記録する。手順 30 は基本の層のまま行い、設定ファイルを作らない。ignored の段がフィクスチャへ実入力を送るので GO の後に行う。枠と札は撮影に写らないので、人に聞いて記録する。cargo を走らせるので、別のディレクトリのセッションへの依頼には入れず、開発セッションの主エージェントが行う (D-111)。手順 33 は基本の層のまま行い、設定ファイルを作らない。一手ずつの `focus`、`key`、`type` は実入力なので GO の後に行う。IME の表示は撮影では確かめず、人に聞いて記録する (D-131)。17 の新しい項 (ツールチップ。D-142) は基本の層のまま、設定ファイルを作らず、GO の後に行う
-- `--dry-run` の無い `run` は手順 6、7、8、9、17、20、26、28 (c)、29、31 だけ (17 はメモ帳のボタンの上へ `move` するだけで、クリックしない。26 の `run` は `focus` と画面の待ちだけで、入力は送らない。28 (c) は pw-probe のふつうの欄に Tab を含む `type` を送る標準入力の `run -`。28 の (b) と (d) は `run` ではなく一手ずつの `focus`、`click`、`key`、`type` で、これも実入力。31 は基本の層のまま (allow に notepad) で、設定ファイルを作らずに 2 本の `run` を同時にメモ帳へ送る実入力なので、GO をもらってから行う。33 は `run` を使わないが、28 の (b) と (d) と同じく一手ずつの `focus`、`key`、`type` が実入力)。7 と 8 は実行の直前にターンを終え、人の GO を待つ (GO の後、人は枠が出てから約 3 秒 (予告の間) 待って Alt+Tab でメモ帳を前面にし、マウスに触れない)。7 は `sample-with-focus.json` (sample.json の先頭に `focus` を足したもの) を使えば、端末が前面のままで済み、Alt+Tab の合図が要らない (2026-10-09 に実施)
+- 実際の設定ファイルは読むだけ。手順 9 と 10 は `--config=` の上書き層 (deny と stop だけを足す。`version = 1` と `[general] input_enabled = true` が要る) で行い、allow を広げる設定は作らない。手順 23 も上書き層で行う (`version = 1`、`[general] capture_enabled = true`、deny だけ)。手順 24 も上書き層で行う (`version = 1`、`[general] capture_enabled = true`、`[mcp] require_approval = ["windows"]` だけ。登録と確認の画面は人が行う)。手順 25 は `guide --setup` と `validate` だけで、設定ファイルを作らない (TUI の左の一覧で fix の場所を探すのは人)。手順 26 は基本の層のまま行い、設定ファイルを作らない (基本の層の `allow.actions` を書いた設定では `wait_stable` / `wait_change` を並べないと 4 になる。そのときは記録して止まる)。手順 27 は基本の層のまま行い、設定ファイルを作らない (撮影の許可が要る。実入力は送らない)。手順 28 は確認専用のアプリ pw-probe (`tools/pw-probe`、D-092) で行う。人がビルドし、基本の層の `allow.processes` に `pw-probe.exe` がある (入れたままでよい。無ければ人が TUI で足す) ことを確かめてから、(a) の読み取りは GO 無しで、(b) から (d) は GO をもらって行い、設定ファイルを作らない (`general.password_input` は書かない)。送る文字は無害な 1 文字 (`x`、`a`、`b`、`y`)。読めないアプリでは 4 にならず文字が入るので、先に (a) の `find` で `secret` の `password` が true になることを確かめてから (b) を行う。pw-probe は AI が起動してよい (起動は実入力ではない)。手順 29 は基本の層のまま行い、(d) だけ上書き層 (`version = 1`、`[general] input_enabled = true`、`[indicator] sound = true` だけ) を `target/manual-check/` に作る。枠は撮影に写らないので、枠と札の見え方と音は人に聞いて記録する。手順 30 は基本の層のまま行い、設定ファイルを作らない。ignored の段がフィクスチャへ実入力を送るので GO の後に行う。枠と札は撮影に写らないので、人に聞いて記録する。cargo を走らせるので、別のディレクトリのセッションへの依頼には入れず、開発セッションの主エージェントが行う (D-111)。手順 33 は基本の層のまま行い、設定ファイルを作らない。一手ずつの `focus`、`key`、`type` は実入力なので GO の後に行う。IME の表示は撮影では確かめず、人に聞いて記録する (D-131)。17 の新しい項 (ツールチップ。D-142) は基本の層のまま、設定ファイルを作らず、GO の後に行う。手順 35 は TUI を人が開くための上書き層 (`version = 1` と `[general] input_enabled = true` だけ。`target/manual-check/s35-config.toml`) を作り、TUI の部分は人が行う。AI の `run` はメモ帳への実入力なので GO の後に行う
+- `--dry-run` の無い `run` は手順 6、7、8、9、17、20、26、28 (c)、29、31、35 だけ (35 は TUI を開いたままメモ帳へ送る `run` と、錠を持つための `focus` と `wait` の `run`。17 はメモ帳のボタンの上へ `move` するだけで、クリックしない。26 の `run` は `focus` と画面の待ちだけで、入力は送らない。28 (c) は pw-probe のふつうの欄に Tab を含む `type` を送る標準入力の `run -`。28 の (b) と (d) は `run` ではなく一手ずつの `focus`、`click`、`key`、`type` で、これも実入力。31 は基本の層のまま (allow に notepad) で、設定ファイルを作らずに 2 本の `run` を同時にメモ帳へ送る実入力なので、GO をもらってから行う。33 は `run` を使わないが、28 の (b) と (d) と同じく一手ずつの `focus`、`key`、`type` が実入力)。7 と 8 は実行の直前にターンを終え、人の GO を待つ (GO の後、人は枠が出てから約 3 秒 (予告の間) 待って Alt+Tab でメモ帳を前面にし、マウスに触れない)。7 は `sample-with-focus.json` (sample.json の先頭に `focus` を足したもの) を使えば、端末が前面のままで済み、Alt+Tab の合図が要らない (2026-10-09 に実施)
 - 手順 2 の前提 (allow に notepad があり、端末と端末を内蔵するエディタが allow に無く deny にある、input_enabled が true、dev_mode が false) が崩れていたら、run 系を走らせずに止まる。allow に `pw-probe` や利用者がふだん使うアプリがあるのは崩れではない
 - 画像は全画面を撮らない。手順 12 の画像は寸法だけ調べて消す。メモ帳の内容は `windows` で矩形を取り、その範囲だけ撮って読んでよい
 - コマンド、終了コード、出力をそのまま記録し、期待と違っても直さず報告する
