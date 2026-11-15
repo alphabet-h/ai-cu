@@ -1297,7 +1297,7 @@ impl Executor<'_> {
                 return Err(AppError::new(
                     ErrorKind::InputBusy,
                     format!(
-                        "別の ai-cu の画面の操作が {} 秒たっても終わらないので、何も送らずに止めた",
+                        "別の ai-cu の画面の操作か、人が開いている TUI が {} 秒たっても錠を解かないので、何も送らずに止めた",
                         INPUT_LOCK_WAIT_MS / 1000
                     ),
                 )
@@ -1370,7 +1370,8 @@ impl Executor<'_> {
             let lead_ms = self.policy.indicator_lead_ms();
             // 錠を待った実行は、枠の経過でも TUI (skip_lead。カウントダウンは待ちより前に終わっている) でも縮めず、
             // lead_ms をまるごと待つ (D-113)。待っていなければ、TUI は待たず、ほかは枠 (自分のも他の ai-cu のも) が
-            // 出てからの経過の分だけ縮める。lead_ms が 0 なら枠を読まない
+            // 出てからの経過の分だけ縮める。lead_ms が 0 なら枠を読まない。TUI は開いている間錠を持つので、
+            // TUI の中の実行が錠を待つ (waited かつ skip_lead) ことは D-147 の後は起きない。守りとして残す
             let wait_ms = if waited {
                 lead_ms
             } else if skip_lead || lead_ms == 0 {
