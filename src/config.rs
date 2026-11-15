@@ -157,12 +157,13 @@ impl Default for IndicatorConfig {
 
 /// MCP の道具の名前 (D-078)。`mcp::tools()` の `name` と同じ並び (テストで見張る)。
 /// `config` は `mcp` に依存しないので、読み込みで名前を検査するための一覧をここに置く
-pub const MCP_TOOL_NAMES: [&str; 19] = [
+pub const MCP_TOOL_NAMES: [&str; 20] = [
     "guide",
     "config",
     "status",
     "windows",
     "shot",
+    "pixel",
     "find",
     "tree",
     "text",

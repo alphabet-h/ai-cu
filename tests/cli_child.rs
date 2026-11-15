@@ -423,7 +423,7 @@ fn mcp_child_discover_list_guide_click_then_eof_exits_0_with_json_only_stdout() 
         serde_json::json!(["2026-07-28"])
     );
     assert_eq!(lines[0]["result"]["resultType"], "complete");
-    assert_eq!(lines[1]["result"]["tools"].as_array().unwrap().len(), 19);
+    assert_eq!(lines[1]["result"]["tools"].as_array().unwrap().len(), 20);
     // tools/list は設定 (承認の印) で変わるので private、server/discover は public のまま (D-078)
     assert_eq!(lines[1]["result"]["cacheScope"], "private");
     assert_eq!(lines[0]["result"]["cacheScope"], "public");
@@ -480,7 +480,7 @@ fn mcp_child_legacy_initialize_initialized_tools_list_ping_then_eof() {
         by_id(1)["result"]["capabilities"],
         serde_json::json!({ "tools": {} })
     );
-    assert_eq!(by_id(2)["result"]["tools"].as_array().unwrap().len(), 19);
+    assert_eq!(by_id(2)["result"]["tools"].as_array().unwrap().len(), 20);
     assert_eq!(by_id(3)["result"], serde_json::json!({}));
 }
 
@@ -602,4 +602,31 @@ fn mcp_child_shot_in_dev_shell_is_refused_and_writes_no_file() {
     let exit = v["error"]["exit_code"].as_i64();
     assert!(matches!(exit, Some(9) | Some(14)), "{v}");
     assert!(std::fs::metadata(&png).is_err(), "撮っていない");
+}
+
+/// MCP の pixel (D-146) も、開発のシェル (実入力を禁じる環境変数つき) では撮影が断られ、色を返さない。
+/// 意図と受ける終了コードは shot の子プロセスのテストと同じ (9、または実画面がロック中なら 14)
+#[test]
+fn mcp_child_pixel_in_dev_shell_is_refused() {
+    let dir = temp_dir("mcp-pixel");
+    let floor = dir.join("floor.toml");
+    std::fs::write(
+        &floor,
+        "version = 1\n[general]\ncapture_enabled = true\n[capture]\nmin_idle_ms = 0\n",
+    )
+    .unwrap();
+    let input = format!(
+        "{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{{\"name\":\"pixel\",\"arguments\":{{\"points\":[{{\"x\":0,\"y\":0}}]}},{META}}}}}\n"
+    );
+    let floor_s = floor.display().to_string();
+    let (code, stdout, stderr) = run(&["mcp"], &[("AI_CU_DEV_FLOOR", &floor_s)], input.as_bytes());
+    assert_eq!(code, 0, "stderr={stderr}");
+    let lines = mcp_lines(&stdout);
+    assert_eq!(lines.len(), 1, "{stdout}");
+    assert_eq!(lines[0]["result"]["isError"], true, "{stdout}");
+    let v: serde_json::Value =
+        serde_json::from_str(lines[0]["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    let exit = v["error"]["exit_code"].as_i64();
+    assert!(matches!(exit, Some(9) | Some(14)), "{v}");
+    assert!(v.get("pixels").is_none(), "色を返さない: {v}");
 }
