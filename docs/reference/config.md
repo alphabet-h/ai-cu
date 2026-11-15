@@ -19,6 +19,7 @@ TOML。allow と deny を、操作の種類、プロセス、ウィンドウク�
 - `wait_stable` と `wait_change` は撮影を繰り返すだけの操作なので、`screenshot` と同じ許可に通す: `general.capture_enabled`、`allow.actions` / `deny.actions` (`allow.actions` を書いた設定では並べないと待てない)、`region` の領域の規則と全画面の禁止、`window` の対象のプロセスとクラス、deny のウィンドウ。判定は撮るたびに行う。`screenshot` の `settle` は撮影の一部なので、`screenshot` の許可だけで使える (D-081)
 - `wait` (固定の待ち) は何も動かさないので、総スイッチと `allow.actions` / `deny.actions` の対象外。`deny.actions = ["wait"]` は受け付けるが効かない
 - `deny.processes` と `deny.classes` は撮影にも効く: 撮る矩形にそのウィンドウが見えていれば、どの撮り方でも撮らずに 7 で断る (`allow` に無いだけのウィンドウは見ない。D-077)
+- プロセス名を読めないウィンドウ (開けないプロセス、読めないパス) は、どれかの層に `deny.processes` があれば、入力 (座標の下と前面、`focus` の後の前面の確かめ) を 7 で断り (`error.rule` は `deny.processes`、`error.fix` は付かない)、`windows` の一覧と前面、MCP の `status` の前面に出さず、名指し (正規化で空になる `.exe` などの process) でも無いものとして扱う (D-145)
 - `processes` は実行ファイル名で比べ、パスや署名は見ない。`python.exe`、`java.exe`、Electron 系のような汎用の宿主を `allow.processes` に書くと、その名前のどの窓も対象になるので、`classes` で絞る (D-028、D-101)
 - `regions` は座標の規則 (マウスの点と撮る矩形) で、要素の読み取り (`find`、`tree`、`text`、`wait_for`) には効かない。許可したプロセスなら、画面外や deny の領域に重なる部分の文字も読める。中身を隠したいアプリは `deny.processes` か `deny.classes` に書く (D-054、D-101)
 - 画面領域は、マウスの各点 (ドラッグの補間の点を含む) と撮影の矩形に適用する。撮影の矩形は、deny の領域と少しでも重なれば拒否し、allow の領域があればどれかに丸ごと収まる必要がある
