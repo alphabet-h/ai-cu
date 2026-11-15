@@ -72,7 +72,7 @@ ai-cu text --window notepad.exe --type document            # 入った文字列�
 ```
 
 ビルドは `cargo build --release`。成果物は `target/release/ai-cu.exe`。対象は x86_64-pc-windows-msvc。
-`ai-cu --version` は `ai-cu 0.1.0+g<コミットの先頭 12 桁>` を出す (`0.1.0` は Cargo.toml の `version`)。未コミットの変更がある木で作った release は `.dirty` が付き、git が読めなければ `+unknown`。MCP の serverInfo の `version` も同じ文字列 (D-069)。版の文字列の文法:
+`ai-cu --version` は `ai-cu 0.2.0+g<コミットの先頭 12 桁>` を出す (`0.2.0` は Cargo.toml の `version`)。未コミットの変更がある木で作った release は `.dirty` が付き、git が読めなければ `+unknown`。MCP の serverInfo の `version` も同じ文字列 (D-069)。版の文字列の文法:
 
 ```
 <version> = <CARGO_PKG_VERSION> "+" <meta>
