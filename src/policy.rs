@@ -571,7 +571,7 @@ impl Policy {
     }
 
     /// パスワードの要素 (UIA の IsPassword) にフォーカスがあるときの type / key を許すか (D-090)。
-    /// `input_enabled` と同じ合成: どの層も `general.password_input` が真のときだけ許し、床から順に見て
+    /// 右クリックとドロップの点の判定 (D-149) も同じ許可。`input_enabled` と同じ合成: どの層も `general.password_input` が真のときだけ許し、床から順に見て
     /// 最初の偽の層で断る (上の層は倒すだけ)
     pub fn password_input_allowed(&self) -> Check {
         match self.layers.iter().find(|l| !l.general.password_input) {
