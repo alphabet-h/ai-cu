@@ -2471,7 +2471,7 @@ mod tests {
         // 表示名は policy::tui_label を通さず字で書く (D-080。TUI の左の一覧での場所)
         assert_eq!(
             setup_tui_steps(r"C:\x\ai-cu.exe"),
-            "端末で \"C:\\x\\ai-cu.exe\" を引数なしで (--config も AI_CU_CONFIG も付けずに) 起動すると TUI が開く。「全般 (総スイッチ) > 実入力 (マウスとキー)」(general.input_enabled) と「全般 (総スイッチ) > 画面撮影」(general.capture_enabled) を決め、「許可リスト (allow) > アプリ (プロセス)」(allow.processes) に操作させるアプリ (例 notepad.exe) を足し、必要なら「許可リスト (allow) > 画面領域」(allow.regions) で画面を絞って保存する。設定が無い間は何も許可されない。保存したら TUI を閉じる (開いている間は AI の画面を変える操作が 16 になる)"
+            "端末で \"C:\\x\\ai-cu.exe\" を引数なしで (--config も AI_CU_CONFIG も付けずに) 起動すると TUI が開く。「全般 (総スイッチ) > 実入力 (マウスとキー)」(general.input_enabled) と「全般 (総スイッチ) > 画面撮影」(general.capture_enabled) を決め、「許可リスト (allow) > アプリ (プロセス)」(allow.processes) に操作させるアプリ (例 notepad.exe) を足し、必要なら「許可リスト (allow) > 画面領域」(allow.regions) で画面を絞って保存する。設定が無い間は何も許可されない。保存したら TUI を閉じる (開いている間は AI の画面を変える操作が終了コード 16 で断られる)"
         );
     }
 

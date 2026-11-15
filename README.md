@@ -65,7 +65,7 @@ cargo install --git https://github.com/alphabet-h/ai-cu --locked
 1. 端末で `ai-cu` を引数なしで起動すると、TUI で設定ファイル (既定は `%APPDATA%\ai-cu\config.toml`) を作って編集できる
    - 新しく作った設定は、入力も撮影も無効で、端末とシェル、管理ツール、パスワード管理ソフトを deny に並べてある
    - 使うアプリを `allow.processes` に足し、`input_enabled` と `capture_enabled` を有効にする
-   - 保存したら TUI を閉じる (開いている間は AI の画面を変える操作が 16 になる。D-147)
+   - 保存したら TUI を閉じる (開いている間は AI の画面を変える操作が終了コード 16 で断られる。D-147)
 2. `ai-cu guide --setup` が、MCP の登録 (Claude Code、Codex) と、Claude Code の権限の文例を、この実行ファイルのパスと設定の場所から組んで出す
 3. AI には、最初に `ai-cu guide` (MCP なら道具の `guide`) を読ませる
 
