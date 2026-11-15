@@ -5315,6 +5315,47 @@ mod tests {
         assert_eq!(report.screenshots[0].window.as_ref().unwrap().hwnd, 0x21);
     }
 
+    /// 実行器の screenshot の window (D-143): メモ帳の本体 (0x20) の前にツールチップ (0x21、PopupHost。所有者は本体)
+    /// が出ていても、process だけの名指しは本体に解け、本体の矩形を撮る。前面が帯のあるダイアログ (ポップアップらしく
+    /// ない) なら、今までどおりそちらに解ける
+    #[test]
+    fn grab_window_puts_popup_after_main_window() {
+        let body = top(0x20, "Notepad.exe", "a.txt - メモ帳");
+        let body_rect = body.rect.unwrap();
+        let mut tip = top(0x21, "Notepad.exe", "PopupHost");
+        let tip_rect = Rect::new(300, 300, 120, 30);
+        tip.rect = Some(tip_rect);
+        let mut w = World::new();
+        w.default_window = Some(body.info.clone());
+        w.top = vec![tip.clone(), body.clone()];
+        w.windows_at = vec![(tip_rect, tip.info.clone())];
+        w.owners = vec![(0x21, 0x20)];
+        w.popup = vec![0x21];
+        let world = w.shared();
+        let s = script(NOTEPAD_SHOT);
+        let p = notepad_policy();
+        let (r, images) = exec(&world, &p, &mut StopSet::new(), &s);
+        let report = r.unwrap();
+        assert_eq!(report.screenshots[0].window.as_ref().unwrap().hwnd, 0x20);
+        assert_eq!(images.written.len(), 1);
+        assert_eq!(world.borrow().capture_rects, vec![body_rect]);
+
+        // 前面が帯のあるダイアログ (popup に入れない) なら、そちらに解ける
+        let mut dialog = top(0x22, "Notepad.exe", "メモ帳");
+        let dialog_rect = Rect::new(300, 250, 400, 200);
+        dialog.rect = Some(dialog_rect);
+        let mut w = World::new();
+        w.default_window = Some(body.info.clone());
+        w.top = vec![dialog.clone(), body];
+        w.windows_at = vec![(dialog_rect, dialog.info.clone())];
+        w.owners = vec![(0x22, 0x20)];
+        let world = w.shared();
+        let (r, _) = exec(&world, &p, &mut StopSet::new(), &s);
+        let report = r.unwrap();
+        assert_eq!(report.screenshots[0].window.as_ref().unwrap().hwnd, 0x22);
+        assert_eq!(world.borrow().capture_rects, vec![dialog_rect]);
+    }
+
     /// 見つからない 12 は detail を持たない (足す情報が無い)
     #[test]
     fn capture_not_found_has_no_detail() {

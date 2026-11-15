@@ -339,11 +339,13 @@ impl Desktop for Win32Desktop {
             Some(h) => win32::window::describe(h).into_iter().collect(),
             None => win32::window::top_level_windows_detailed(),
         };
+        // ポップアップらしい窓 (ツールチップなど) は後に回す (D-143)。読むのは一致した窓だけ
         Ok(crate::device::match_window(
             &candidates,
             process,
             title,
             admit,
+            &|w| win32::window::looks_popup(w.info.hwnd),
         ))
     }
 

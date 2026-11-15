@@ -18,12 +18,13 @@ use windows_sys::Win32::System::Threading::{
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GA_ROOT, GA_ROOTOWNER, GWL_EXSTYLE, GetAncestor, GetClassNameW,
+    EnumWindows, GA_ROOT, GA_ROOTOWNER, GWL_EXSTYLE, GWL_STYLE, GetAncestor, GetClassNameW,
     GetForegroundWindow, GetLayeredWindowAttributes, GetWindowDisplayAffinity, GetWindowLongW,
     GetWindowRect, GetWindowThreadProcessId, HTCAPTION, InternalGetWindowText, IsHungAppWindow,
     IsIconic, IsWindow, IsWindowVisible, LWA_ALPHA, LWA_COLORKEY, PostMessageW, SMTO_ABORTIFHUNG,
     SendMessageTimeoutW, SetForegroundWindow, WDA_EXCLUDEFROMCAPTURE, WM_CLOSE, WM_NCHITTEST,
-    WS_EX_LAYERED, WS_EX_LAYOUTRTL, WS_EX_TOOLWINDOW, WindowFromPoint,
+    WS_CAPTION, WS_EX_LAYERED, WS_EX_LAYOUTRTL, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
+    WindowFromPoint,
 };
 
 use crate::device::{
@@ -377,6 +378,33 @@ pub fn top_level_windows_detailed() -> Vec<TopWindow> {
 fn ex_style(h: HWND) -> u32 {
     // SAFETY: ハンドルの値を渡すだけ。GWL_EXSTYLE の読み取りだけで、既に無いウィンドウなら 0 が返る。
     unsafe { GetWindowLongW(h, GWL_EXSTYLE) as u32 }
+}
+
+/// 窓のスタイル (`GWL_STYLE`)。無効なハンドル (既に無い窓) なら 0。読み取りだけ。
+fn win_style(h: HWND) -> u32 {
+    // SAFETY: ハンドルの値を渡すだけ。GWL_STYLE の読み取りだけで、既に無いウィンドウなら 0 が返る。
+    unsafe { GetWindowLongW(h, GWL_STYLE) as u32 }
+}
+
+/// ポップアップらしい窓の形か (名指しで後に回す印。D-143)。`WS_EX_NOACTIVATE` を持つか、`WS_POPUP` で題名の帯
+/// (`WS_CAPTION` = `WS_BORDER | WS_DLGFRAME` の両方) がそろわないとき真。所有者と `WS_EX_TOPMOST` は見ない
+/// (普通のダイアログと、常に手前にした本体を後に回さない)。経験則で、確かめたのは Windows 11 のメモ帳の
+/// ツールチップ (PopupHost) だけ
+pub fn popup_style(style: u32, ex: u32) -> bool {
+    ex & WS_EX_NOACTIVATE != 0 || (style & WS_POPUP != 0 && style & WS_CAPTION != WS_CAPTION)
+}
+
+/// 窓がポップアップらしいか (`popup_style`。D-143)。スタイルを 1 回だけ読み、0 なら真: 無効なハンドルは 0 に読め、
+/// 列挙の時点で見えていたトップレベルの窓は `WS_POPUP` か `WS_CAPTION` を持つので 0 にならない (隠されて
+/// `WS_VISIBLE` が落ちても 0 にはならない。推定)。読めない窓は後に回す側に倒す (列挙の後に消えた
+/// ツールチップを本体より前に出さない)。メッセージを送らない (止まった窓でも止まらない。D-105)。読み取りだけ
+pub fn looks_popup(hwnd: usize) -> bool {
+    let h = hwnd as HWND;
+    let st = win_style(h);
+    if st == 0 {
+        return true;
+    }
+    popup_style(st, ex_style(h))
 }
 
 /// 題名があり、ツールウィンドウ (`WS_EX_TOOLWINDOW`) でない窓の形か (`windows` の一覧に入る形。設定は見ない)。
@@ -829,6 +857,37 @@ mod tests {
     fn cover_traits_is_none_for_invalid_handle() {
         assert_eq!(cover_traits(0), None);
         assert_eq!(window_thread(0), None);
+    }
+
+    /// ポップアップらしさの印 (D-143): NOACTIVATE か、題名の帯 (BORDER と DLGFRAME の両方) のそろわない POPUP。
+    /// 帯のそろったポップアップ (ダイアログ) と普通の窓は当たらない。値はメモ帳で読んだもの (spec の実測)
+    #[test]
+    fn popup_style_marks_noactivate_and_captionless_popup() {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            WS_BORDER, WS_DLGFRAME, WS_OVERLAPPEDWINDOW,
+        };
+        assert!(popup_style(0, WS_EX_NOACTIVATE));
+        assert!(popup_style(WS_OVERLAPPEDWINDOW, WS_EX_NOACTIVATE));
+        assert!(popup_style(WS_POPUP, 0));
+        assert!(popup_style(WS_POPUP | WS_BORDER, 0), "帯の片方 (BORDER)");
+        assert!(
+            popup_style(WS_POPUP | WS_DLGFRAME, 0),
+            "帯の片方 (DLGFRAME)"
+        );
+        assert!(
+            popup_style(0x9400_0000, 0x0820_0000),
+            "メモ帳のツールチップ"
+        );
+        assert!(!popup_style(WS_POPUP | WS_CAPTION, 0), "ダイアログ");
+        assert!(!popup_style(WS_OVERLAPPEDWINDOW, 0));
+        assert!(!popup_style(0x14cf_0000, 0x110), "メモ帳の本体");
+        assert!(!popup_style(0, 0));
+    }
+
+    /// 読めない窓 (無効なハンドル) はポップアップらしい側に倒す (D-143)
+    #[test]
+    fn looks_popup_is_true_for_invalid_handle() {
+        assert!(looks_popup(0));
     }
 
     /// 見えているかの判定の元 (D-099): 見えて cloaked でなければ入れない (None)。見えて cloaked なら cloaked、

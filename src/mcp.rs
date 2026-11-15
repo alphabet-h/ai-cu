@@ -447,7 +447,7 @@ fn schema_max_edge() -> Value {
 }
 
 fn schema_window() -> Value {
-    json!({ "type": "string", "description": "対象のウィンドウの実行ファイル名 (例 notepad.exe。大文字小文字と .exe の有無は問わない)。windows と同じ探し方で、前面に近いものから最初に一致した 1 つ" })
+    json!({ "type": "string", "description": "対象のウィンドウの実行ファイル名 (例 notepad.exe。大文字小文字と .exe の有無は問わない)。windows に出る窓から前面に近い順に探した 1 つ (ツールチップなどのポップアップは後に回す)" })
 }
 
 fn schema_window_title() -> Value {

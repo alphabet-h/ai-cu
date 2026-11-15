@@ -137,7 +137,7 @@ pub enum Command {
         /// 撮る矩形 (物理ピクセル)。--window と排他。どちらも省略すると仮想デスクトップ全体
         #[arg(long, value_name = "X,Y,W,H", conflicts_with = "window")]
         region: Option<String>,
-        /// 撮る対象のウィンドウの実行ファイル名 (例 notepad.exe)。矩形は windows と同じ探し方で撮る直前に解く
+        /// 撮る対象のウィンドウの実行ファイル名 (例 notepad.exe)。矩形は windows に出る窓から撮る直前に解く (ツールチップなどのポップアップは後に回す)
         #[arg(long, value_name = "PROCESS")]
         window: Option<String>,
         /// 対象の題名に含む文字列 (大文字小文字を無視)
@@ -163,7 +163,7 @@ pub enum Command {
     },
     /// 許可されたウィンドウの要素 (UI Automation) を名前・種類・automation_id・フォーカスで探し、矩形と中心点を出す。読み取りだけ
     Find {
-        /// 対象のウィンドウの実行ファイル名 (例 notepad.exe)。windows と同じ探し方
+        /// 対象のウィンドウの実行ファイル名 (例 notepad.exe)。windows に出る窓から探す (ツールチップなどのポップアップは後に回す)
         #[arg(long, value_name = "PROCESS")]
         window: String,
         /// 対象の題名に含む文字列 (大文字小文字を無視)
@@ -187,7 +187,7 @@ pub enum Command {
     },
     /// 許可されたウィンドウの要素 (UI Automation) の木を、深さで切って 1 行 1 要素の字下げで出す (名前の無い入れ物と画面外は畳む)。読み取りだけ
     Tree {
-        /// 対象のウィンドウの実行ファイル名 (例 notepad.exe)。windows と同じ探し方
+        /// 対象のウィンドウの実行ファイル名 (例 notepad.exe)。windows に出る窓から探す (ツールチップなどのポップアップは後に回す)
         #[arg(long, value_name = "PROCESS")]
         window: String,
         /// 対象の題名に含む文字列 (大文字小文字を無視)
@@ -1956,8 +1956,8 @@ pub fn schema() -> Value {
             "key": { "keys": "組み合わせ。例 ctrl+s, alt+tab, f5、kanji (半角/全角) (Win+、Alt+F4、Ctrl+Alt+、Ctrl+Shift+Esc、Ctrl+Esc、PrintScreen (修飾キーにかかわらず) は組み込みで拒否)" },
             "wait": { "ms": "待つミリ秒 (最大 600000)" },
             "screenshot": { "path": "保存先の png (.png に限る。PNG でない既存ファイルは上書きしない)", "region": { "x": "整数", "y": "整数", "w": "幅", "h": "高さ", "省略": "window も無ければ仮想デスクトップ全体 (既定の設定では拒否。capture.full_screen)" }, "window": { "process": "撮る対象のウィンドウの実行ファイル名 (focus と同じ探し方。region と排他)", "title": "省略可。題名に含む文字列", "備考": "矩形は撮る直前に解く。見つからない / 最小化 / 画面の外は終了コード 12 (何もしない)。結果の screenshots[].window に撮ったウィンドウが入る" }, "scale": "保存する画像の縮尺 (0 より大きく 1 以下。既定 1)。画像の点 (px, py) は画面の (x + px / scale, y + py / scale)", "max_edge": "長辺の上限 (1 以上、ピクセル。省略で上限なし。MCP は既定 1568)。縮尺は scale と max_edge / 長辺 の小さい方で、出力の scale に実際の値が入る", "settle": { "stable_ms": format!("省略可。静けさが続く長さ (既定 {DEFAULT_STABLE_MS}、{MIN_STABLE_MS} 以上 {MAX_STABLE_MS} 以下)"), "threshold": "省略可。直前のフレームとの差 (変わった点の割合) の許容 (0 以上 1 未満。既定 0)", "timeout_ms": format!("省略可。待つ上限 (既定 {DEFAULT_SETTLE_TIMEOUT_MS}、stable_ms 以上 {MAX_SINGLE_WAIT_MS} 以下)。超えたら落ち着くのを待たずに撮る (失敗にしない)"), "備考": "省略可 ({} でも既定値で付く)。撮る前に wait_stable と同じ判定で画面が落ち着くのを待ち、最後に撮った画像を保存する (撮り直さない)。結果の screenshots[] に settled (落ち着いたか) と settle_ms (待った時間) が入る。一手ずつの --settle-ms auto はこれを既定値で付ける" } },
-            "focus": { "process": "実行ファイル名 (例 notepad.exe。大文字小文字と .exe の有無は問わない)", "title": "省略可。題名に含む文字列 (大文字小文字を無視)。許可を通る窓 (windows に出る窓) の中で前面から見て最初に一致したウィンドウ (権限で断られれば 7) を SetForegroundWindow で前面にする。既に前面なら何もしない。最小化は復元しない。人が操作中 (capture.min_idle_ms) なら 10。できなければ終了コード 11 (何も送らない)。成功の出力の focused に、前面にしたウィンドウが入る" },
-            "close": { "process": "実行ファイル名 (focus と同じ探し方)", "title": "必須。題名に含む文字列 (大文字小文字を無視)。許可を通る窓 (windows に出る窓) の中で前面から見て最初に一致したウィンドウ (権限で断られれば 7) に WM_CLOSE を 1 回置く。前面は変えず、前面でなくても届く。対象が前面で人が操作中 (capture.min_idle_ms) なら 10。見つからなければ 12 (何もしない)。閉じるか (保存の確認を出すか) はアプリが決める。成功の出力の closed に、閉じようとしたウィンドウと gone (1 秒のうちに見える窓から消えたか。破棄とは限らない) と hidden (破棄されず隠れただけ。トレイに入るアプリで、プロセスは動いている) が入る。hidden が false でもプロセスが終わったとは限らない (exe の入れ替えや再起動の前に確かめるか人間に聞く)。gone が false なら撮って確かめる" },
+            "focus": { "process": "実行ファイル名 (例 notepad.exe。大文字小文字と .exe の有無は問わない)", "title": "省略可。題名に含む文字列 (大文字小文字を無視)。許可を通る窓 (windows に出る窓) の中で前面から見て最初に一致したウィンドウ (ツールチップなどのポップアップは後に回す。権限で断られれば 7) を SetForegroundWindow で前面にする。既に前面なら何もしない。最小化は復元しない。人が操作中 (capture.min_idle_ms) なら 10。できなければ終了コード 11 (何も送らない)。成功の出力の focused に、前面にしたウィンドウが入る" },
+            "close": { "process": "実行ファイル名 (focus と同じ探し方)", "title": "必須。題名に含む文字列 (大文字小文字を無視)。許可を通る窓 (windows に出る窓) の中で前面から見て最初に一致したウィンドウ (ツールチップなどのポップアップは後に回すので、title がポップアップと本体の両方に当たると本体に届く。権限で断られれば 7) に WM_CLOSE を 1 回置く。前面は変えず、前面でなくても届く。対象が前面で人が操作中 (capture.min_idle_ms) なら 10。見つからなければ 12 (何もしない)。閉じるか (保存の確認を出すか) はアプリが決める。成功の出力の closed に、閉じようとしたウィンドウと gone (1 秒のうちに見える窓から消えたか。破棄とは限らない) と hidden (破棄されず隠れただけ。トレイに入るアプリで、プロセスは動いている) が入る。hidden が false でもプロセスが終わったとは限らない (exe の入れ替えや再起動の前に確かめるか人間に聞く)。gone が false なら撮って確かめる" },
             "wait_for": { "process": "対象のウィンドウの実行ファイル名 (focus と同じ探し方)", "title": "省略可。題名に含む文字列", "element": { "name": "省略可。要素の名前に含む文字列", "type": "省略可。要素の種類 (find --help の一覧)" }, "text": "省略可。要素の文字列に含む文字列 (改行は LF にそろえる。大文字小文字を区別。パスワードの要素は読まずに飛ばす)", "absent": "真偽 (既定 false)。true なら無くなるまで待つ", "timeout_ms": "上限 (既定 10000、最大 600000)。超えたら終了コード 15 (何も送らない)", "備考": "条件は一番細かい指定 (text > element > window)。250 ms ごとに確かめる。満たされると結果の waited[] に窓と要素 (center) が入る。absent が最初の確認で満たされると (timeout_ms 0 は除く) waited[].note に注意が付く" },
             "wait_stable": { "region": "省略可。撮る矩形 (screenshot と同じ。window と排他。両方省略は全画面で、既定の設定では拒否)", "window": { "process": "省略可。撮る対象のウィンドウ (screenshot と同じ探し方。撮るたびに矩形を解く)", "title": "省略可" }, "stable_ms": "静けさが続く長さ (既定 300、100 以上 60000 以下)", "threshold": "直前のフレームとの差 (変わった点の割合) の許容 (0 以上 1 未満。既定 0)", "timeout_ms": "上限 (既定 10000、stable_ms 以上 600000 以下)。超えたら終了コード 15 (unmet: stable。何も送らない)", "備考": "100 ms ごとに撮り、長辺 256 に縮めて比べる。窓が動けば変わったと数える。撮るたびに screenshot と同じ判定 (撮影の許可、deny の窓、ロック) を通す。満たされると結果の waited[] に rect が入る" },
             "wait_change": { "region": "省略可 (wait_stable と同じ)", "window": "省略可 (wait_stable と同じ)", "threshold": "待ち始めの画像 (基準) との差がこれを超えたら変わった (0 以上 1 未満。既定 0.001)", "timeout_ms": "上限 (既定 10000、1 以上 600000 以下)。超えたら終了コード 15 (unmet: change。何も送らない)", "備考": "100 ms ごとに撮り、基準と比べる (直前ではない)。狭い region ではキャレットの点滅でも満たしうる。満たされると結果の waited[] に rect と changed_ratio が入る" }
@@ -4715,7 +4715,7 @@ mod tests {
         );
     }
 
-    /// shot --window (D-053): 矩形は windows と同じ探し方で解き、出力に window が入る。
+    /// shot --window (D-053): 矩形は windows に出る窓から名指しで解き、出力に window が入る。
     /// 見つからなければ 12。--region とは排他
     #[test]
     fn shot_cli_window_resolves_rect_and_reports_window() {

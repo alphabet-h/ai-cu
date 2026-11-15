@@ -319,7 +319,8 @@ pub trait Desktop {
     /// 押されたままの修飾キーとマウスボタン (D-066)。読むだけで、離すことはしない
     fn keys_held(&self) -> Result<HeldInputs, BackendError>;
     /// 実行ファイル名 (正規化して比べる) と、あれば題名の一部で、見えているトップレベルのウィンドウを
-    /// 前面から探す (D-050)。最初に一致したもの。読み取りだけ。
+    /// 前面から探す (D-050)。ポップアップらしくない窓の中で最初に一致したもの、無ければポップアップらしい窓
+    /// (ツールチップなど) の中で最初に一致したもの (D-143)。読み取りだけ。
     /// `admit` を通らない窓は無いものとして扱う (探してから捨てるのではなく、通る窓の中で最初の一致。D-139)
     fn find_window(
         &self,
@@ -374,24 +375,33 @@ pub trait Desktop {
 
 /// `find_window` の一致の規則 (純関数。実装置もモックもこれを使う)。
 /// 実行ファイル名は `allow.processes` と同じ正規化で比べ、`title` は大文字小文字を無視した部分一致。
-/// `admit` を通る窓の中で、Z 順で最初に一致したもの (通らない窓は無いものと同じ。D-139)
+/// `admit` を通る窓の中で一致するもの (通らない窓は無いものと同じ。D-139) のうち、`popup_like` が偽の Z 順で
+/// 最初のもの。無ければ `popup_like` が真の Z 順で最初のもの (ツールチップなどのポップアップを後に回す。外しは
+/// しない。D-143)。`popup_like` は一致した窓にだけ、各 1 回まで呼ぶ (走査は 1 回で、ポップアップらしくない一致が
+/// 出たところで止まる)
 pub fn match_window(
     top: &[TopWindow],
     process: &str,
     title: Option<&str>,
     admit: &dyn Fn(&WindowInfo) -> bool,
+    popup_like: &dyn Fn(&TopWindow) -> bool,
 ) -> Option<TopWindow> {
     let want = crate::config::normalize_process(process);
     let want_title = title.map(str::to_lowercase);
-    top.iter()
-        .find(|w| {
-            admit(&w.info)
-                && crate::config::normalize_process(&w.info.process) == want
-                && want_title
-                    .as_deref()
-                    .is_none_or(|t| w.info.title.to_lowercase().contains(t))
-        })
-        .cloned()
+    let mut first_popup: Option<&TopWindow> = None;
+    for w in top.iter().filter(|w| {
+        admit(&w.info)
+            && crate::config::normalize_process(&w.info.process) == want
+            && want_title
+                .as_deref()
+                .is_none_or(|t| w.info.title.to_lowercase().contains(t))
+    }) {
+        if !popup_like(w) {
+            return Some(w.clone());
+        }
+        first_popup.get_or_insert(w);
+    }
+    first_popup.cloned()
 }
 
 /// 画面の縁の枠と予告の音 (D-093)。実行器が、画面を変える操作の前に `show` し、終わりに `release` する。
@@ -579,8 +589,9 @@ mod tests {
             top(0x2, "Notepad.exe", "a.txt - メモ帳"),
             top(0x3, "notepad.exe", "B.TXT - メモ帳"),
         ];
-        let hit =
-            |p: &str, t: Option<&str>| match_window(&list, p, t, &|_| true).map(|w| w.info.hwnd);
+        let hit = |p: &str, t: Option<&str>| {
+            match_window(&list, p, t, &|_| true, &|_| false).map(|w| w.info.hwnd)
+        };
         assert_eq!(hit("notepad", None), Some(0x2), "前面に近いもの");
         assert_eq!(hit("NOTEPAD.EXE", None), Some(0x2));
         assert_eq!(hit("C:\\Windows\\notepad.exe", None), Some(0x2));
@@ -603,11 +614,70 @@ mod tests {
             top(0xB, "notepad.exe", "secret 2"),
         ];
         let hit = |admit: &dyn Fn(&WindowInfo) -> bool| {
-            match_window(&list, "notepad.exe", Some("secret"), admit).map(|w| w.info.hwnd)
+            match_window(&list, "notepad.exe", Some("secret"), admit, &|_| false)
+                .map(|w| w.info.hwnd)
         };
         assert_eq!(hit(&|w| w.hwnd != 0xA), Some(0xB), "A を通さなければ B");
         assert_eq!(hit(&|_| false), None, "どれも通さなければ無い");
         assert_eq!(hit(&|_| true), Some(0xA), "どれも通せば前面に近い A");
+    }
+
+    /// 名指しの 2 段の規則 (D-143): ポップアップらしい窓 (ツールチップなど) は、同じく一致する他の窓より後に回す。
+    /// 外しはしない (ポップアップしか一致しなければそれに解ける)。`popup_like` は一致した窓にだけ、Z 順で最初の
+    /// ポップアップらしくない一致までを各 1 回呼ぶ
+    #[test]
+    fn match_window_puts_popup_like_after_other_matches() {
+        let list = vec![
+            top(0x10, "notepad.exe", "PopupHost"),
+            top(0x11, "notepad.exe", "PopupHost"),
+            top(0x20, "chrome.exe", "Docs"),
+            top(0x30, "notepad.exe", "hidden"),
+            top(0x40, "notepad.exe", "a.txt - メモ帳"),
+            top(0x50, "notepad.exe", "b.txt - メモ帳"),
+        ];
+        let popups = [0x10, 0x11];
+        let popup_like = |w: &TopWindow| popups.contains(&w.info.hwnd);
+        let all = |_: &WindowInfo| true;
+        let hit = |t: Option<&str>, admit: &dyn Fn(&WindowInfo) -> bool| {
+            match_window(&list, "notepad.exe", t, admit, &popup_like).map(|w| w.info.hwnd)
+        };
+        assert_eq!(hit(None, &all), Some(0x30), "process だけなら本体");
+        assert_eq!(
+            hit(Some("popuphost"), &all),
+            Some(0x10),
+            "ポップアップだけが題名に当たればポップアップ (Z 順で前のもの)"
+        );
+        assert_eq!(
+            hit(Some("popuphost"), &|w| w.hwnd != 0x10),
+            Some(0x11),
+            "前のポップアップが admit を通らなければ次のポップアップ"
+        );
+        assert_eq!(
+            hit(Some("メモ帳"), &|w| w.hwnd != 0x40),
+            Some(0x50),
+            "ポップアップらしくない一致の中で Z 順"
+        );
+        let no_body = |w: &WindowInfo| popups.contains(&w.hwnd);
+        assert_eq!(
+            hit(None, &no_body),
+            Some(0x10),
+            "本体が admit を通らなければポップアップ"
+        );
+
+        // popup_like の呼ばれ方: 一致した窓にだけ、最初のポップアップらしくない一致まで、各 1 回
+        let calls = std::cell::RefCell::new(Vec::new());
+        let recording = |w: &TopWindow| {
+            calls.borrow_mut().push(w.info.hwnd);
+            popups.contains(&w.info.hwnd)
+        };
+        let not_hidden = |w: &WindowInfo| w.hwnd != 0x30;
+        let got = match_window(&list, "notepad.exe", None, &not_hidden, &recording);
+        assert_eq!(got.map(|w| w.info.hwnd), Some(0x40));
+        assert_eq!(
+            *calls.borrow(),
+            vec![0x10, 0x11, 0x40],
+            "別の process (0x20) と admit を通らない窓 (0x30) と、それより後ろの一致 (0x50) には呼ばない"
+        );
     }
 
     /// 振り分けの材料を組む (テスト用)

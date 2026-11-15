@@ -63,6 +63,8 @@ pub struct World {
     pub cover_traits: Vec<(usize, CoverTraits)>,
     /// 窓を作ったスレッド (ウィンドウ, スレッドの id)。無ければ `window_thread` は None (D-142)。既定は空
     pub threads: Vec<(usize, u32)>,
+    /// ポップアップらしい窓 (名指しで後に回す。D-143)。既定は空
+    pub popup: Vec<usize>,
     /// `set_foreground` に渡されたハンドル (呼ばれた順)
     pub focus_calls: Vec<usize>,
     /// 前面化の補助プロセスの結果 (D-057)。`Accepted` なら、その `top` のウィンドウが前面になる。既定は `Refused`
@@ -247,6 +249,7 @@ impl World {
             owners: Vec::new(),
             cover_traits: Vec::new(),
             threads: Vec::new(),
+            popup: Vec::new(),
             focus_calls: Vec::new(),
             helper: HelperOutcome::Refused,
             helper_no_effect: false,
@@ -543,7 +546,14 @@ impl Desktop for MockDesktop {
         {
             w.top = list;
         }
-        Ok(crate::device::match_window(&w.top, process, title, admit))
+        let popup = &w.popup;
+        Ok(crate::device::match_window(
+            &w.top,
+            process,
+            title,
+            admit,
+            &|t| popup.contains(&t.info.hwnd),
+        ))
     }
 
     fn set_foreground(&self, hwnd: usize) -> Result<bool, BackendError> {
