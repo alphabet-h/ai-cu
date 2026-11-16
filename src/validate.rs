@@ -301,6 +301,18 @@ fn check_action_policy(
             if let Err(d) = policy.check_process(process) {
                 issues.push(Issue::denied(Some(i), d));
             }
+            // 題名での名指し (focus / resize の title、close は title が必須) は撮影と同じ許可が要る (D-152)。
+            // wait_for は範囲の外 (actions の軸は wait_for の名で判定する)
+            let named_by_title = match action {
+                Action::Focus { title, .. } | Action::Resize { title, .. } => title.is_some(),
+                Action::Close { .. } => true,
+                _ => false,
+            };
+            if named_by_title && let Err(d) = policy.check_title_naming() {
+                let mut issue = Issue::denied(Some(i), d);
+                issue.hint = Some(crate::hint::TITLE_NAMING_HINT.to_string());
+                issues.push(issue);
+            }
         }
         _ => {}
     }
@@ -717,6 +729,68 @@ mod tests {
         let v = validate(&resize, &tight, None);
         assert_eq!(v.error_kind(), Some(ErrorKind::PolicyDenied));
         assert!(v.issues[0].message.contains("resize"), "{:?}", v.issues);
+    }
+
+    /// 題名での名指し (D-152): 撮影の許可が無ければ、focus / resize の title の指定と close (title が必須) は 4。
+    /// rule は撮影を断った軸、hint は専用の文。title の無い focus / resize は今までどおり通る
+    #[test]
+    fn title_naming_needs_screenshot_permission() {
+        let no_capture = policy(
+            "[general]\ninput_enabled = true\ncapture_enabled = false\n[allow]\nprocesses = [\"notepad.exe\"]\n",
+        );
+        let with_capture = policy(
+            "[general]\ninput_enabled = true\ncapture_enabled = true\n[allow]\nprocesses = [\"notepad.exe\"]\n",
+        );
+        let titled = [
+            r#"{"type":"focus","process":"notepad.exe","title":"a"}"#,
+            r#"{"type":"resize","process":"notepad.exe","title":"a","width":800,"height":600}"#,
+            r#"{"type":"close","process":"notepad.exe","title":"a"}"#,
+        ];
+        let untitled = [
+            r#"{"type":"focus","process":"notepad.exe"}"#,
+            r#"{"type":"resize","process":"notepad.exe","width":800,"height":600}"#,
+        ];
+        for json in titled {
+            let v = validate(&script(json), &no_capture, None);
+            assert_eq!(v.error_kind(), Some(ErrorKind::PolicyDenied), "{json}");
+            assert_eq!(v.issues.len(), 1, "{json}: {:?}", v.issues);
+            let issue = &v.issues[0];
+            assert_eq!(issue.action_index, Some(0), "{json}");
+            assert_eq!(issue.rule, Some("general.capture_enabled"), "{json}");
+            assert!(issue.message.starts_with("題名での名指し"), "{json}");
+            assert_eq!(
+                issue.hint.as_deref(),
+                Some(crate::hint::hint(
+                    crate::hint::Hint::TitleNamingDenied,
+                    crate::hint::Surface::Mcp
+                )),
+                "{json}"
+            );
+            assert!(validate(&script(json), &with_capture, None).ok(), "{json}");
+        }
+        for json in untitled {
+            assert!(validate(&script(json), &no_capture, None).ok(), "{json}");
+            assert!(validate(&script(json), &with_capture, None).ok(), "{json}");
+        }
+        // capture は真で allow.actions に screenshot が無い設定も、windows と同じく 4 (rule はその軸)
+        let no_shot_action = policy(&format!(
+            "{ENABLED}[allow]\nactions = [\"focus\", \"close\", \"resize\"]\n"
+        ));
+        for json in titled {
+            let v = validate(&script(json), &no_shot_action, None);
+            assert_eq!(v.issues.len(), 1, "{json}: {:?}", v.issues);
+            assert_eq!(v.issues[0].rule, Some("allow.actions"), "{json}");
+        }
+        for json in untitled {
+            assert!(
+                validate(&script(json), &no_shot_action, None).ok(),
+                "{json}"
+            );
+        }
+        // wait_for は範囲の外 (D-152 の目標外)
+        let wait = script(r#"{"type":"wait_for","process":"notepad.exe","title":"a"}"#);
+        let wait_only = policy(&format!("{ENABLED}[allow]\nactions = [\"wait_for\"]\n"));
+        assert!(validate(&wait, &wait_only, None).ok());
     }
 
     /// wait_for の対象 (D-068): 撮影の総スイッチ (capture_enabled) だけで通り、input_enabled は要らない。

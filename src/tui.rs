@@ -1328,29 +1328,27 @@ impl App {
                     lines.push(format!("…他 {} 枚", r.screenshots.len() - MAX_SHOT_LINES));
                 }
                 for c in &r.closed {
+                    let title = result_title(c.title.as_deref());
                     lines.push(if c.gone && c.hidden {
                         format!(
-                            "隠れた actions[{}]: {} \"{}\" (トレイなど。プロセスは動いている)",
-                            c.action_index, c.process, c.title
+                            "隠れた actions[{}]: {} {title} (トレイなど。プロセスは動いている)",
+                            c.action_index, c.process
                         )
                     } else if c.gone {
-                        format!(
-                            "閉じた actions[{}]: {} \"{}\"",
-                            c.action_index, c.process, c.title
-                        )
+                        format!("閉じた actions[{}]: {} {title}", c.action_index, c.process)
                     } else {
                         format!(
-                            "⚠ actions[{}]: {} \"{}\" はまだ開いている (保存の確認などを確かめる)",
-                            c.action_index, c.process, c.title
+                            "⚠ actions[{}]: {} {title} はまだ開いている (保存の確認などを確かめる)",
+                            c.action_index, c.process
                         )
                     });
                 }
                 for z in &r.resized {
                     lines.push(format!(
-                        "大きさを変えた actions[{}]: {} \"{}\" 枠 {}x{} (中身 {}x{})",
+                        "大きさを変えた actions[{}]: {} {} 枠 {}x{} (中身 {}x{})",
                         z.action_index,
                         z.process,
-                        z.title,
+                        result_title(z.title.as_deref()),
                         z.frame.w,
                         z.frame.h,
                         z.client.w,
@@ -2477,6 +2475,14 @@ fn capture_target_summary(
             None => w.process.clone(),
         },
         (None, None) => "全画面".to_string(),
+    }
+}
+
+/// 結果の行に出す窓の題名 (close と resize)。撮影の許可が無く実行器が伏せた (None) なら「(題名は伏せた)」(D-152)
+fn result_title(title: Option<&str>) -> String {
+    match title {
+        Some(t) => format!("\"{t}\""),
+        None => "(題名は伏せた)".to_string(),
     }
 }
 
@@ -6139,7 +6145,7 @@ mod tests {
             action_index: 0,
             hwnd: 0x20,
             process: "notepad.exe".into(),
-            title: "a.txt - メモ帳".into(),
+            title: Some("a.txt - メモ帳".into()),
             gone,
             hidden,
         };
@@ -6165,7 +6171,21 @@ mod tests {
         // 破棄は今までどおり「閉じた」
         let text = finish(&mut a, info(true, false));
         assert!(has(&text, "閉じた actions[0]"), "{text}");
+        assert!(has(&text, "\"a.txt - メモ帳\""), "{text}");
         assert!(!has(&text, "隠れた"), "{text}");
+        // 撮影の許可が無く題名を伏せた (None。D-152): 「(題名は伏せた)」と出し、None の字は出さない
+        for (gone, hidden) in [(true, false), (true, true), (false, false)] {
+            let text = finish(
+                &mut a,
+                crate::run::CloseInfo {
+                    title: None,
+                    ..info(gone, hidden)
+                },
+            );
+            assert!(has(&text, "(題名は伏せた)"), "{text}");
+            assert!(!has(&text, "None"), "{text}");
+            assert!(!has(&text, "メモ帳"), "{text}");
+        }
     }
 
     /// resize (D-150): 確認の画面は大きさを変えることを言い、結果の画面は実際の大きさと、届かなかったことを出す
@@ -6190,7 +6210,7 @@ mod tests {
             action_index: 0,
             hwnd: 0x20,
             process: "notepad.exe".into(),
-            title: "a.txt - メモ帳".into(),
+            title: Some("a.txt - メモ帳".into()),
             area: "client",
             logical: false,
             dpi: Some(120),
@@ -6223,6 +6243,19 @@ mod tests {
         assert!(has(&text, "大きさを変えた actions[0]"), "{text}");
         assert!(has(&text, "1400x720"), "{text}");
         assert!(has(&text, "届かなかった"), "{text}");
+        assert!(has(&text, "\"a.txt - メモ帳\""), "{text}");
+        // 撮影の許可が無く題名を伏せた (None。D-152): 「(題名は伏せた)」と出し、None の字は出さない
+        let text = finish(
+            &mut a,
+            crate::run::ResizeInfo {
+                title: None,
+                ..info(true, 1280, 720)
+            },
+        );
+        assert!(has(&text, "大きさを変えた actions[0]"), "{text}");
+        assert!(has(&text, "(題名は伏せた)"), "{text}");
+        assert!(!has(&text, "None"), "{text}");
+        assert!(!has(&text, "メモ帳"), "{text}");
     }
 
     #[test]

@@ -112,10 +112,13 @@ pub enum Hint {
     /// 点がカーソルの動く範囲 (ClipCursor) の外 (7 は送る前、6 は送った後。`reason: cursor_clipped`。D-151)。
     /// CLI と MCP で同じ文
     CursorClipped,
+    /// 撮影の許可が無いときの、題名での名指し (focus / resize の title、close) の拒否 (4。D-152)。
+    /// 検証と実行器の守りの重ねが共有する。CLI と MCP で同じ文
+    TitleNamingDenied,
 }
 
 impl Hint {
-    pub const ALL: [Hint; 42] = [
+    pub const ALL: [Hint; 43] = [
         Hint::MouseGuard,
         Hint::KeyboardGuard,
         Hint::Elevated,
@@ -158,8 +161,13 @@ impl Hint {
         Hint::ResizeNotResponding,
         Hint::OffMonitor,
         Hint::CursorClipped,
+        Hint::TitleNamingDenied,
     ];
 }
+
+/// 撮影の許可が無いときの、題名での名指し (focus / resize の title、close) の拒否 (4。D-152)。
+/// 検証は呼ばれ方を知らないので、CLI と MCP で同じ文 (道具とキーの名前だけで書く。`BUILTIN_HINT` と同じ形)
+pub const TITLE_NAMING_HINT: &str = "題名での名指しは、撮影の許可 (windows と同じ) が無いので断った。focus と resize は title の指定を外し、process だけで名指しすれば通る (結果の title は null)。close (title が必須) と、題名で窓を選び分けたいときは、人間に撮影の許可を頼む。error.fix があれば、その文をそのまま人間に伝える (設定は自分で書き換えない)";
 
 /// マウスの点がモニターの隙間にある (CLI と MCP で同じ文。道具やサブコマンドの名前を含まない。D-151)
 pub const OFF_MONITOR_HINT: &str = "何も送っていない。点がモニターの間の隙間 (どのモニターにも映らない所) にある。OS がカーソルを近いモニターへ寄せるので、見えている窓の中の点を選び直す";
@@ -355,6 +363,8 @@ pub fn hint(kind: Hint, surface: Surface) -> &'static str {
         // 道具やサブコマンドの名前を含まない文なので、CLI と MCP で同じ (D-151)
         Hint::OffMonitor => OFF_MONITOR_HINT,
         Hint::CursorClipped => CURSOR_CLIPPED_HINT,
+        // 検証は呼ばれ方を知らないので、CLI と MCP で同じ (D-152)
+        Hint::TitleNamingDenied => TITLE_NAMING_HINT,
     }
 }
 
@@ -678,6 +688,7 @@ mod tests {
                 Hint::ResizeNotResponding => 39,
                 Hint::OffMonitor => 40,
                 Hint::CursorClipped => 41,
+                Hint::TitleNamingDenied => 42,
             }
         }
         let mut seen: Vec<usize> = Hint::ALL.iter().map(|h| index(*h)).collect();
@@ -986,6 +997,31 @@ mod tests {
         ] {
             assert!(clip.contains(word), "{word}: {clip}");
         }
+    }
+
+    /// 題名での名指しの拒否 (D-152): 検証は呼ばれ方を知らないので、CLI と MCP で同じ 1 つの定数を返す。
+    /// title を外せば通る手と、close は人間に撮影の許可を頼む手と、fix をそのまま伝えることを書く
+    #[test]
+    fn title_naming_hint_is_one_text_on_both_surfaces() {
+        assert_eq!(
+            hint(Hint::TitleNamingDenied, Surface::Cli),
+            TITLE_NAMING_HINT
+        );
+        assert_eq!(
+            hint(Hint::TitleNamingDenied, Surface::Mcp),
+            TITLE_NAMING_HINT
+        );
+        for word in [
+            "process だけ",
+            "title は null",
+            "close",
+            "人間",
+            "error.fix",
+        ] {
+            assert!(TITLE_NAMING_HINT.contains(word), "{word}");
+        }
+        assert!(!TITLE_NAMING_HINT.contains("ai-cu"), "{TITLE_NAMING_HINT}");
+        assert!(!TITLE_NAMING_HINT.contains("--"), "{TITLE_NAMING_HINT}");
     }
 
     /// 14 の既定の文 (D-066): CLI と MCP で同じ文で、コマンド名を含まず、何も送っていないと言い切らない

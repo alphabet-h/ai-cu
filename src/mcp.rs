@@ -455,8 +455,13 @@ fn schema_window_title() -> Value {
     json!({ "type": "string", "description": "対象の題名に含む文字列 (大文字小文字を無視)" })
 }
 
+/// focus と resize の title (D-152)。`schema_window_title` は shot / find / text / tree / wait_for と共有なので変えない
+fn schema_named_title() -> Value {
+    json!({ "type": "string", "description": "対象の題名に含む文字列 (大文字小文字を無視)。撮影の許可 (general.capture_enabled と actions の screenshot) が要り、無いと policy_denied (4)。そのときは省いて process だけで名指しする (結果の title は null)" })
+}
+
 fn schema_close_title() -> Value {
-    json!({ "type": "string", "minLength": 1, "description": "閉じる対象の題名に含む文字列 (大文字小文字を無視)。取り違えを防ぐため必須。windows で確かめる" })
+    json!({ "type": "string", "minLength": 1, "description": "閉じる対象の題名に含む文字列 (大文字小文字を無視)。取り違えを防ぐため必須。windows で確かめる。撮影の許可 (general.capture_enabled と actions の screenshot) が要り、無いと policy_denied (4)" })
 }
 
 /// resize の幅と高さ (D-150)。`what` は「幅」か「高さ」
@@ -610,12 +615,12 @@ fn schema_action() -> Value {
             { "type": "object", "additionalProperties": false, "properties": { "type": t("key"), "keys": { "type": "string", "description": "例 ctrl+s、alt+tab、enter、f5、kanji (半角/全角) (反応は IME とアプリに依る)。未知のキーの失敗の issues の message に使える名前が出る" } }, "required": ["type", "keys"] },
             { "type": "object", "additionalProperties": false, "properties": { "type": t("wait"), "ms": { "type": "integer", "minimum": 0, "maximum": 600000 } }, "required": ["type", "ms"] },
             { "type": "object", "additionalProperties": false, "properties": { "type": t("screenshot"), "path": { "type": "string", "description": "png の保存先 (.png に限る。mcp:inline なら保存せず結果の image だけ)" }, "region": schema_region(), "window": schema_capture_window(), "scale": schema_scale(), "max_edge": schema_max_edge(), "settle": schema_settle() }, "required": ["type", "path"] },
-            { "type": "object", "additionalProperties": false, "properties": { "type": t("focus"), "process": schema_window(), "title": schema_window_title() }, "required": ["type", "process"] },
+            { "type": "object", "additionalProperties": false, "properties": { "type": t("focus"), "process": schema_window(), "title": schema_named_title() }, "required": ["type", "process"] },
             { "type": "object", "additionalProperties": false, "properties": { "type": t("close"), "process": schema_window(), "title": schema_close_title() }, "required": ["type", "process", "title"] },
             { "type": "object", "additionalProperties": false, "properties": { "type": t("wait_for"), "process": schema_window(), "title": schema_window_title(), "element": schema_element_filter(), "text": schema_wait_text(), "absent": schema_wait_absent(), "timeout_ms": schema_wait_timeout() }, "required": ["type", "process"] },
             { "type": "object", "additionalProperties": false, "description": "画面が落ち着くまで待つ (直前のフレームとの差が threshold 以下の比較が stable_ms 続けば満たす)", "properties": { "type": t("wait_stable"), "region": schema_region(), "window": schema_capture_window(), "stable_ms": schema_stable_ms(), "threshold": schema_threshold("直前のフレームとの差 (変わった点の割合) の許容 (既定 0)"), "timeout_ms": schema_screen_timeout(MIN_STABLE_MS, DEFAULT_WAIT_FOR_TIMEOUT_MS) }, "required": ["type"] },
             { "type": "object", "additionalProperties": false, "description": "画面が変わるまで待つ (待ち始めの画像との差が threshold を超えれば満たす)", "properties": { "type": t("wait_change"), "region": schema_region(), "window": schema_capture_window(), "threshold": schema_threshold("待ち始めの画像 (基準) との差 (変わった点の割合) の下限 (既定 0.001)。狭い region ではキャレットの点滅でも超えうる"), "timeout_ms": schema_screen_timeout(1, DEFAULT_WAIT_FOR_TIMEOUT_MS) }, "required": ["type"] },
-            { "type": "object", "additionalProperties": false, "description": "窓の大きさを変える (左上は動かさない。前面は変えず入力も送らない。最小化・最大化の窓は断る)。結果の resized[] に実際の frame と client、exact (狙いに届いたか)", "properties": { "type": t("resize"), "process": schema_window(), "title": schema_window_title(), "width": schema_resize_size("幅"), "height": schema_resize_size("高さ"), "logical": schema_resize_logical(), "area": schema_resize_area() }, "required": ["type", "process", "width", "height"] }
+            { "type": "object", "additionalProperties": false, "description": "窓の大きさを変える (左上は動かさない。前面は変えず入力も送らない。最小化・最大化の窓は断る)。結果の resized[] に実際の frame と client、exact (狙いに届いたか)", "properties": { "type": t("resize"), "process": schema_window(), "title": schema_named_title(), "width": schema_resize_size("幅"), "height": schema_resize_size("高さ"), "logical": schema_resize_logical(), "area": schema_resize_area() }, "required": ["type", "process", "width", "height"] }
         ]
     })
 }
@@ -750,7 +755,7 @@ pub fn tools() -> Vec<Value> {
             &format!(
                 "許可されたアプリのウィンドウを前面にする (キーと文字は前面のウィンドウに届く)。SetForegroundWindow を 1 回呼ぶだけで、最小化は復元しない。常駐の MCP サーバーは人の入力で前面化の権利を失うので、断られて前面があなたの端末なら、使い捨ての補助プロセスに 1 回だけ頼む。それでも断られたら focus_failed (error.reason=refused_host_front)。人が別のアプリを使っていれば OS が断り focus_failed (refused_other_app。前面が別のアプリなら補助は起動しない。補助を使ったかは error.detail の helper)。どちらも繰り返さず人間に頼む (windows の foreground で確かめてから続ける)。人が操作中なら user_active。{STEP_NOTE}。{LEAD_NOTE}"
             ),
-            json!({ "type": "object", "additionalProperties": false, "properties": step_props(json!({ "process": schema_window(), "title": schema_window_title() })), "required": ["process"] }),
+            json!({ "type": "object", "additionalProperties": false, "properties": step_props(json!({ "process": schema_window(), "title": schema_named_title() })), "required": ["process"] }),
             input_tool(true),
         ),
         tool(
@@ -814,7 +819,7 @@ pub fn tools() -> Vec<Value> {
             "close",
             "ウィンドウを閉じる",
             &format!(
-                "許可されたアプリのウィンドウに WM_CLOSE を 1 回置いて閉じる (× ボタンと同じ。Alt+F4 は使えない)。前面は変えず、前面でなくても届くので、あなたの端末が前面のままでよい。title は必須 (windows で題名を確かめる)。見つからなければ window_not_found。対象が前面で人が操作中なら user_active。閉じるか (保存の確認を出すか) はアプリが決める。結果の closed[].gone は見える窓から消えたか (破棄とは限らない)。closed[].hidden が true なら窓は隠れただけでプロセスは動いている (トレイに入るアプリ)。hidden が false でもプロセスが終わったとは限らない (exe の入れ替えや再起動の前に確かめるか人間に聞く)。gone が false なら確認が出ていることが多いので撮って確かめ、保存するかは人間に聞く。{STEP_NOTE}。{LEAD_NOTE}"
+                "許可されたアプリのウィンドウに WM_CLOSE を 1 回置いて閉じる (× ボタンと同じ。Alt+F4 は使えない)。前面は変えず、前面でなくても届くので、あなたの端末が前面のままでよい。title は必須 (windows で題名を確かめる) で、撮影の許可 (general.capture_enabled と actions の screenshot) も要る (無いと policy_denied)。見つからなければ window_not_found。対象が前面で人が操作中なら user_active。閉じるか (保存の確認を出すか) はアプリが決める。結果の closed[].gone は見える窓から消えたか (破棄とは限らない)。closed[].hidden が true なら窓は隠れただけでプロセスは動いている (トレイに入るアプリ)。hidden が false でもプロセスが終わったとは限らない (exe の入れ替えや再起動の前に確かめるか人間に聞く)。gone が false なら確認が出ていることが多いので撮って確かめ、保存するかは人間に聞く。{STEP_NOTE}。{LEAD_NOTE}"
             ),
             json!({ "type": "object", "additionalProperties": false, "properties": step_props(json!({ "process": schema_window(), "title": schema_close_title() })), "required": ["process", "title"] }),
             input_tool(false),
@@ -823,9 +828,9 @@ pub fn tools() -> Vec<Value> {
             "resize",
             "ウィンドウの大きさを変える",
             &format!(
-                "許可されたアプリのウィンドウの大きさを変える (D-150)。大きさだけで、左上は動かさない。前面も Z 順も変えず入力も送らないので、あなたの端末が前面のままでよい。既定は物理ピクセルで中身 (client area) の大きさ。logical: true なら論理の大きさ (窓が載っている画面の有効 DPI / 96 で物理に換算。換算後が上限を超えれば invalid_script、DPI を読めなければ os_error)。area: frame なら見えている枠の大きさ。title を省くとそのプロセスの最前の窓 (結果の hwnd と title で取り違えを確かめる)。結果の resized[] に frame と client (実際の矩形、物理)、requested (物理の狙い)、dpi、exact が入る。exact が false ならアプリの最小・最大の大きさなどで狙いに届いていないので、frame と client の実際の大きさを見る (失敗ではない)。最小化・最大化の窓は foreground_guard (reason minimized / maximized。ai-cu は元に戻さないので人間に頼む)。見つからなければ window_not_found。対象が前面で人が操作中なら user_active。{STEP_NOTE}。{LEAD_NOTE}"
+                "許可されたアプリのウィンドウの大きさを変える (D-150)。大きさだけで、左上は動かさない。前面も Z 順も変えず入力も送らないので、あなたの端末が前面のままでよい。既定は物理ピクセルで中身 (client area) の大きさ。logical: true なら論理の大きさ (窓が載っている画面の有効 DPI / 96 で物理に換算。換算後が上限を超えれば invalid_script、DPI を読めなければ os_error)。area: frame なら見えている枠の大きさ。title を省くとそのプロセスの最前の窓 (結果の hwnd と title で取り違えを確かめる。撮影の許可が無ければ title は null なので hwnd で確かめる)。結果の resized[] に frame と client (実際の矩形、物理)、requested (物理の狙い)、dpi、exact が入る。exact が false ならアプリの最小・最大の大きさなどで狙いに届いていないので、frame と client の実際の大きさを見る (失敗ではない)。最小化・最大化の窓は foreground_guard (reason minimized / maximized。ai-cu は元に戻さないので人間に頼む)。見つからなければ window_not_found。対象が前面で人が操作中なら user_active。{STEP_NOTE}。{LEAD_NOTE}"
             ),
-            json!({ "type": "object", "additionalProperties": false, "properties": step_props(json!({ "process": schema_window(), "title": schema_window_title(), "width": schema_resize_size("幅"), "height": schema_resize_size("高さ"), "logical": schema_resize_logical(), "area": schema_resize_area() })), "required": ["process", "width", "height"] }),
+            json!({ "type": "object", "additionalProperties": false, "properties": step_props(json!({ "process": schema_window(), "title": schema_named_title(), "width": schema_resize_size("幅"), "height": schema_resize_size("高さ"), "logical": schema_resize_logical(), "area": schema_resize_area() })), "required": ["process", "width", "height"] }),
             input_tool(true),
         ),
         tool(
@@ -6274,6 +6279,110 @@ mod tests {
         assert_eq!(w.foreground.as_ref().unwrap().hwnd, host.hwnd);
     }
 
+    /// D-152 の端から端まで: 撮影の許可が無い床では、title つきの focus / resize と close は 4 (rule は撮影の軸、
+    /// fix つき、hint は専用の文) で窓に何もしない。title なしの focus と resize は成功し、結果の title は null で、
+    /// 応答のどこにも窓の題名を出さない
+    #[test]
+    fn mcp_title_naming_refused_and_titles_hidden_without_capture() {
+        let dir = unique_temp_dir("mcp-no-capture-titles");
+        let floor = floor_file(
+            &dir,
+            "[general]\ninput_enabled = true\ncapture_enabled = false\n",
+        );
+        let mut f = Fixture::new(MapEnv::default());
+        let world = f.world.clone();
+        let mut target = window("notepad.exe", "Notepad");
+        target.hwnd = 0x20;
+        target.pid = 7;
+        target.title = "a.txt - メモ帳".into();
+        {
+            let mut w = world.borrow_mut();
+            w.foreground = Some(window("Zed.exe", "Zed::Window"));
+            w.top = vec![crate::device::TopWindow {
+                info: target,
+                rect: Some(Rect::new(100, 100, 1000, 700)),
+                minimized: false,
+            }];
+            w.geometry.insert(
+                0x20,
+                crate::device::WindowGeometry {
+                    outer: Rect::new(100, 100, 1000, 700),
+                    frame: Rect::new(107, 100, 986, 693),
+                    client: Rect::new(108, 131, 984, 661),
+                    maximized: false,
+                    dpi: Some(96),
+                    minimized: false,
+                    hung: false,
+                },
+            );
+        }
+        let mut s = f.server(paths(&floor));
+        // (a) 題名での名指しは 4
+        for (id, (tool, args)) in [
+            (
+                "focus",
+                json!({ "process": "notepad.exe", "title": "a.txt" }),
+            ),
+            (
+                "resize",
+                json!({ "process": "notepad.exe", "title": "a.txt", "width": 800, "height": 600 }),
+            ),
+            (
+                "close",
+                json!({ "process": "notepad.exe", "title": "a.txt" }),
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let r = reply(&mut s, &call(id as i64 + 1, tool, args));
+            assert_eq!(r["result"]["isError"], true, "{tool}: {r}");
+            let v = text_json(&r);
+            assert_eq!(v["error"]["code"], "policy_denied", "{tool}: {v}");
+            assert_eq!(v["error"]["exit_code"], 4, "{tool}: {v}");
+            assert_eq!(
+                v["error"]["hint"],
+                crate::hint::TITLE_NAMING_HINT,
+                "{tool}: {v}"
+            );
+            assert_eq!(v["error"]["rule"], "general.capture_enabled", "{tool}: {v}");
+            assert!(
+                v["error"]["fix"].as_str().is_some_and(|s| !s.is_empty()),
+                "{tool}: {v}"
+            );
+            let w = world.borrow();
+            assert!(w.focus_calls.is_empty(), "{tool}");
+            assert!(w.close_calls.is_empty(), "{tool}");
+            assert!(w.resize_calls.is_empty(), "{tool}");
+        }
+        // (b) title なしの focus と resize は成功し、題名を出さない
+        let r = reply(
+            &mut s,
+            &call(10, "focus", json!({ "process": "notepad.exe" })),
+        );
+        assert_eq!(r["result"]["isError"], false, "{r}");
+        let v = text_json(&r);
+        assert_eq!(v["focused"][0]["hwnd"], 0x20, "{v}");
+        assert_eq!(v["focused"][0].get("title"), Some(&Value::Null), "{v}");
+        assert!(!r.to_string().contains("メモ帳"), "{r}");
+        let r = reply(
+            &mut s,
+            &call(
+                11,
+                "resize",
+                json!({ "process": "notepad.exe", "width": 800, "height": 600 }),
+            ),
+        );
+        assert_eq!(r["result"]["isError"], false, "{r}");
+        let v = text_json(&r);
+        assert_eq!(v["resized"][0]["hwnd"], 0x20, "{v}");
+        assert_eq!(v["resized"][0].get("title"), Some(&Value::Null), "{v}");
+        assert!(!r.to_string().contains("メモ帳"), "{r}");
+        let w = world.borrow();
+        assert_eq!(w.focus_calls, vec![0x20]);
+        assert_eq!(w.resize_calls.len(), 1);
+    }
+
     /// 手引きの MCP の節は、補助プロセスで前面化を試すことと、それでも断られたら人に頼むことを書く (D-057)
     #[test]
     fn guide_explains_focus_helper_for_mcp() {
@@ -6371,6 +6480,40 @@ mod tests {
         // 補助プロセスで効くようになったこと (D-057)
         assert!(d.contains("補助プロセス"), "{d}");
         assert!(!d.contains("端末が前面でも断られることがある"), "{d}");
+    }
+
+    /// focus / resize / close の title の説明は撮影の許可が要ることを書き、共有の `schema_window_title`
+    /// (shot / find / text / tree / wait_for) には書かない (D-152)
+    #[test]
+    fn title_descriptions_mention_capture_permission_only_where_needed() {
+        let list = tools();
+        let tool = |name: &str| list.iter().find(|t| t["name"] == name).unwrap().clone();
+        let desc = |v: &Value| v["description"].as_str().unwrap().to_string();
+        for name in ["focus", "resize", "close"] {
+            let d = desc(&tool(name)["inputSchema"]["properties"]["title"]);
+            assert!(d.contains("general.capture_enabled"), "{name}: {d}");
+        }
+        let actions = tool("run")["inputSchema"]["properties"]["actions"]["items"]["oneOf"]
+            .as_array()
+            .unwrap()
+            .clone();
+        for a in &actions {
+            let kind = a["properties"]["type"]["const"].as_str().unwrap();
+            let Some(title) = a["properties"].get("title") else {
+                continue;
+            };
+            let has = desc(title).contains("general.capture_enabled");
+            assert_eq!(has, matches!(kind, "focus" | "resize" | "close"), "{kind}");
+        }
+        for name in ["shot", "find", "text", "tree"] {
+            let d = desc(&tool(name)["inputSchema"]["properties"]["window_title"]);
+            assert!(!d.contains("general.capture_enabled"), "{name}: {d}");
+        }
+        let d = desc(&tool("wait_for")["inputSchema"]["properties"]["title"]);
+        assert!(!d.contains("general.capture_enabled"), "wait_for: {d}");
+        // 道具の説明: close は許可が要ること、resize は title が null なら hwnd で確かめること
+        assert!(desc(&tool("close")).contains("撮影の許可"));
+        assert!(desc(&tool("resize")).contains("title は null"));
     }
 
     /// 画面を変える道具の説明に足す 1 句は、錠の待ちの上限の秒 (`run::INPUT_LOCK_WAIT_MS` から組む) と、待ちきれない

@@ -357,7 +357,7 @@ pub enum Command {
     Focus {
         /// 実行ファイル名 (例 notepad.exe)
         process: String,
-        /// 題名に含む文字列 (大文字小文字を無視)
+        /// 題名に含む文字列 (大文字小文字を無視)。撮影の許可 (general.capture_enabled と actions の screenshot) が要り、無いと終了コード 4
         #[arg(long, value_name = "TEXT")]
         title: Option<String>,
         #[command(flatten)]
@@ -367,7 +367,7 @@ pub enum Command {
     Close {
         /// 実行ファイル名 (例 notepad.exe)
         process: String,
-        /// 題名に含む文字列 (大文字小文字を無視)。取り違えを防ぐため必須
+        /// 題名に含む文字列 (大文字小文字を無視)。取り違えを防ぐため必須。撮影の許可 (general.capture_enabled と actions の screenshot) が要り、無いと終了コード 4
         #[arg(long, value_name = "TEXT")]
         title: String,
         #[command(flatten)]
@@ -377,7 +377,7 @@ pub enum Command {
     Resize {
         /// 実行ファイル名 (例 notepad.exe)。focus と同じ探し方
         process: String,
-        /// 題名に含む文字列 (大文字小文字を無視)。省略するとそのプロセスの最前のウィンドウ
+        /// 題名に含む文字列 (大文字小文字を無視)。省略するとそのプロセスの最前のウィンドウ。撮影の許可 (general.capture_enabled と actions の screenshot) が要り、無いと終了コード 4
         #[arg(long, value_name = "TEXT")]
         title: Option<String>,
         /// 幅 (1 以上 16384 以下。既定は物理ピクセル)
@@ -2093,12 +2093,12 @@ pub fn schema() -> Value {
             "key": { "keys": "組み合わせ。例 ctrl+s, alt+tab, f5、kanji (半角/全角) (Win+、Alt+F4、Ctrl+Alt+、Ctrl+Shift+Esc、Ctrl+Esc、PrintScreen (修飾キーにかかわらず) は組み込みで拒否)" },
             "wait": { "ms": "待つミリ秒 (最大 600000)" },
             "screenshot": { "path": "保存先の png (.png に限る。PNG でない既存ファイルは上書きしない)", "region": { "x": "整数", "y": "整数", "w": "幅", "h": "高さ", "省略": "window も無ければ仮想デスクトップ全体 (既定の設定では拒否。capture.full_screen)" }, "window": { "process": "撮る対象のウィンドウの実行ファイル名 (focus と同じ探し方。region と排他)", "title": "省略可。題名に含む文字列", "備考": "矩形は撮る直前に解く。見つからない / 最小化 / 画面の外は終了コード 12 (何もしない)。結果の screenshots[].window に撮ったウィンドウが入る" }, "scale": "保存する画像の縮尺 (0 より大きく 1 以下。既定 1)。画像の点 (px, py) は画面の (x + px / scale, y + py / scale)", "max_edge": "長辺の上限 (1 以上、ピクセル。省略で上限なし。MCP は既定 1568)。縮尺は scale と max_edge / 長辺 の小さい方で、出力の scale に実際の値が入る", "settle": { "stable_ms": format!("省略可。静けさが続く長さ (既定 {DEFAULT_STABLE_MS}、{MIN_STABLE_MS} 以上 {MAX_STABLE_MS} 以下)"), "threshold": "省略可。直前のフレームとの差 (変わった点の割合) の許容 (0 以上 1 未満。既定 0)", "timeout_ms": format!("省略可。待つ上限 (既定 {DEFAULT_SETTLE_TIMEOUT_MS}、stable_ms 以上 {MAX_SINGLE_WAIT_MS} 以下)。超えたら落ち着くのを待たずに撮る (失敗にしない)"), "備考": "省略可 ({} でも既定値で付く)。撮る前に wait_stable と同じ判定で画面が落ち着くのを待ち、最後に撮った画像を保存する (撮り直さない)。結果の screenshots[] に settled (落ち着いたか) と settle_ms (待った時間) が入る。一手ずつの --settle-ms auto はこれを既定値で付ける" } },
-            "focus": { "process": "実行ファイル名 (例 notepad.exe。大文字小文字と .exe の有無は問わない)", "title": "省略可。題名に含む文字列 (大文字小文字を無視)。許可を通る窓 (windows に出る窓) の中で前面から見て最初に一致したウィンドウ (ツールチップなどのポップアップは後に回す。権限で断られれば 7) を SetForegroundWindow で前面にする。既に前面なら何もしない。最小化は復元しない。人が操作中 (capture.min_idle_ms) なら 10。できなければ終了コード 11 (何も送らない)。成功の出力の focused に、前面にしたウィンドウが入る" },
-            "close": { "process": "実行ファイル名 (focus と同じ探し方)", "title": "必須。題名に含む文字列 (大文字小文字を無視)。許可を通る窓 (windows に出る窓) の中で前面から見て最初に一致したウィンドウ (ツールチップなどのポップアップは後に回すので、title がポップアップと本体の両方に当たると本体に届く。権限で断られれば 7) に WM_CLOSE を 1 回置く。前面は変えず、前面でなくても届く。対象が前面で人が操作中 (capture.min_idle_ms) なら 10。見つからなければ 12 (何もしない)。閉じるか (保存の確認を出すか) はアプリが決める。成功の出力の closed に、閉じようとしたウィンドウと gone (1 秒のうちに見える窓から消えたか。破棄とは限らない) と hidden (破棄されず隠れただけ。トレイに入るアプリで、プロセスは動いている) が入る。hidden が false でもプロセスが終わったとは限らない (exe の入れ替えや再起動の前に確かめるか人間に聞く)。gone が false なら撮って確かめる" },
+            "focus": { "process": "実行ファイル名 (例 notepad.exe。大文字小文字と .exe の有無は問わない)", "title": "省略可。題名に含む文字列 (大文字小文字を無視)。許可を通る窓 (windows に出る窓) の中で前面から見て最初に一致したウィンドウ (ツールチップなどのポップアップは後に回す。権限で断られれば 7) を SetForegroundWindow で前面にする。既に前面なら何もしない。最小化は復元しない。人が操作中 (capture.min_idle_ms) なら 10。できなければ終了コード 11 (何も送らない)。成功の出力の focused に、前面にしたウィンドウが入る。撮影の許可 (general.capture_enabled と actions の screenshot) が無いと、title の指定は 4 で、focused の title は null" },
+            "close": { "process": "実行ファイル名 (focus と同じ探し方)", "title": "必須。題名に含む文字列 (大文字小文字を無視)。許可を通る窓 (windows に出る窓) の中で前面から見て最初に一致したウィンドウ (ツールチップなどのポップアップは後に回すので、title がポップアップと本体の両方に当たると本体に届く。権限で断られれば 7) に WM_CLOSE を 1 回置く。前面は変えず、前面でなくても届く。対象が前面で人が操作中 (capture.min_idle_ms) なら 10。見つからなければ 12 (何もしない)。閉じるか (保存の確認を出すか) はアプリが決める。成功の出力の closed に、閉じようとしたウィンドウと gone (1 秒のうちに見える窓から消えたか。破棄とは限らない) と hidden (破棄されず隠れただけ。トレイに入るアプリで、プロセスは動いている) が入る。hidden が false でもプロセスが終わったとは限らない (exe の入れ替えや再起動の前に確かめるか人間に聞く)。gone が false なら撮って確かめる。撮影の許可 (general.capture_enabled と actions の screenshot) が無いと close は 4" },
             "wait_for": { "process": "対象のウィンドウの実行ファイル名 (focus と同じ探し方)", "title": "省略可。題名に含む文字列", "element": { "name": "省略可。要素の名前に含む文字列", "type": "省略可。要素の種類 (find --help の一覧)" }, "text": "省略可。要素の文字列に含む文字列 (改行は LF にそろえる。大文字小文字を区別。パスワードの要素は読まずに飛ばす)", "absent": "真偽 (既定 false)。true なら無くなるまで待つ", "timeout_ms": "上限 (既定 10000、最大 600000)。超えたら終了コード 15 (何も送らない)", "備考": "条件は一番細かい指定 (text > element > window)。250 ms ごとに確かめる。満たされると結果の waited[] に窓と要素 (center) が入る。absent が最初の確認で満たされると (timeout_ms 0 は除く) waited[].note に注意が付く" },
             "wait_stable": { "region": "省略可。撮る矩形 (screenshot と同じ。window と排他。両方省略は全画面で、既定の設定では拒否)", "window": { "process": "省略可。撮る対象のウィンドウ (screenshot と同じ探し方。撮るたびに矩形を解く)", "title": "省略可" }, "stable_ms": "静けさが続く長さ (既定 300、100 以上 60000 以下)", "threshold": "直前のフレームとの差 (変わった点の割合) の許容 (0 以上 1 未満。既定 0)", "timeout_ms": "上限 (既定 10000、stable_ms 以上 600000 以下)。超えたら終了コード 15 (unmet: stable。何も送らない)", "備考": "100 ms ごとに撮り、長辺 256 に縮めて比べる。窓が動けば変わったと数える。撮るたびに screenshot と同じ判定 (撮影の許可、deny の窓、ロック) を通す。満たされると結果の waited[] に rect が入る" },
             "wait_change": { "region": "省略可 (wait_stable と同じ)", "window": "省略可 (wait_stable と同じ)", "threshold": "待ち始めの画像 (基準) との差がこれを超えたら変わった (0 以上 1 未満。既定 0.001)", "timeout_ms": "上限 (既定 10000、1 以上 600000 以下)。超えたら終了コード 15 (unmet: change。何も送らない)", "備考": "100 ms ごとに撮り、基準と比べる (直前ではない)。狭い region ではキャレットの点滅でも満たしうる。満たされると結果の waited[] に rect と changed_ratio が入る" },
-            "resize": { "process": "実行ファイル名 (focus と同じ探し方)", "title": "省略可。題名に含む文字列 (大文字小文字を無視)。省略するとそのプロセスの最前のウィンドウ", "width": format!("幅 (1 以上 {RESIZE_MAX} 以下)"), "height": format!("高さ (1 以上 {RESIZE_MAX} 以下)"), "logical": "真偽 (既定 false = 物理ピクセル)。true なら論理の大きさで、窓が載っている画面の有効 DPI / 96 で物理に換算する (四捨五入)。換算後が上限を超えれば実行時に 3 (validate と dry_run では見えない)。DPI を読めなければ 8", "area": "client | frame (既定 client = 中身。frame は見えている枠)", "備考": "左上は動かさず、前面も Z 順も変えず、入力も送らない。最小化・最大化の窓は 7 (reason minimized / maximized。元に戻さない)、無効な窓は 7 (target_disabled)、応答しない窓は 7 (not_responding。要求が後から効いて重なるので送らない)、対象が前面で人が操作中なら 10、見つからなければ 12、大きさの読みが壊れていれば (中身か枠が外側より大きい) 8。成功の出力の resized[] に frame と client (物理の矩形)、requested (物理の狙い)、dpi、exact (1 秒のうちに基準が狙いに届いたか。false なら frame と client が実際の大きさ) が入る", "例": { "type": "resize", "process": "notepad.exe", "width": 1280, "height": 720, "logical": true } }
+            "resize": { "process": "実行ファイル名 (focus と同じ探し方)", "title": "省略可。題名に含む文字列 (大文字小文字を無視)。省略するとそのプロセスの最前のウィンドウ。撮影の許可 (general.capture_enabled と actions の screenshot) が無いと、title の指定は 4 で、resized の title は null", "width": format!("幅 (1 以上 {RESIZE_MAX} 以下)"), "height": format!("高さ (1 以上 {RESIZE_MAX} 以下)"), "logical": "真偽 (既定 false = 物理ピクセル)。true なら論理の大きさで、窓が載っている画面の有効 DPI / 96 で物理に換算する (四捨五入)。換算後が上限を超えれば実行時に 3 (validate と dry_run では見えない)。DPI を読めなければ 8", "area": "client | frame (既定 client = 中身。frame は見えている枠)", "備考": "左上は動かさず、前面も Z 順も変えず、入力も送らない。最小化・最大化の窓は 7 (reason minimized / maximized。元に戻さない)、無効な窓は 7 (target_disabled)、応答しない窓は 7 (not_responding。要求が後から効いて重なるので送らない)、対象が前面で人が操作中なら 10、見つからなければ 12、大きさの読みが壊れていれば (中身か枠が外側より大きい) 8。成功の出力の resized[] に frame と client (物理の矩形)、requested (物理の狙い)、dpi、exact (1 秒のうちに基準が狙いに届いたか。false なら frame と client が実際の大きさ) が入る", "例": { "type": "resize", "process": "notepad.exe", "width": 1280, "height": 720, "logical": true } }
         },
         "key_names": format!("{}。修飾: {}", usable_key_names(), usable_modifier_names()),
         "exit_codes": crate::error::ErrorKind::ALL.iter().map(|k| json!({ "code": k.exit_code(), "name": k.code() })).collect::<Vec<_>>(),
@@ -4758,6 +4758,18 @@ mod tests {
         assert!(title.contains("終わったとは限らない"), "{title}");
     }
 
+    /// `schema()` の focus / close / resize の title は撮影の許可が要ることを書き、wait_for には書かない (D-152)
+    #[test]
+    fn schema_title_mentions_capture_permission() {
+        let s = schema();
+        for kind in ["focus", "close", "resize"] {
+            let title = s["actions"][kind]["title"].as_str().unwrap();
+            assert!(title.contains("general.capture_enabled"), "{kind}: {title}");
+        }
+        let title = s["actions"]["wait_for"]["title"].as_str().unwrap();
+        assert!(!title.contains("general.capture_enabled"), "{title}");
+    }
+
     /// `schema()` の `key_names` はキーの表から組み立てる。`key` は IME のキーを、`type` は IME がオンのときの乱れと `imeoff` の手順を書く (D-131、D-133)
     #[test]
     fn schema_key_names_come_from_key_table() {
@@ -5197,6 +5209,51 @@ mod tests {
                 other => panic!("{name}: {other:?}"),
             }
             assert!(world.borrow().capture_rects.is_empty(), "{name}");
+        }
+    }
+
+    /// D-152: 撮影の許可が無い設定では、一手ずつの focus / resize の --title と close は 4 (rule は撮影の軸、hint は
+    /// 専用の文) で、窓に何もしない
+    #[test]
+    fn step_title_naming_refused_without_capture() {
+        let env = pixel_env(
+            "cli-step-title-no-capture",
+            "[general]\ninput_enabled = true\ncapture_enabled = false\n",
+        );
+        for args in [
+            &["focus", "notepad.exe", "--title", "a.txt"][..],
+            &[
+                "resize",
+                "notepad.exe",
+                "--title",
+                "a.txt",
+                "--width",
+                "800",
+                "--height",
+                "600",
+            ][..],
+            &["close", "notepad.exe", "--title", "a.txt"][..],
+        ] {
+            let world = World::new().shared();
+            match pixel_go(args, &env, &world) {
+                Outcome::Json { code: 4, value, .. } => {
+                    assert_eq!(value["error"]["code"], "policy_denied", "{args:?}: {value}");
+                    assert_eq!(
+                        value["error"]["rule"], "general.capture_enabled",
+                        "{args:?}: {value}"
+                    );
+                    assert_eq!(
+                        value["error"]["hint"],
+                        crate::hint::TITLE_NAMING_HINT,
+                        "{args:?}: {value}"
+                    );
+                }
+                other => panic!("{args:?}: {other:?}"),
+            }
+            let w = world.borrow();
+            assert!(w.focus_calls.is_empty(), "{args:?}");
+            assert!(w.close_calls.is_empty(), "{args:?}");
+            assert!(w.resize_calls.is_empty(), "{args:?}");
         }
     }
 
