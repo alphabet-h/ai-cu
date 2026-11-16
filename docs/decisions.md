@@ -2256,3 +2256,8 @@
   - 結果の行は枠と中身の両方の大きさを出す (plan の字面は枠だけ)。既定の基準が中身 (`area: client`) なので、枠だけでは狙いと比べられない。close の行にそろえて添字と題名も出す
   - 文書の「`allow.actions` を書いた既存の設定では `resize` を並べないと通らない」は config.md の項と手動確認の前提に書いた (close と同じ性質)
   - テスト: src/tui.rs の `tui_confirm_and_result_describe_resize`。対照: target/s4_control.py で結果の行の繰り返しを `take(0)` にすると、このテストが exit 101 で落ちるのを見た。finally で書き戻し、sha256 が前後で一致することと git diff で戻ったことを確かめた (via: target/verify/s4-control.log)
+- 追記 (実装、ステップ 5、2026-11-16): フィクスチャの実機テスト。変えた所: src/win32/fixture_window.rs に `FixtureWindow::open_dpi_unaware` (子の種類 `DpiUnaware`。窓のスレッドで `CreateWindowExW` の直前に `SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_UNAWARE)`、直後に前の文脈へ戻す)。tests/fixture_real.rs に `Fixture::open_dpi_unaware` と実機テスト 3 つ (`fixture_real_resize_changes_fixture_size_keeping_top_left`、`fixture_real_resize_on_stalled_fixture_returns_within_settle`、`fixture_real_resize_dpi_unaware_fixture_client`)。実機では未実行 (重い検査で主エージェントが打つ)。細部は推奨で決めた (○)
+  - 窓を作った直後にスレッドの文脈を戻す。窓の DPI 認識は作ったときの文脈で決まり、窓の手続きの処理は OS が窓の文脈に切り替えるので、戻しても窓は非対応のまま。戻せば、そのスレッドで後から作るもの (無い) に非対応が漏れない。文脈を変えられなければ、窓を作らずに開くのを失敗にする (非対応でない窓を非対応のつもりで測らない)
+  - 眠らせたフィクスチャのテストは、resize が返った時点でまだ眠っていることも断言する (眠りが先に明けると、ASYNC が無くても速く返り、空振りになる)。上限の断言 (2500 ms 未満、「待たされた」) をこの断言より先に置く。同期で待たされると戻った時点で眠りが明けているので、順が逆だと「空振り」の文言で落ちて原因を取り違える
+  - DPI 非対応のフィクスチャのテストは、窓が本当に非対応で作られたことも断言する (画面の DPI が 96 を超えるとき、開いた直後の物理の中身が、渡した 640x400 と倍率をかけた大きさの中間を超えていること)。640x400 との不一致だけを見ると、`WS_BORDER` の縁の分 (対応の窓でも 638x398) で素通りする。DPI が 96 の画面では区別できないと印字するだけにする
+  - 対照 (`set_size` の旗から `SWP_ASYNCWINDOWPOS` を外すと眠らせたフィクスチャのテストが落ちる) は実機のテストなので、主エージェントが重い検査で打つ。書き換えて打ち、finally で書き戻して sha256 を比べるスクリプトは target/s5_control.py に置いた。終了コードが 0 でないことに加えて、ログに「待たされた」の panic の文があることを確かめ、無ければ対照は不成立と出す (ビルドの失敗やフィクスチャが開けないことを、対照の成立に数えない)
