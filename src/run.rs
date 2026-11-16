@@ -1550,13 +1550,13 @@ impl Executor<'_> {
                 state.prev = Some(cursor);
                 state.expected = Some(cursor);
             }
-            // close、wait、wait_for だけの操作列は、入力デスクトップが使えない (ロック中) ときもマウスの監視なしで進む。
+            // close、resize、wait、wait_for だけの操作列は、入力デスクトップが使えない (ロック中) ときもマウスの監視なしで進む。
             // 読めるようになったら check_stop が監視を始める (D-066、D-068)
             Err(BackendError::DesktopUnavailable(_)) if !needs_desktop => {}
             Err(e) => return Err(backend_error(e)),
         }
-        // 枠と予告の間 (D-093)。画面を変える操作 (入力のバッチ、focus、close) があり、始めのカーソルが読めた
-        // (マウスの監視がある) ときだけ。ロック中に監視なしで始まる close だけの操作列では出さない
+        // 枠と予告の間 (D-093)。画面を変える操作 (入力のバッチ、focus、close、resize) があり、始めのカーソルが読めた
+        // (マウスの監視がある) ときだけ。ロック中に監視なしで始まる close や resize だけの操作列では出さない
         let shown = changes_screen && self.policy.indicator_enabled() && state.prev.is_some();
         if shown {
             let lead_ms = self.policy.indicator_lead_ms();
@@ -8952,6 +8952,47 @@ mod tests {
         );
         let e = r.unwrap_err();
         assert_desktop_refused(&world, &e, reason::OTHER_DESKTOP);
+        assert!(images.written.is_empty());
+    }
+
+    /// resize (D-150) は close と同じく入力デスクトップを要らない: ロック中も撮影を付けなければ監視なしで大きさを
+    /// 変え、撮影を付ければ 14 で何も置かない。resize を needs_desktop に足すと前半が落ちる
+    #[test]
+    fn preflight_resize_runs_unmonitored_while_locked_unless_shot() {
+        let resize =
+            r#"{"type":"resize","process":"notepad.exe","title":"a.txt","width":800,"height":600}"#;
+        let locked = || {
+            let mut w = resize_world(Some(96));
+            w.foreground = None;
+            w.input_desktop = Ok(winlogon());
+            w.cursor_fail_after_reads = Some((0, cursor_locked()));
+            w.shared()
+        };
+        let world = locked();
+        let (r, _) = exec(
+            &world,
+            &policy(ENABLED),
+            &mut StopSet::new(),
+            &script(resize),
+        );
+        let report = r.unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(report.resized.len(), 1);
+        let w = world.borrow();
+        assert_eq!(w.resize_calls.len(), 1);
+        assert!(w.sent.is_empty() && w.focus_calls.is_empty());
+        assert_eq!(w.keys_held_calls, 0, "入力が無いので keys_held を見ない");
+        drop(w);
+
+        let world = locked();
+        let (r, images) = exec(
+            &world,
+            &policy(ENABLED),
+            &mut StopSet::new(),
+            &script(&format!("{resize},{SHOT}")),
+        );
+        let e = r.unwrap_err();
+        assert_desktop_refused(&world, &e, reason::OTHER_DESKTOP);
+        assert!(world.borrow().resize_calls.is_empty());
         assert!(images.written.is_empty());
     }
 

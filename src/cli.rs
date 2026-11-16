@@ -33,7 +33,7 @@ use crate::script::{
     Action, ActionKind, Button, ClickModifier, DEFAULT_DRAG_MS, DEFAULT_DRAG_STEPS,
     DEFAULT_SETTLE_TIMEOUT_MS, DEFAULT_SHOT_SCALE, DEFAULT_STABLE_MS, DEFAULT_TYPE_INTERVAL_MS,
     DEFAULT_WAIT_FOR_TIMEOUT_MS, ElementFilter, MAX_SINGLE_WAIT_MS, MAX_STABLE_MS, MIN_STABLE_MS,
-    Pos, RESIZE_MAX, Region, SCRIPT_VERSION, Script, Settle, WindowTarget,
+    Pos, RESIZE_MAX, Region, ResizeArea, SCRIPT_VERSION, Script, Settle, WindowTarget,
 };
 use crate::validate::{Validation, validate};
 
@@ -93,7 +93,7 @@ pub fn guide_summary() -> String {
     name = "ai-cu",
     version = crate::build_info::VERSION,
     about = "AI が Windows のデスクトップを操作するための CLI (一手ずつのサブコマンド、または JSON の操作列)",
-    after_help = "初めて使う AI は、まず `ai-cu guide` を読む (要点版。座標の注意、前面化、終了コードごとの次の手)。全文は `ai-cu guide --full` (使い方の流れ、一手ずつの操作、操作列 JSON)。\n一手ずつ操作するなら、click / double-click / drag / move / scroll / type / key / focus / close / wait-for の各サブコマンド (`--shot PATH --window PROCESS` か `--shot PATH --region X,Y,W,H` で操作の後に撮る。出力は run と同じ)。focus / close / wait-for の対象は位置引数で、`--window` は撮る対象 (`--shot` と組む)。\n要素の位置は `find --window PROCESS [--name TEXT] [--type TYPE]` (UI Automation) で取れ、`center` をそのまま click に渡せる。何があるか分からないときは、先に `tree --window PROCESS` で要素の木 (1 行 1 要素の字下げ、`@x,y` は center) を見る。文字列は `text`。\n引数なしで、標準入力と標準出力の両方が端末のときは、設定を編集する TUI を起動する。\n`mcp` は MCP サーバー (stdio) として待ち受ける。クライアントの設定に `ai-cu mcp` を登録する (README の「MCP サーバーモード」)。\n終了コード: 0 成功 / 1 内部 / 2 使い方 / 3 操作列 / 4 ポリシー / 5 設定 / 6 緊急停止 / 7 フォアグラウンドガード / 8 OS / 9 開発シェルでの実入力の拒否 / 10 人が操作中 (shot、pixel、focus を行わない) / 11 前面にできない (focus) / 12 対象のウィンドウが無い (window) / 13 文字列を持つ要素が無い (text) / 14 画面がロックかセーバー (何も送らない) / 15 条件が時間内に満たされない (wait_for、run の wait_stable と wait_change。何も送らない) / 16 別の ai-cu が画面を操作中か、人が TUI を開いていて待ちきれない (何も送らない)"
+    after_help = "初めて使う AI は、まず `ai-cu guide` を読む (要点版。座標の注意、前面化、終了コードごとの次の手)。全文は `ai-cu guide --full` (使い方の流れ、一手ずつの操作、操作列 JSON)。\n一手ずつ操作するなら、click / double-click / drag / move / scroll / type / key / focus / close / resize / wait-for の各サブコマンド (`--shot PATH --window PROCESS` か `--shot PATH --region X,Y,W,H` で操作の後に撮る。出力は run と同じ)。focus / close / resize / wait-for の対象は位置引数で、`--window` は撮る対象 (`--shot` と組む)。\n要素の位置は `find --window PROCESS [--name TEXT] [--type TYPE]` (UI Automation) で取れ、`center` をそのまま click に渡せる。何があるか分からないときは、先に `tree --window PROCESS` で要素の木 (1 行 1 要素の字下げ、`@x,y` は center) を見る。文字列は `text`。\n引数なしで、標準入力と標準出力の両方が端末のときは、設定を編集する TUI を起動する。\n`mcp` は MCP サーバー (stdio) として待ち受ける。クライアントの設定に `ai-cu mcp` を登録する (README の「MCP サーバーモード」)。\n終了コード: 0 成功 / 1 内部 / 2 使い方 / 3 操作列 / 4 ポリシー / 5 設定 / 6 緊急停止 / 7 フォアグラウンドガード / 8 OS / 9 開発シェルでの実入力の拒否 / 10 人が操作中 (shot、pixel、focus を行わない) / 11 前面にできない (focus) / 12 対象のウィンドウが無い (window) / 13 文字列を持つ要素が無い (text) / 14 画面がロックかセーバー (何も送らない) / 15 条件が時間内に満たされない (wait_for、run の wait_stable と wait_change。何も送らない) / 16 別の ai-cu が画面を操作中か、人が TUI を開いていて待ちきれない (何も送らない)"
 )]
 pub struct Cli {
     /// 追加の設定ファイル。deny を足せるが allow は広げられない (人間の設定が基本の層)
@@ -373,6 +373,28 @@ pub enum Command {
         #[command(flatten)]
         step: StepOpts,
     },
+    /// 一手ずつ: 許可されたアプリのウィンドウの大きさを変える (左上は動かさない。前面も Z 順も変えず、入力も送らない。D-150)
+    Resize {
+        /// 実行ファイル名 (例 notepad.exe)。focus と同じ探し方
+        process: String,
+        /// 題名に含む文字列 (大文字小文字を無視)。省略するとそのプロセスの最前のウィンドウ
+        #[arg(long, value_name = "TEXT")]
+        title: Option<String>,
+        /// 幅 (1 以上 16384 以下。既定は物理ピクセル)
+        #[arg(long, value_name = "N")]
+        width: u32,
+        /// 高さ (1 以上 16384 以下。既定は物理ピクセル)
+        #[arg(long, value_name = "N")]
+        height: u32,
+        /// 幅と高さを論理の大きさとして読む (窓が載っている画面の有効 DPI / 96 で物理に換算する)
+        #[arg(long)]
+        logical: bool,
+        /// 大きさの基準を見えている枠にする (既定は中身 = client area)
+        #[arg(long)]
+        frame: bool,
+        #[command(flatten)]
+        step: StepOpts,
+    },
     // 条件がそろうまで待つ wait-for (D-068)
     /// 一手ずつ: 対象のウィンドウ、その要素、要素の文字列が出る (--absent なら消える) まで待つ。読むだけ
     WaitFor {
@@ -436,18 +458,18 @@ pub struct StepOpts {
     pub dry_run: bool,
 }
 
-/// focus / close / wait-for に `--window` を付けて clap の誤りになったときの hint (D-086)。
+/// focus / close / resize / wait-for に `--window` を付けて clap の誤りになったときの hint (D-086)。
 /// 対象は位置引数で、`--window` は撮る画像の対象 (`StepOpts`) であることを伝える
-pub const STEP_WINDOW_HINT: &str = "focus / close / wait-for は対象のプロセスを位置引数で取る (例 `ai-cu close notepad.exe --title メモ`)。--window と --window-title は操作の後に撮る画像の対象で、--shot と組む (find / tree / text の --window とは役目が違う)";
+pub const STEP_WINDOW_HINT: &str = "focus / close / resize / wait-for は対象のプロセスを位置引数で取る (例 `ai-cu close notepad.exe --title メモ`)。--window と --window-title は操作の後に撮る画像の対象で、--shot と組む (find / tree / text の --window とは役目が違う)";
 
 /// 対象のプロセスを位置引数で取り、`StepOpts` の `--window` も持つサブコマンド (D-086)。
 /// clap の定義との一致はテスト (`step_window_hint_targets_match_clap_definition`) で断言する
-const STEP_WINDOW_TARGETS: [&str; 3] = ["focus", "close", "wait-for"];
+const STEP_WINDOW_TARGETS: [&str; 4] = ["focus", "close", "resize", "wait-for"];
 
 /// clap の解析の誤りを、終了コード 2 の usage の `AppError` にする (D-086)。
 ///
 /// `args` は先頭にプログラム名を含む生の引数。誤りの種類が `MissingRequiredArgument` で、
-/// サブコマンドが focus / close / wait-for で、引数に `--window` か `--window-title`
+/// サブコマンドが focus / close / resize / wait-for で、引数に `--window` か `--window-title`
 /// (`=` つきを含む) があるときだけ、対象は位置引数だと伝える hint を付ける。
 /// clap の `Error` はどのサブコマンドで起きたかを返さないので、生の引数を見る。
 /// サブコマンドの名前は、先頭を除いて `-` で始まらない最初の引数 (値を取る大域のオプション
@@ -585,6 +607,7 @@ pub fn step_opts(cmd: &Command) -> Option<&StepOpts> {
         | Command::Key { step, .. }
         | Command::Focus { step, .. }
         | Command::Close { step, .. }
+        | Command::Resize { step, .. }
         | Command::WaitFor { step, .. } => Some(step),
         _ => None,
     }
@@ -681,6 +704,26 @@ pub fn step_script(cmd: &Command, stdin: &mut dyn Read) -> Result<Script, AppErr
         Command::Close { process, title, .. } => Action::Close {
             process: process.clone(),
             title: title.clone(),
+        },
+        Command::Resize {
+            process,
+            title,
+            width,
+            height,
+            logical,
+            frame,
+            ..
+        } => Action::Resize {
+            process: process.clone(),
+            title: title.clone(),
+            width: *width,
+            height: *height,
+            logical: *logical,
+            area: if *frame {
+                ResizeArea::Frame
+            } else {
+                ResizeArea::Client
+            },
         },
         Command::WaitFor {
             process,
@@ -2331,13 +2374,22 @@ mod tests {
         usage_error(&argv, e.kind(), e.render().to_string())
     }
 
-    /// focus / close / wait-for に --window を付けた usage の誤りは、対象は位置引数だと伝える (D-086)
+    /// focus / close / resize / wait-for に --window を付けた usage の誤りは、対象は位置引数だと伝える (D-086)
     #[test]
     fn usage_error_hints_positional_target_for_step_window() {
-        let cases: [&[&str]; 6] = [
+        let cases: [&[&str]; 7] = [
             &["close", "--window", "notepad.exe", "--title", "x"],
             &["focus", "--window", "notepad.exe"],
             &["wait-for", "--window=notepad.exe"],
+            &[
+                "resize",
+                "--window",
+                "notepad.exe",
+                "--width",
+                "800",
+                "--height",
+                "600",
+            ],
             // 撮るつもりで --shot を忘れた
             &[
                 "close",
@@ -4375,6 +4427,26 @@ mod tests {
                 &["close", "notepad.exe", "--title", "メモ"],
                 r#"{"type":"close","process":"notepad.exe","title":"メモ"}"#,
             ),
+            // resize (D-150): --logical で論理、--frame で基準を見えている枠に
+            (
+                &[
+                    "resize",
+                    "app.exe",
+                    "--width",
+                    "1280",
+                    "--height",
+                    "720",
+                    "--logical",
+                    "--frame",
+                ],
+                r#"{"type":"resize","process":"app.exe","width":1280,"height":720,"logical":true,"area":"frame"}"#,
+            ),
+            (
+                &[
+                    "resize", "app.exe", "--title", "メモ", "--width", "500", "--height", "300",
+                ],
+                r#"{"type":"resize","process":"app.exe","title":"メモ","width":500,"height":300,"logical":false,"area":"client"}"#,
+            ),
             // wait-for (D-068): --name / --type のどちらかがあれば element、--text があれば text
             (
                 &[
@@ -4416,6 +4488,14 @@ mod tests {
         ];
         // close の題名は必須 (D-062)
         assert!(Cli::try_parse_from(["ai-cu", "close", "notepad.exe"]).is_err());
+        // resize の幅と高さは必須 (D-150)
+        let e = Cli::try_parse_from(["ai-cu", "resize", "app.exe", "--height", "720"]).unwrap_err();
+        assert_eq!(
+            e.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument,
+            "{e}"
+        );
+        assert!(e.to_string().contains("--width"), "{e}");
         // wait-for の --type は find と同じ種類の名前 (未知は使い方の誤り)
         assert!(
             Cli::try_parse_from(["ai-cu", "wait-for", "notepad.exe", "--type", "bogus"]).is_err()

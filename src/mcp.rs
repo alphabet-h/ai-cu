@@ -48,7 +48,7 @@ use crate::script::{
     Action, ActionKind, Button, ClickModifier, DEFAULT_DRAG_MS, DEFAULT_DRAG_STEPS,
     DEFAULT_SETTLE_TIMEOUT_MS, DEFAULT_SHOT_SCALE, DEFAULT_STABLE_MS, DEFAULT_TYPE_INTERVAL_MS,
     DEFAULT_WAIT_FOR_TIMEOUT_MS, ElementFilter, MAX_SCROLL_CLICKS, MAX_SINGLE_WAIT_MS,
-    MAX_STABLE_MS, MIN_STABLE_MS, Pos, Region, SCRIPT_VERSION, Script, WindowTarget,
+    MAX_STABLE_MS, MIN_STABLE_MS, Pos, Region, ResizeArea, SCRIPT_VERSION, Script, WindowTarget,
 };
 
 pub const SERVER_NAME: &str = "ai-cu";
@@ -820,10 +820,19 @@ pub fn tools() -> Vec<Value> {
             input_tool(false),
         ),
         tool(
+            "resize",
+            "ウィンドウの大きさを変える",
+            &format!(
+                "許可されたアプリのウィンドウの大きさを変える (D-150)。大きさだけで、左上は動かさない。前面も Z 順も変えず入力も送らないので、あなたの端末が前面のままでよい。既定は物理ピクセルで中身 (client area) の大きさ。logical: true なら論理の大きさ (窓が載っている画面の有効 DPI / 96 で物理に換算。換算後が上限を超えれば invalid_script、DPI を読めなければ os_error)。area: frame なら見えている枠の大きさ。title を省くとそのプロセスの最前の窓 (結果の hwnd と title で取り違えを確かめる)。結果の resized[] に frame と client (実際の矩形、物理)、requested (物理の狙い)、dpi、exact が入る。exact が false ならアプリの最小・最大の大きさなどで狙いに届いていないので、frame と client の実際の大きさを見る (失敗ではない)。最小化・最大化の窓は foreground_guard (reason minimized / maximized。ai-cu は元に戻さないので人間に頼む)。見つからなければ window_not_found。対象が前面で人が操作中なら user_active。{STEP_NOTE}。{LEAD_NOTE}"
+            ),
+            json!({ "type": "object", "additionalProperties": false, "properties": step_props(json!({ "process": schema_window(), "title": schema_window_title(), "width": schema_resize_size("幅"), "height": schema_resize_size("高さ"), "logical": schema_resize_logical(), "area": schema_resize_area() })), "required": ["process", "width", "height"] }),
+            input_tool(true),
+        ),
+        tool(
             "run",
             "操作列を実行する",
             &format!(
-                "操作の配列を順に実行する (click、double_click、drag、move、scroll、type、key、wait、screenshot、focus、close、wait_for、wait_stable、wait_change)。wait_stable は画面が落ち着くまで、wait_change は変わるまで待つ (region か window を 100 ms ごとに撮って比べる。UIA に要素を出さないアプリの描画待ちに使う。時間切れは wait_timeout で unmet が stable / change)。決まった短い手順に向く (1 回の呼び出しで済む)。先頭に focus を置く。クライアントの制限時間 (Codex は既定 60 秒) に収まる長さにする。dry_run なら装置に触れず、検証と展開した手順 (plan) だけを返す。screenshot の path に mcp:inline を書くとファイルに保存せず結果の image だけになる。失敗の結果では image を捨てるクライアントがある (撮り直せない画面は path にも保存する)。結果は executed、screenshots (screenshot に settle を付けると、撮る前に落ち着くのを待ち settled と settle_ms が付く)、focused、elapsed_ms (close があれば closed。gone は見える窓から消えたか (破棄とは限らない)、hidden が true なら隠れただけでプロセスは動いている。gone が false なら撮って確かめる。wait_for、wait_stable、wait_change があれば waited。画面の待ちは rect と、wait_change なら changed_ratio)。失敗でも、操作に入った後なら executed (どこまで実行したか) と partial が返る (無ければ何も送っていない)。1 以上か partial なら操作ごと打ち直さない。{LEAD_NOTE}"
+                "操作の配列を順に実行する (click、double_click、drag、move、scroll、type、key、wait、screenshot、focus、close、resize、wait_for、wait_stable、wait_change)。wait_stable は画面が落ち着くまで、wait_change は変わるまで待つ (region か window を 100 ms ごとに撮って比べる。UIA に要素を出さないアプリの描画待ちに使う。時間切れは wait_timeout で unmet が stable / change)。決まった短い手順に向く (1 回の呼び出しで済む)。先頭に focus を置く。クライアントの制限時間 (Codex は既定 60 秒) に収まる長さにする。dry_run なら装置に触れず、検証と展開した手順 (plan) だけを返す。screenshot の path に mcp:inline を書くとファイルに保存せず結果の image だけになる。失敗の結果では image を捨てるクライアントがある (撮り直せない画面は path にも保存する)。結果は executed、screenshots (screenshot に settle を付けると、撮る前に落ち着くのを待ち settled と settle_ms が付く)、focused、elapsed_ms (close があれば closed。gone は見える窓から消えたか (破棄とは限らない)、hidden が true なら隠れただけでプロセスは動いている。gone が false なら撮って確かめる。resize があれば resized (exact が false なら実際の大きさを見る)。wait_for、wait_stable、wait_change があれば waited。画面の待ちは rect と、wait_change なら changed_ratio)。失敗でも、操作に入った後なら executed (どこまで実行したか) と partial が返る (無ければ何も送っていない)。1 以上か partial なら操作ごと打ち直さない。{LEAD_NOTE}"
             ),
             json!({ "type": "object", "additionalProperties": false, "properties": { "actions": { "type": "array", "minItems": 1, "items": schema_action() }, "dry_run": schema_dry_run(), "inline": schema_inline() }, "required": ["actions"] }),
             input_tool(false),
@@ -1010,6 +1019,23 @@ struct FocusArgs {
 struct CloseArgs {
     process: String,
     title: String,
+    shot: Option<ShotArgs>,
+    #[serde(default)]
+    dry_run: bool,
+}
+
+/// 道具 `resize` の引数 (D-150)。操作列の `resize` と同じ項目に、一手ずつの `shot` / `dry_run` が付く
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResizeArgs {
+    process: String,
+    title: Option<String>,
+    width: u32,
+    height: u32,
+    #[serde(default)]
+    logical: bool,
+    #[serde(default)]
+    area: ResizeArea,
     shot: Option<ShotArgs>,
     #[serde(default)]
     dry_run: bool,
@@ -1957,6 +1983,22 @@ fn run_tool(name: &str, args: &Value, paths: &ConfigPaths, ctx: &mut Context) ->
                     ctx,
                 )
             }
+            "resize" => {
+                let a: ResizeArgs = parse_args(args)?;
+                step(
+                    Action::Resize {
+                        process: a.process,
+                        title: a.title,
+                        width: a.width,
+                        height: a.height,
+                        logical: a.logical,
+                        area: a.area,
+                    },
+                    a.shot,
+                    a.dry_run,
+                    ctx,
+                )
+            }
             "click" | "double_click" => {
                 let a: ClickArgs = parse_args(args)?;
                 let action = if name == "click" {
@@ -2528,7 +2570,7 @@ mod tests {
             .copied()
             .filter(|n| *n != "guide")
             .collect();
-        assert_eq!(all_but_guide.len(), 19);
+        assert_eq!(all_but_guide.len(), 20);
         assert_eq!(marked(&r), all_but_guide);
         let guide = &r["result"]["tools"][0];
         assert_eq!(guide["name"], "guide");
@@ -2567,7 +2609,7 @@ mod tests {
         assert_eq!(marked(&r), ["click"]);
         floor_file(&dir, "[mcp\n");
         let r = reply(&mut s, &modern(2, "tools/list", json!({})));
-        assert_eq!(marked(&r).len(), 19);
+        assert_eq!(marked(&r).len(), 20);
         assert!(!marked(&r).contains(&"guide".to_string()));
         floor_file(&dir, "[mcp]\nrequire_approval = [\"type\"]\n");
         let r = reply(&mut s, &modern(3, "tools/list", json!({})));
@@ -2772,6 +2814,7 @@ mod tests {
                 "type",
                 "key",
                 "close",
+                "resize",
                 "run"
             ]
         );
@@ -2818,7 +2861,7 @@ mod tests {
                 assert_eq!(t["annotations"]["destructiveHint"], true, "{name}");
                 assert_eq!(
                     t["annotations"]["idempotentHint"],
-                    matches!(name, "focus" | "move"),
+                    matches!(name, "focus" | "move" | "resize"),
                     "{name}"
                 );
             }
@@ -6121,6 +6164,83 @@ mod tests {
         assert_eq!(w.foreground.as_ref().unwrap().hwnd, host.hwnd);
     }
 
+    /// resize の道具 (D-150): 端末 (ホスト) が前面のままでも大きさを変え、結果の resized に出る。
+    /// 前面も入力も変えない。width と height は必須で、未知のフィールドは断る
+    #[test]
+    fn resize_tool_resizes_allowed_window_with_host_in_front() {
+        let dir = unique_temp_dir("mcp-resize");
+        let floor = floor_file(&dir, ENABLED);
+        let mut f = Fixture::new(MapEnv::default());
+        let world = f.world.clone();
+        let host = window("Zed.exe", "Zed::Window");
+        let mut target = window("notepad.exe", "Notepad");
+        target.hwnd = 0x20;
+        target.pid = 7;
+        target.title = "a.txt - メモ帳".into();
+        {
+            let mut w = world.borrow_mut();
+            w.foreground = Some(host.clone());
+            w.top = vec![crate::device::TopWindow {
+                info: target,
+                rect: Some(Rect::new(100, 100, 1000, 700)),
+                minimized: false,
+            }];
+            // 外側 1000x700、枠は差 14x7、中身は差 16x39 (run.rs のテストの読みと同じ形)
+            w.geometry.insert(
+                0x20,
+                crate::device::WindowGeometry {
+                    outer: Rect::new(100, 100, 1000, 700),
+                    frame: Rect::new(107, 100, 986, 693),
+                    client: Rect::new(108, 131, 984, 661),
+                    maximized: false,
+                    dpi: Some(120),
+                },
+            );
+        }
+        let mut s = f.server(paths(&floor));
+        s.host_pids = vec![host.pid];
+        for (id, bad) in [
+            (1, json!({ "process": "notepad.exe", "width": 800 })),
+            (
+                2,
+                json!({ "process": "notepad.exe", "width": 800, "height": 600, "bogus": 1 }),
+            ),
+        ] {
+            let r = reply(&mut s, &call(id, "resize", bad));
+            assert!(
+                r.get("error").is_some() || r["result"]["isError"] == true,
+                "{r}"
+            );
+        }
+        let v = text_json(&reply(
+            &mut s,
+            &call(
+                3,
+                "resize",
+                json!({ "process": "notepad.exe", "title": "a.txt", "width": 1280, "height": 720, "logical": true, "area": "frame" }),
+            ),
+        ));
+        assert_eq!(v["ok"], true, "{v}");
+        let r0 = &v["resized"][0];
+        assert_eq!(r0["hwnd"], 0x20, "{v}");
+        assert_eq!(r0["area"], "frame", "{v}");
+        assert_eq!(r0["logical"], true, "{v}");
+        assert_eq!(r0["dpi"], 120, "{v}");
+        assert_eq!(
+            r0["requested"],
+            json!({ "width": 1600, "height": 900 }),
+            "{v}"
+        );
+        assert_eq!(r0["exact"], true, "{v}");
+        assert_eq!(r0["frame"]["w"], 1600, "{v}");
+        assert_eq!(r0["frame"]["h"], 900, "{v}");
+        let w = world.borrow();
+        // 外側は枠の狙いに外側と枠の差 (14x7) を足した大きさ
+        assert_eq!(w.resize_calls, vec![(0x20, 1614, 907)]);
+        assert!(w.focus_calls.is_empty() && w.sent.is_empty());
+        assert_eq!(w.foreground.as_ref().unwrap().hwnd, host.hwnd);
+    }
+
     /// 手引きの MCP の節は、補助プロセスで前面化を試すことと、それでも断られたら人に頼むことを書く (D-057)
     #[test]
     fn guide_explains_focus_helper_for_mcp() {
@@ -6228,7 +6348,7 @@ mod tests {
         assert!(LEAD_NOTE.contains(&secs), "{LEAD_NOTE}");
         assert!(LEAD_NOTE.contains("input_busy (16"), "{LEAD_NOTE}");
         let list = tools();
-        for name in ["click", "type", "focus", "close", "run"] {
+        for name in ["click", "type", "focus", "close", "resize", "run"] {
             let t = list.iter().find(|t| t["name"] == name).unwrap();
             assert!(
                 t["description"].as_str().unwrap().contains(LEAD_NOTE),
