@@ -136,7 +136,7 @@ pub enum WindowPresence {
 }
 
 /// 窓の大きさの読み (`Desktop::window_geometry`。`resize` が使う。D-150)。矩形は物理ピクセルのスクリーン座標
-/// の前提 (DPI 非対応の窓の `client` が物理になるかは未測定で推定。D-150、ステップ 5 の実機テストで測り、違えばここを直す)。
+/// (DPI 非対応の窓の `client` も物理で返ることを、倍率 1.25 の画面の実機テストで測った。D-150、docs/design-notes.md)。
 /// 最小化は `find_window` の `TopWindow::minimized` で先に見て、送る直前にここの `minimized` でもう一度見る (2 重の確認)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WindowGeometry {

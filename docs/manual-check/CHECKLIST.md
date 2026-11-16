@@ -1284,7 +1284,7 @@ target/release/ai-cu.exe windows
 
 記録する値: 使った release の版 (`target/release/ai-cu.exe --version`)、各コマンドの終了コードと出力の JSON (`resized[0]` の全部)、(a) の `frame` と `client` の差、左上の値。「実施の記録」の節のとおり、手元に日付つきで書く。
 
-結果が違ったときは、D-150 の実装を疑う: (a) の `client` が 1600x900 から外れて `exact` が true なら中身の読みが物理になっていない、`dpi` が `null` か `96` なら画面の DPI の読みを疑う。左上が動いたら `SWP_NOMOVE` が効いていない、前面が変わったら `SWP_NOACTIVATE` が効いていない。(c) で大きさが変わったら最大化の判定が掛かっていない。
+結果が違ったときは、D-150 の実装を疑う: (a) で `exact` が true なのに、直後の `windows` のメモ帳の `rect` (DWM の枠。中身の読みとは別の読み) が `resized[0].frame` と食い違うか、`frame` と `client` の差が縁の数 px でなく倍率の分 (1600x900 なら 400x225 前後) あれば、中身の読みが物理になっていない (`client` と `exact` は同じ読みから出るので、片方だけを見ても見分けられない)、`dpi` が `null` か `96` なら画面の DPI の読みを疑う。左上が動いたら `SWP_NOMOVE` が効いていない、前面が変わったら `SWP_NOACTIVATE` が効いていない。(c) で大きさが変わったら最大化の判定が掛かっていない。
 
 ## 結果が違ったとき
 

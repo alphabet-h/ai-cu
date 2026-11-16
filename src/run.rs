@@ -1429,7 +1429,7 @@ impl Executor<'_> {
     /// `execute_with` に加えて、失敗の次の手 (hint) の文を `opts.surface` (CLI か MCP か) で選び (D-056)、
     /// 画面を変える操作の前に枠と予告の間を入れる (D-093。残す時間と予告の省略は `opts`)。
     /// 判定と送るものは `surface` に依らない。
-    /// 画面を変える操作 (入力のバッチ、focus、close) を含む実行は、検証の後で入力の錠 (別の ai-cu との排他) を取ってから
+    /// 画面を変える操作 (入力のバッチ、focus、close、resize) を含む実行は、検証の後で入力の錠 (別の ai-cu との排他) を取ってから
     /// 操作の前の判定に進み、成否によらず終わりに解く (D-113)
     pub fn execute_on(
         &mut self,
@@ -1855,7 +1855,7 @@ impl Executor<'_> {
     /// 利用者のマウスの移動 (6)。直前に自分が送った移動の線分から閾値より離れていれば止める。
     /// 停止の確認 (`check_stop`) と予告の間 (D-093) が共有する (判定はここだけ)
     fn check_user_mouse(&mut self, state: &mut State) -> Result<(), AppError> {
-        // 監視なしで始めた (ロック中の close、wait、wait_for だけの操作列。D-066、D-068): 読めるようになった時点の点から監視を始める
+        // 監視なしで始めた (ロック中の close、resize、wait、wait_for だけの操作列。D-066、D-068、D-150): 読めるようになった時点の点から監視を始める
         if state.prev.is_none() && state.expected.is_none() {
             match self.desktop.cursor_pos() {
                 Ok(p) => {
@@ -4753,6 +4753,10 @@ mod tests {
         // 四捨五入: 101 * 120 / 96 = 126.25 → 126、103 * 120 / 96 = 128.75 → 129
         assert_eq!(logical_to_physical(101, 120), 126);
         assert_eq!(logical_to_physical(103, 120), 129);
+        // ちょうど .5 は切り上げる: 2 * 120 / 96 = 2.5 → 3、1 * 144 / 96 = 1.5 → 2。下側: 1 * 120 / 96 = 1.25 → 1
+        assert_eq!(logical_to_physical(2, 120), 3);
+        assert_eq!(logical_to_physical(1, 144), 2);
+        assert_eq!(logical_to_physical(1, 120), 1);
         assert_eq!(logical_to_physical(RESIZE_MAX, 96), u64::from(RESIZE_MAX));
     }
 

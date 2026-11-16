@@ -2448,11 +2448,20 @@ pub fn action_summary(a: &Action) -> String {
             title,
             width,
             height,
-            ..
-        } => match title {
-            Some(t) => format!("{kind} {process} \"{t}\" {width}x{height}"),
-            None => format!("{kind} {process} {width}x{height}"),
-        },
+            logical,
+            area,
+        } => {
+            // 論理の指定と枠の指定を物理の中身のように見せない (logical と area が既定でなければ添える)
+            let unit = if *logical { " (logical)" } else { "" };
+            let basis = match area {
+                crate::script::ResizeArea::Client => "",
+                crate::script::ResizeArea::Frame => " frame",
+            };
+            match title {
+                Some(t) => format!("{kind} {process} \"{t}\" {width}x{height}{unit}{basis}"),
+                None => format!("{kind} {process} {width}x{height}{unit}{basis}"),
+            }
+        }
     }
 }
 
@@ -6289,6 +6298,32 @@ mod tests {
             assert!(has(&text, needle), "{needle}\n{text}");
         }
         assert_eq!(a.status_kind, StatusKind::Error);
+    }
+
+    /// resize の 1 行要約は、論理の指定と枠の指定を添え、物理の中身の指定と見分けられる (D-150)
+    #[test]
+    fn action_summary_marks_resize_logical_and_frame() {
+        use crate::script::ResizeArea;
+        let resize = |title: Option<&str>, logical: bool, area: ResizeArea| Action::Resize {
+            process: "notepad.exe".to_string(),
+            title: title.map(str::to_string),
+            width: 1280,
+            height: 720,
+            logical,
+            area,
+        };
+        assert_eq!(
+            action_summary(&resize(None, false, ResizeArea::Client)),
+            "resize notepad.exe 1280x720"
+        );
+        assert_eq!(
+            action_summary(&resize(Some("メモ帳"), true, ResizeArea::Client)),
+            "resize notepad.exe \"メモ帳\" 1280x720 (logical)"
+        );
+        assert_eq!(
+            action_summary(&resize(None, true, ResizeArea::Frame)),
+            "resize notepad.exe 1280x720 (logical) frame"
+        );
     }
 
     /// クリックの 1 行要約に修飾キーを正規の順で + でつないで出す。修飾なしは今の文字列のまま (D-137)
