@@ -157,7 +157,7 @@ impl Default for IndicatorConfig {
 
 /// MCP の道具の名前 (D-078)。`mcp::tools()` の `name` と同じ並び (テストで見張る)。
 /// `config` は `mcp` に依存しないので、読み込みで名前を検査するための一覧をここに置く
-pub const MCP_TOOL_NAMES: [&str; 20] = [
+pub const MCP_TOOL_NAMES: [&str; 21] = [
     "guide",
     "config",
     "status",
@@ -177,6 +177,7 @@ pub const MCP_TOOL_NAMES: [&str; 20] = [
     "type",
     "key",
     "close",
+    "resize",
     "run",
 ];
 
@@ -849,7 +850,7 @@ mouse_threshold_px = 50
 [capture]
 # 全画面 (region を省略した撮影、または画面全体を覆う矩形) を許すか (既定 false)
 full_screen = false
-# shot、pixel、focus、前面にある対象への close の前に、人の最後の入力からこれ以上の無操作を求める (ミリ秒。0 なら求めない)
+# shot、pixel、focus、前面にある対象への close と resize の前に、人の最後の入力からこれ以上の無操作を求める (ミリ秒。0 なら求めない)
 min_idle_ms = 3000
 # 撮影の保存先として許すフォルダ (絶対パス)。空なら制限なし。書いた層はすべてが許すときだけ通す
 save_dirs = []
@@ -859,7 +860,7 @@ save_dirs = []
 require_approval = []
 
 [indicator]
-# 画面を変える操作 (マウス、キー、focus、close) の前に、画面の縁に青い枠と案内を出すか (既定 true)
+# 画面を変える操作 (マウス、キー、focus、close、resize) の前に、画面の縁に青い枠と案内を出すか (既定 true)
 enabled = true
 # 枠を出してから最初の操作までの予告の間 (ミリ秒。0 なら待たない。枠が lead_ms 以上前から出ていれば待たず、出て間もなければ残りだけ待つ。上限 30000)
 lead_ms = 3000

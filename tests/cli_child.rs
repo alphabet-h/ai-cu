@@ -285,6 +285,37 @@ fn close_with_window_flag_hints_positional_process() {
     assert!(!stderr.contains("ヒント:"), "{stderr}");
 }
 
+/// resize の対象を --window で渡した usage の誤りにも、対象は位置引数だと伝える hint が
+/// JSON と標準エラーの両方に載る。--window が無い誤り (幅が無い) には載せない (D-086、D-150)
+#[test]
+fn resize_with_window_flag_hints_positional_process() {
+    let (code, stdout, stderr) = run(
+        &[
+            "resize",
+            "--window",
+            "notepad.exe",
+            "--width",
+            "800",
+            "--height",
+            "600",
+        ],
+        &[],
+        b"",
+    );
+    assert_eq!(code, 2, "stdout={stdout} stderr={stderr}");
+    let v: serde_json::Value = serde_json::from_str(&stdout).expect("JSON");
+    assert_eq!(v["error"]["code"], "usage", "{v}");
+    let hint = v["error"]["hint"].as_str().unwrap_or_default();
+    assert!(hint.contains("位置引数"), "{v}");
+    assert!(hint.contains("resize"), "{v}");
+    assert!(stderr.contains("ヒント:"), "{stderr}");
+    assert!(stderr.contains("位置引数"), "{stderr}");
+
+    let (code, stdout, stderr) = run(&["resize", "notepad.exe", "--height", "600"], &[], b"");
+    assert_eq!(code, 2, "stdout={stdout} stderr={stderr}");
+    assert!(!stderr.contains("ヒント:"), "{stderr}");
+}
+
 #[test]
 fn config_child_path_in_dev_shell_does_not_resolve_user_location() {
     let (code, stdout, _) = run(&["config", "path"], &[], b"");
@@ -423,7 +454,7 @@ fn mcp_child_discover_list_guide_click_then_eof_exits_0_with_json_only_stdout() 
         serde_json::json!(["2026-07-28"])
     );
     assert_eq!(lines[0]["result"]["resultType"], "complete");
-    assert_eq!(lines[1]["result"]["tools"].as_array().unwrap().len(), 20);
+    assert_eq!(lines[1]["result"]["tools"].as_array().unwrap().len(), 21);
     // tools/list は設定 (承認の印) で変わるので private、server/discover は public のまま (D-078)
     assert_eq!(lines[1]["result"]["cacheScope"], "private");
     assert_eq!(lines[0]["result"]["cacheScope"], "public");
@@ -480,7 +511,7 @@ fn mcp_child_legacy_initialize_initialized_tools_list_ping_then_eof() {
         by_id(1)["result"]["capabilities"],
         serde_json::json!({ "tools": {} })
     );
-    assert_eq!(by_id(2)["result"]["tools"].as_array().unwrap().len(), 20);
+    assert_eq!(by_id(2)["result"]["tools"].as_array().unwrap().len(), 21);
     assert_eq!(by_id(3)["result"], serde_json::json!({}));
 }
 

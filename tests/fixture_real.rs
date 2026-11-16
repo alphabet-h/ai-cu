@@ -125,6 +125,8 @@ enum Kids {
     Caption,
     /// 子なしで、IME を外さない (D-133)
     Ime,
+    /// 子なしで、窓を DPI 非対応で作る (D-150)
+    DpiUnaware,
 }
 
 /// フィクスチャを開いている間、画面の縁の枠を出すか (D-094)。自分の枠を数えるテストは Hide
@@ -230,6 +232,12 @@ impl Fixture {
         Fixture::open_inner(name, 0, Kids::Ime, Frame::Show)
     }
 
+    /// DPI 非対応の窓としてフィクスチャを開く (`resize` の実機テスト用。D-150)。矩形は論理の座標として解釈されるので、
+    /// 物理の大きさは 640x400 と違いうる (`client` は開いた後の実際の読み)
+    fn open_dpi_unaware(name: &'static str) -> Fixture {
+        Fixture::open_inner(name, 0, Kids::DpiUnaware, Frame::Show)
+    }
+
     /// 主モニタの左上の角に接して開く (枠の帯の上の点がフィクスチャに重なるように。D-093 の実機テスト)。
     /// 枠を出さない (自分の枠を数える実機テスト用。D-094)
     fn open_at_corner(name: &'static str) -> Fixture {
@@ -271,6 +279,7 @@ impl Fixture {
             Kids::Password => FixtureWindow::open_with_password(rect, &title),
             Kids::Caption => FixtureWindow::open_with_caption(rect, &title),
             Kids::Ime => FixtureWindow::open_with_ime(rect, &title),
+            Kids::DpiUnaware => FixtureWindow::open_dpi_unaware(rect, &title),
         }
         .expect("フィクスチャを開けない");
         std::thread::sleep(Duration::from_millis(300));
@@ -1084,6 +1093,210 @@ fn fixture_real_close_reports_hidden_for_hide_on_close_fixture() {
         b.win.events()
     );
     println!("FIXTURE close hidden elapsed_ms={elapsed_ms}");
+}
+
+/// 自プロセスのテストの実行ファイルの名前 (`resize` の `process` に渡す。D-150)
+fn test_exe_name() -> String {
+    let exe = std::env::current_exe().unwrap();
+    exe.file_name().unwrap().to_string_lossy().into_owned()
+}
+
+/// `resize` の操作 1 つの JSON (D-150)。`extra` は `,"area":"frame"` のような追いの欄 (空でよい)
+fn resize_action(name: &str, width: u32, height: u32, extra: &str) -> String {
+    let exe_name = test_exe_name();
+    format!(
+        r#"{{"type":"resize","process":"{exe_name}","title":"fixture {name}","width":{width},"height":{height}{extra}}}"#
+    )
+}
+
+/// 実装置の `window_geometry` と `set_window_size` (D-150) の配線を通す。フィクスチャ (640x400) の中身を 500x300 に、
+/// 続けて外枠を 520x320 にし、どちらも狙いに届いて (`exact`)、窓の左上が動かず、前面が変わらないことを見る。
+/// 入力は送らない (SetWindowPos に要求を置くだけ)
+#[test]
+#[ignore = "実機のフィクスチャ限定。cargo test -- --ignored --test-threads=1"]
+fn fixture_real_resize_changes_fixture_size_keeping_top_left() {
+    let f = Fixture::open("resize-size");
+    let before = f.win.window_rect().expect("窓の矩形");
+    let fg_before = window::foreground_hwnd();
+    let r = f
+        .execute(&resize_action("resize-size", 500, 300, ""))
+        .expect("中身の resize");
+    assert_eq!(r.executed, 1);
+    assert_eq!(r.resized.len(), 1, "{:?}", r.resized);
+    let info = &r.resized[0];
+    assert_eq!(info.hwnd, f.win.hwnd());
+    assert_eq!(info.area, "client");
+    assert!(info.exact, "中身は狙いに届く: {info:?}");
+    assert_eq!((info.client.w, info.client.h), (500, 300), "{info:?}");
+    let client = f.win.client_rect().expect("クライアント領域");
+    assert_eq!((client.w, client.h), (500, 300), "フィクスチャの読み");
+    let after = f.win.window_rect().expect("窓の矩形");
+    assert_eq!(
+        (after.x, after.y),
+        (before.x, before.y),
+        "左上は動かない: 前 {before} 後 {after}"
+    );
+    assert_eq!(window::foreground_hwnd(), fg_before, "前面は変わらない");
+    println!(
+        "FIXTURE resize client=({}x{}) frame=({}x{}) exact={}",
+        info.client.w, info.client.h, info.frame.w, info.frame.h, info.exact
+    );
+    // 外枠 (DWM の見えている枠) を基準にする
+    let r = f
+        .execute(&resize_action(
+            "resize-size",
+            520,
+            320,
+            r#","area":"frame""#,
+        ))
+        .expect("外枠の resize");
+    assert_eq!(r.resized.len(), 1, "{:?}", r.resized);
+    let info = &r.resized[0];
+    assert_eq!(info.area, "frame");
+    assert!(info.exact, "外枠は狙いに届く: {info:?}");
+    assert_eq!((info.frame.w, info.frame.h), (520, 320), "{info:?}");
+    let after = f.win.window_rect().expect("窓の矩形");
+    assert_eq!(
+        (after.x, after.y),
+        (before.x, before.y),
+        "左上は動かない: 前 {before} 後 {after}"
+    );
+    assert_eq!(window::foreground_hwnd(), fg_before, "前面は変わらない");
+    println!(
+        "FIXTURE resize client=({}x{}) frame=({}x{}) exact={}",
+        info.client.w, info.client.h, info.frame.w, info.frame.h, info.exact
+    );
+}
+
+/// 応答しない窓への `resize` で ai-cu が止まらないこと (`SWP_ASYNCWINDOWPOS`。D-150): フィクスチャの窓のスレッドを
+/// `stall` で 3 秒眠らせて resize を打つと、読み直しの上限 (`RESIZE_SETTLE_MS`) 付近で、`exact: false` の成功で返る。
+/// 返った時点でまだ眠っていること (眠りが resize より先に明けると空振り) も見る。眠りが明けた後の大きさは印字だけ。
+/// 眠りは `IsHungAppWindow` の閾値 (約 5 秒。OS の内部の値で変わりうる) 未満に保つ。超えると resize は
+/// `not_responding` の 7 で送る前に断られ、`SWP_ASYNCWINDOWPOS` の経路を撃てない。そのため resize の直前と直後に
+/// フィクスチャが hung でないかを印字し、結果が `not_responding` なら専用の文で落とす
+#[test]
+#[ignore = "実機のフィクスチャ限定。cargo test -- --ignored --test-threads=1"]
+fn fixture_real_resize_on_stalled_fixture_returns_within_settle() {
+    let f = Fixture::open("resize-stall");
+    let before = f.win.client_rect().expect("クライアント領域");
+    assert!(
+        f.win.stall(Duration::from_secs(3)),
+        "resize の前に眠りの印が立たない"
+    );
+    let hung_before = f.win.is_hung();
+    let start = Instant::now();
+    let r = f.execute(&resize_action("resize-stall", 500, 300, ""));
+    let elapsed = start.elapsed();
+    let stalled_after = f.win.is_stalled();
+    let hung_after = f.win.is_hung();
+    println!("FIXTURE resize stalled hung_before={hung_before} hung_after={hung_after}");
+    if let Err(e) = &r {
+        assert_ne!(
+            e.reason,
+            Some(ai_cu::error::reason::NOT_RESPONDING),
+            "眠らせたフィクスチャが IsHungAppWindow の閾値を越えて not_responding で断られた (ASYNC の経路を撃てていない。眠りを短くする): {e:?}"
+        );
+    }
+    // 眠りが明けるのを待ってから断言する (眠ったまま窓を壊さない)
+    let woke = wait_until(Duration::from_secs(5), || !f.win.is_stalled());
+    std::thread::sleep(Duration::from_millis(200));
+    let later = f.win.client_rect().expect("クライアント領域");
+    println!(
+        "FIXTURE resize stalled elapsed_ms={} stalled_after={stalled_after} woke={woke} before=({}x{}) after_wake=({}x{})",
+        elapsed.as_millis(),
+        before.w,
+        before.h,
+        later.w,
+        later.h
+    );
+    let r = r.expect("眠っている窓への resize も成功で返る");
+    // 上限の断言を空振りの断言より先に置く: 同期で待たされたなら、戻った時点で眠りが明けているので、
+    // 順が逆だと「空振り」の文言で落ちて原因を取り違える (対照 target/s5_control.py はこの文言を探す)
+    assert!(
+        elapsed < Duration::from_millis(2500),
+        "resize が眠っている窓に待たされた: {} ms",
+        elapsed.as_millis()
+    );
+    assert!(
+        stalled_after,
+        "resize の間に眠りが明けた (空振り): {} ms",
+        elapsed.as_millis()
+    );
+    assert!(woke, "眠りが明けない");
+    assert_eq!(r.resized.len(), 1, "{:?}", r.resized);
+    let info = &r.resized[0];
+    assert!(!info.exact, "眠っている間は大きさが変わらない: {info:?}");
+    println!(
+        "FIXTURE resize stalled result client=({}x{}) frame=({}x{}) exact={}",
+        info.client.w, info.client.h, info.frame.w, info.frame.h, info.exact
+    );
+}
+
+/// DPI 非対応の窓の中身の読みが物理か (D-150 の限界の推定を測る): DPI 非対応のフィクスチャに中身の resize
+/// (物理 500x300) を打ち、独立の物理の読みとして結果の `frame` (DWM の枠) が 500x300 から縁と丸めの分しか
+/// 違わないことを主に見る。中身の読みと SetWindowPos が同じ倍率で仮想化されていれば、client は 500x300 に見えても
+/// frame は倍率の分だけ大きくなり、ここで落ちる。非対応の窓の大きさは論理の単位で保たれ、物理の中身は論理の外枠を
+/// 丸めた結果でしか作れないので、中身は丸めの分 (ceil(dpi / 96) px) の違いを許し、`exact` は印字だけにする。
+/// 前提 (窓が非対応で作られた) は、確かめたい中身の読みに頼らず、窓の DPI 認識の文脈と、PMv2 からは物理で返る
+/// `GetWindowRect` の引き伸ばしで見る
+#[test]
+#[ignore = "実機のフィクスチャ限定。cargo test -- --ignored --test-threads=1"]
+fn fixture_real_resize_dpi_unaware_fixture_client() {
+    let f = Fixture::open_dpi_unaware("resize-unaware");
+    assert!(
+        f.win.is_dpi_unaware(),
+        "フィクスチャが DPI 非対応で作られていない (GetWindowDpiAwarenessContext の認識が UNAWARE でない)"
+    );
+    // 開いた直後の外側 (GetWindowRect。PMv2 の ai-cu からは物理)。論理の 640x400 で作った WS_POPUP の外側
+    let opened = f.win.window_rect().expect("窓の矩形");
+    let r = f
+        .execute(&resize_action("resize-unaware", 500, 300, ""))
+        .expect("DPI 非対応の窓の resize");
+    assert_eq!(r.resized.len(), 1, "{:?}", r.resized);
+    let info = &r.resized[0];
+    let fixture_client = f.win.client_rect().expect("クライアント領域");
+    println!(
+        "FIXTURE resize unaware dpi={:?} client=({}x{}) frame=({}x{}) exact={} fixture_client=({}x{})",
+        info.dpi,
+        info.client.w,
+        info.client.h,
+        info.frame.w,
+        info.frame.h,
+        info.exact,
+        fixture_client.w,
+        fixture_client.h
+    );
+    // 画面の DPI が 96 なら、論理と物理が同じなので、下の断言は何も区別しない (素通りの成功を測定と読まない)
+    let Some(d) = info.dpi.filter(|d| *d > 96) else {
+        println!(
+            "FIXTURE resize unaware: 測定は成立していない (画面の DPI が {:?}。96 では論理と物理が同じ)。開いた直後の外側 {}x{}",
+            info.dpi, opened.w, opened.h
+        );
+        return;
+    };
+    // 引き伸ばしの確認: 非対応の窓の論理の外側 640x400 は、物理では倍率の分だけ大きい。倍率をかけた大きさとの
+    // 中間を超えたことを見る (外側は WS_POPUP なので論理の大きさそのもの)
+    let mid = |v: u32| (v + v * d / 96) / 2;
+    assert!(
+        opened.w > mid(640) && opened.h > mid(400),
+        "非対応の窓の外側が物理で引き伸ばされていない (開いた直後の外側 {}x{}、dpi={d})",
+        opened.w,
+        opened.h
+    );
+    // 丸めの分: 論理の 1 px は物理の ceil(dpi / 96) px までずれうる
+    let round = d.div_ceil(96);
+    // 主の断言: 独立の物理の読みの枠 (DWM の枠) が、中身 500x300 から縁 (8 px 以内) と丸めの分しか違わない
+    let near_frame = |v: u32, want: u32| v.abs_diff(want) <= 8 + round;
+    assert!(
+        near_frame(info.frame.w, 500) && near_frame(info.frame.h, 300),
+        "枠 (物理の読み) が中身の 500x300 から縁と丸めの分を超えて違う (中身の読みが物理でない): {info:?}"
+    );
+    // 中身の読みは丸めの分の違いを許す (exact は丸めの向きで偽になりうるので断言しない)
+    let near_client = |v: u32, want: u32| v.abs_diff(want) <= round;
+    assert!(
+        near_client(info.client.w, 500) && near_client(info.client.h, 300),
+        "中身が 500x300 から丸めの分 ({round} px) を超えて違う: {info:?}"
+    );
 }
 
 #[test]

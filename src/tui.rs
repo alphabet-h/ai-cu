@@ -332,7 +332,7 @@ impl Field {
                 "道具の名前を , で区切る。",
             ],
             Field::IndicatorEnabled => vec![
-                "有効にすると、画面を変える操作 (マウス、キー、文字入力、focus、close) の前に、画面の縁に青い枠と案内の札を出す。",
+                "有効にすると、画面を変える操作 (マウス、キー、文字入力、focus、close、resize) の前に、画面の縁に青い枠と案内の札を出す。",
                 "枠が出ていなければ予告の間を待ってから動かす。無効なら予告の間も音も無い。",
                 "どれかの層で有効なら出す (追加の層 (--config など) に [indicator] が無ければ、その層は既定の有効で加わる)。",
             ],
@@ -1344,6 +1344,24 @@ impl App {
                             c.action_index, c.process, c.title
                         )
                     });
+                }
+                for z in &r.resized {
+                    lines.push(format!(
+                        "大きさを変えた actions[{}]: {} \"{}\" 枠 {}x{} (中身 {}x{})",
+                        z.action_index,
+                        z.process,
+                        z.title,
+                        z.frame.w,
+                        z.frame.h,
+                        z.client.w,
+                        z.client.h
+                    ));
+                    if !z.exact {
+                        lines.push(format!(
+                            "⚠ actions[{}]: 狙い {}x{} ({}) に届かなかった (アプリの最小・最大の大きさなど。上の行が実際の大きさ)",
+                            z.action_index, z.requested.width, z.requested.height, z.area
+                        ));
+                    }
                 }
                 self.overlay = Overlay::RunResult {
                     title: "実行した".into(),
@@ -2425,6 +2443,25 @@ pub fn action_summary(a: &Action) -> String {
             "{kind} {} threshold={threshold}",
             capture_target_summary(region.as_ref(), window.as_ref())
         ),
+        Action::Resize {
+            process,
+            title,
+            width,
+            height,
+            logical,
+            area,
+        } => {
+            // 論理の指定と枠の指定を物理の中身のように見せない (logical と area が既定でなければ添える)
+            let unit = if *logical { " (logical)" } else { "" };
+            let basis = match area {
+                crate::script::ResizeArea::Client => "",
+                crate::script::ResizeArea::Frame => " frame",
+            };
+            match title {
+                Some(t) => format!("{kind} {process} \"{t}\" {width}x{height}{unit}{basis}"),
+                None => format!("{kind} {process} {width}x{height}{unit}{basis}"),
+            }
+        }
     }
 }
 
@@ -2534,12 +2571,21 @@ fn confirm_lines(r: &PreflightReport) -> Vec<String> {
         Some(FirstBatch::Close) => {
             "最初の操作は close: 前面は変えず、対象のウィンドウに WM_CLOSE を置く (前面で人が使っていれば 10、見つからなければ 12 で止まる)".into()
         }
+        Some(FirstBatch::Resize) => {
+            "最初の操作は resize: 前面は変えず、対象の窓の大きさを変える (最小化・最大化なら 7、前面で人が使っていれば 10、見つからなければ 12 で止まる)".into()
+        }
         None => "入力のバッチは無い (待ちと撮影だけ)".into(),
     });
     if r.closes > 0 {
         lines.push(format!(
             "⚠ close が {} 件: 対象のウィンドウを閉じる (タブのあるアプリはタブをすべて閉じる。保存の確認が出ることがある)",
             r.closes
+        ));
+    }
+    if r.resizes > 0 {
+        lines.push(format!(
+            "⚠ resize が {} 件: 窓の大きさを変える (前面は変えない)",
+            r.resizes
         ));
     }
     if r.unrestricted {
@@ -6031,6 +6077,7 @@ mod tests {
                 focused: Vec::new(),
                 closed: Vec::new(),
                 waited: Vec::new(),
+                resized: Vec::new(),
                 elapsed_ms: 1,
             })
         }
@@ -6103,6 +6150,7 @@ mod tests {
                 focused: Vec::new(),
                 closed: vec![c],
                 waited: Vec::new(),
+                resized: Vec::new(),
                 elapsed_ms: 1000,
             }));
             draw(a, 120, 32)
@@ -6118,6 +6166,63 @@ mod tests {
         let text = finish(&mut a, info(true, false));
         assert!(has(&text, "閉じた actions[0]"), "{text}");
         assert!(!has(&text, "隠れた"), "{text}");
+    }
+
+    /// resize (D-150): 確認の画面は大きさを変えることを言い、結果の画面は実際の大きさと、届かなかったことを出す
+    #[test]
+    fn tui_confirm_and_result_describe_resize() {
+        let r = report(
+            r#"{"type":"resize","process":"notepad.exe","title":"a.txt","width":1280,"height":720}"#,
+            ENABLED,
+        );
+        assert_eq!(r.first_batch, Some(FirstBatch::Resize));
+        assert_eq!(r.resizes, 1);
+        let lines = confirm_lines(&r).join("\n");
+        assert!(lines.contains("窓の大きさを変える"), "{lines}");
+        assert!(lines.contains("resize が 1 件"), "{lines}");
+        assert!(!lines.contains("待ちと撮影だけ"), "{lines}");
+        let mut a = app();
+        a.on_preflight(Ok(r));
+        a.update(&press(KeyCode::Char('y')));
+        a.set_self_window(Some(me()));
+        a.tick(RUN_COUNTDOWN_MS);
+        let info = |exact, cw, ch| crate::run::ResizeInfo {
+            action_index: 0,
+            hwnd: 0x20,
+            process: "notepad.exe".into(),
+            title: "a.txt - メモ帳".into(),
+            area: "client",
+            logical: false,
+            dpi: Some(120),
+            requested: crate::run::Size {
+                width: 1280,
+                height: 720,
+            },
+            frame: Rect::new(100, 100, cw + 2, ch + 32),
+            client: Rect::new(101, 131, cw, ch),
+            exact,
+        };
+        let finish = |a: &mut App, z: crate::run::ResizeInfo| {
+            a.on_run_finished(Ok(crate::run::RunReport {
+                executed: 1,
+                screenshots: Vec::new(),
+                focused: Vec::new(),
+                closed: Vec::new(),
+                waited: Vec::new(),
+                resized: vec![z],
+                elapsed_ms: 1000,
+            }));
+            draw(a, 160, 32)
+        };
+        let text = finish(&mut a, info(true, 1280, 720));
+        assert!(has(&text, "大きさを変えた actions[0]"), "{text}");
+        assert!(has(&text, "1282x752"), "{text}");
+        assert!(!has(&text, "届かなかった"), "{text}");
+        // アプリの最小の大きさで狙いに届かない: 成功のまま、届かなかったことと実際の大きさを出す
+        let text = finish(&mut a, info(false, 1400, 720));
+        assert!(has(&text, "大きさを変えた actions[0]"), "{text}");
+        assert!(has(&text, "1400x720"), "{text}");
+        assert!(has(&text, "届かなかった"), "{text}");
     }
 
     #[test]
@@ -6147,6 +6252,7 @@ mod tests {
             focused: Vec::new(),
             closed: Vec::new(),
             waited: Vec::new(),
+            resized: Vec::new(),
             elapsed_ms: 1234,
         }));
         assert!(matches!(a.overlay, Overlay::RunResult { ok: true, .. }));
@@ -6192,6 +6298,32 @@ mod tests {
             assert!(has(&text, needle), "{needle}\n{text}");
         }
         assert_eq!(a.status_kind, StatusKind::Error);
+    }
+
+    /// resize の 1 行要約は、論理の指定と枠の指定を添え、物理の中身の指定と見分けられる (D-150)
+    #[test]
+    fn action_summary_marks_resize_logical_and_frame() {
+        use crate::script::ResizeArea;
+        let resize = |title: Option<&str>, logical: bool, area: ResizeArea| Action::Resize {
+            process: "notepad.exe".to_string(),
+            title: title.map(str::to_string),
+            width: 1280,
+            height: 720,
+            logical,
+            area,
+        };
+        assert_eq!(
+            action_summary(&resize(None, false, ResizeArea::Client)),
+            "resize notepad.exe 1280x720"
+        );
+        assert_eq!(
+            action_summary(&resize(Some("メモ帳"), true, ResizeArea::Client)),
+            "resize notepad.exe \"メモ帳\" 1280x720 (logical)"
+        );
+        assert_eq!(
+            action_summary(&resize(None, true, ResizeArea::Frame)),
+            "resize notepad.exe 1280x720 (logical) frame"
+        );
     }
 
     /// クリックの 1 行要約に修飾キーを正規の順で + でつないで出す。修飾なしは今の文字列のまま (D-137)

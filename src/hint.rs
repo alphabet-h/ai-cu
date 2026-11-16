@@ -91,10 +91,26 @@ pub enum Hint {
     PixelSensitive,
     /// pixel: 人が操作中 (10。D-146)
     PixelUserActive,
+    /// resize: 見つからないか、要求を置けなかった (12。D-150)。どちらも要求を置く前なので「変えていない」と言う
+    ResizeNotFound,
+    /// resize: 要求を置いた後の読み直しで窓が消えた (12、partial。D-150)。要求は届いているので「変えていない」と言わない
+    ResizeGoneAfterRequest,
+    /// resize: 対象が許可されていない (7。D-150)
+    ResizeDenied,
+    /// resize: 対象がダイアログを開いていて無効 (7。`reason: target_disabled`。D-150)
+    ResizeDisabled,
+    /// resize: 対象が前面で、人が操作中 (10。D-150)
+    ResizeUserActive,
+    /// resize: 対象が最小化か最大化されている (7。`reason: minimized` / `maximized`。D-150)。ai-cu は元に戻さない
+    ResizeWindowState,
+    /// resize: logical の大きさを物理に換算すると上限を超える (3。D-150)。窓を見つけた後に分かるので実行時に出る
+    ResizeTooLarge,
+    /// resize: 対象が応答していない (7。`reason: not_responding`。D-150)。要求を置くと後から効いて重なるので送らない
+    ResizeNotResponding,
 }
 
 impl Hint {
-    pub const ALL: [Hint; 32] = [
+    pub const ALL: [Hint; 40] = [
         Hint::MouseGuard,
         Hint::KeyboardGuard,
         Hint::Elevated,
@@ -127,8 +143,44 @@ impl Hint {
         Hint::PixelSensitive,
         Hint::PixelUserActive,
         Hint::PasswordFieldMouse,
+        Hint::ResizeNotFound,
+        Hint::ResizeDenied,
+        Hint::ResizeDisabled,
+        Hint::ResizeUserActive,
+        Hint::ResizeWindowState,
+        Hint::ResizeTooLarge,
+        Hint::ResizeGoneAfterRequest,
+        Hint::ResizeNotResponding,
     ];
 }
+
+/// resize: 対象が応答していない (CLI。D-150)
+pub const RESIZE_NOT_RESPONDING_HINT: &str = "窓の大きさは変えていない。対象のウィンドウが応答していない (メッセージを処理していない) ので、要求を置くと後から効いて重なりうるため送らなかった。数秒待って `ai-cu windows` と撮影で応答を確かめてから 1 回だけ再試行し、だめなら人間に確かめる";
+/// resize: 対象が応答していない (MCP。D-150)
+const MCP_RESIZE_NOT_RESPONDING_HINT: &str = "窓の大きさは変えていない。対象のウィンドウが応答していない (メッセージを処理していない) ので、要求を置くと後から効いて重なりうるため送らなかった。数秒待って windows の道具と撮影で応答を確かめてから 1 回だけ再試行し、だめなら人間に確かめる";
+
+/// resize: 見つからないか、要求を置けなかった (CLI。D-150)
+pub const RESIZE_NOT_FOUND_HINT: &str = "窓の大きさは変えていない。その実行ファイル名 (と題名) の見えているウィンドウが無い (大きさの要求を置く前に消えた場合を含む)。`ai-cu windows` で名前と題名を確かめる";
+/// resize: 見つからないか、要求を置けなかった (MCP。D-150)
+const MCP_RESIZE_NOT_FOUND_HINT: &str = "窓の大きさは変えていない。その実行ファイル名 (と題名) の見えているウィンドウが無い (大きさの要求を置く前に消えた場合を含む)。windows の道具で名前と題名を確かめる";
+/// resize: 要求を置いた後に窓が消えた (CLI。D-150)。D-065 の前置き (partial) の後に読まれる
+pub const RESIZE_GONE_AFTER_REQUEST_HINT: &str = "大きさの要求は置いた。その後の読み直しで窓が消えた (閉じられたなど) ので、大きさが変わったかは確かめられない。同じ resize を打ち直さず、`ai-cu windows` で窓があるかと大きさ (rect) を確かめる";
+/// resize: 要求を置いた後に窓が消えた (MCP。D-150)
+const MCP_RESIZE_GONE_AFTER_REQUEST_HINT: &str = "大きさの要求は置いた。その後の読み直しで窓が消えた (閉じられたなど) ので、大きさが変わったかは確かめられない。同じ resize を打ち直さず、windows の道具で窓があるかと大きさ (rect) を確かめる";
+/// resize: 対象が許可されていない (CLI と MCP で同じ文。D-150)
+pub const RESIZE_DENIED_HINT: &str = "窓の大きさは変えていない。大きさを変えようとしたウィンドウが許可されていない。何を許可してほしいかを人間に伝える";
+/// resize: 対象が無効 (CLI。D-150)
+pub const RESIZE_DISABLED_HINT: &str = "窓の大きさは変えていない。対象のウィンドウは無効 (多くはダイアログ (保存の確認など) を開いている) で、人も縁を掴めない状態なので変えなかった。`ai-cu windows` と撮影でダイアログを確かめ、どう答えるかは人間に聞く";
+/// resize: 対象が無効 (MCP。D-150)
+const MCP_RESIZE_DISABLED_HINT: &str = "窓の大きさは変えていない。対象のウィンドウは無効 (多くはダイアログ (保存の確認など) を開いている) で、人も縁を掴めない状態なので変えなかった。windows の道具と撮影でダイアログを確かめ、どう答えるかは人間に聞く";
+/// resize: 対象が前面で人が操作中 (CLI。D-150)
+pub const RESIZE_USER_ACTIVE_HINT: &str = "窓の大きさは変えていない。対象のウィンドウが前面にあり、人がマウスやキーボードを使っている最中 (ai-cu 自身の入力の直後も含む) なので変えなかった。同じ操作列で対象に入力した直後なら、resize を別の呼び出しにするか、前に 3 秒以上の wait を置く。そうでなければ数秒待って 1 回だけ再試行し、だめなら人間に確かめる";
+/// resize: 対象が前面で人が操作中 (MCP。D-073、D-150)。待つ時間は `status` の `retry_after_ms`
+const MCP_RESIZE_USER_ACTIVE_HINT: &str = "窓の大きさは変えていない。対象のウィンドウが前面にあり、人がマウスやキーボードを使っている最中 (ai-cu 自身の入力の直後も含む) なので変えなかった。同じ操作列で対象に入力した直後なら、resize を別の呼び出しにするか、前に 3 秒以上の wait を置く。そうでなければ status の道具の retry_after_ms だけ待って 1 回だけ再試行し、だめなら人間に確かめる";
+/// resize: 最小化か最大化 (CLI と MCP で同じ文。コマンドの書き方を含まない。D-150)
+pub const RESIZE_WINDOW_STATE_HINT: &str = "窓の大きさは変えていない。対象は最小化か最大化されている (どちらかは error.reason)。ai-cu は元に戻さない (元に戻すと前面が変わりうるため)。人間に元に戻してもらってから 1 回だけ再試行する";
+/// resize: logical の換算後が上限を超える (CLI と MCP で同じ文。コマンドの書き方を含まない。D-150)
+pub const RESIZE_TOO_LARGE_HINT: &str = "窓の大きさは変えていない。logical の大きさを窓の画面の倍率で物理に換算すると 16384 を超える。論理の値を下げるか、物理 (logical なし) で指定する。倍率は窓を見つけた後に分かるので、この誤りは validate と dry_run では見えない";
 
 /// pixel: 読む点に deny のウィンドウが見えている (CLI。D-146)
 pub const PIXEL_SENSITIVE_HINT: &str = "何も読んでいない。読む点 (文の 1x1 の矩形) に、設定で拒否されたウィンドウ (error.detail の window。見えている部分は visible) が見えている。detail.visible にかからない点を選んで読み直す。そのウィンドウを動かす・閉じるのは人間に頼む。設定を緩めるよう頼まない";
@@ -274,6 +326,20 @@ pub fn hint(kind: Hint, surface: Surface) -> &'static str {
         Hint::PixelSensitive => PIXEL_SENSITIVE_HINT,
         Hint::PixelUserActive if mcp => MCP_PIXEL_USER_ACTIVE_HINT,
         Hint::PixelUserActive => PIXEL_USER_ACTIVE_HINT,
+        Hint::ResizeNotFound if mcp => MCP_RESIZE_NOT_FOUND_HINT,
+        Hint::ResizeNotFound => RESIZE_NOT_FOUND_HINT,
+        Hint::ResizeGoneAfterRequest if mcp => MCP_RESIZE_GONE_AFTER_REQUEST_HINT,
+        Hint::ResizeGoneAfterRequest => RESIZE_GONE_AFTER_REQUEST_HINT,
+        Hint::ResizeDenied => RESIZE_DENIED_HINT,
+        Hint::ResizeDisabled if mcp => MCP_RESIZE_DISABLED_HINT,
+        Hint::ResizeDisabled => RESIZE_DISABLED_HINT,
+        Hint::ResizeUserActive if mcp => MCP_RESIZE_USER_ACTIVE_HINT,
+        Hint::ResizeUserActive => RESIZE_USER_ACTIVE_HINT,
+        // コマンドの書き方を含まない文なので、CLI と MCP で同じ
+        Hint::ResizeWindowState => RESIZE_WINDOW_STATE_HINT,
+        Hint::ResizeTooLarge => RESIZE_TOO_LARGE_HINT,
+        Hint::ResizeNotResponding if mcp => MCP_RESIZE_NOT_RESPONDING_HINT,
+        Hint::ResizeNotResponding => RESIZE_NOT_RESPONDING_HINT,
     }
 }
 
@@ -587,6 +653,14 @@ mod tests {
                 Hint::PixelSensitive => 29,
                 Hint::PixelUserActive => 30,
                 Hint::PasswordFieldMouse => 31,
+                Hint::ResizeNotFound => 32,
+                Hint::ResizeDenied => 33,
+                Hint::ResizeDisabled => 34,
+                Hint::ResizeUserActive => 35,
+                Hint::ResizeWindowState => 36,
+                Hint::ResizeTooLarge => 37,
+                Hint::ResizeGoneAfterRequest => 38,
+                Hint::ResizeNotResponding => 39,
             }
         }
         let mut seen: Vec<usize> = Hint::ALL.iter().map(|h| index(*h)).collect();
@@ -630,6 +704,11 @@ mod tests {
             Hint::TargetChanged,
             Hint::DragGuardMidway,
             Hint::PixelUserActive,
+            Hint::ResizeNotFound,
+            Hint::ResizeGoneAfterRequest,
+            Hint::ResizeDisabled,
+            Hint::ResizeUserActive,
+            Hint::ResizeNotResponding,
         ] {
             assert_ne!(hint(h, Surface::Cli), hint(h, Surface::Mcp), "{h:?}");
         }
@@ -677,6 +756,10 @@ mod tests {
                 hint(Hint::PixelUserActive, Surface::Mcp),
                 hint(Hint::PixelUserActive, Surface::Cli),
             ),
+            (
+                hint(Hint::ResizeUserActive, Surface::Mcp),
+                hint(Hint::ResizeUserActive, Surface::Cli),
+            ),
         ];
         for (mcp, cli) in pairs {
             assert!(mcp.contains("status"), "{mcp}");
@@ -688,6 +771,7 @@ mod tests {
             Hint::CloseUserActive,
             Hint::LeadUserActive,
             Hint::PixelUserActive,
+            Hint::ResizeUserActive,
         ] {
             assert!(hint(h, Surface::Mcp).contains("retry_after_ms"), "{h:?}");
         }
@@ -755,6 +839,57 @@ mod tests {
             ] {
                 assert!(h.contains(word), "{word}: {h}");
             }
+        }
+    }
+
+    /// resize の文 (D-150): どれも大きさを変えていないと言う。最小化・最大化は ai-cu が元に戻さず人に頼むこと、
+    /// 換算後の上限超えは validate と dry_run で見えないことを書く。この 2 つは CLI と MCP で同じ文
+    #[test]
+    fn resize_hints_say_nothing_changed_and_next_steps() {
+        for s in SURFACES {
+            for h in [
+                Hint::ResizeNotFound,
+                Hint::ResizeDenied,
+                Hint::ResizeDisabled,
+                Hint::ResizeUserActive,
+                Hint::ResizeWindowState,
+                Hint::ResizeTooLarge,
+                Hint::ResizeNotResponding,
+            ] {
+                assert!(
+                    hint(h, s).starts_with("窓の大きさは変えていない。"),
+                    "{h:?}"
+                );
+            }
+            // 応答しない窓: 送らなかった理由 (後から効いて重なる) と、待って確かめてから 1 回だけ再試行することを書く
+            let hung = hint(Hint::ResizeNotResponding, s);
+            for word in ["応答していない", "重なり", "windows", "1 回だけ", "人間"] {
+                assert!(hung.contains(word), "{word}: {hung}");
+            }
+            let state = hint(Hint::ResizeWindowState, s);
+            for word in ["error.reason", "元に戻さない", "人間"] {
+                assert!(state.contains(word), "{word}: {state}");
+            }
+            let large = hint(Hint::ResizeTooLarge, s);
+            // 上限は定数と結び付ける (RESIZE_MAX を変えたら文も直させる)
+            let max = crate::script::RESIZE_MAX.to_string();
+            for word in [max.as_str(), "validate", "dry_run", "物理"] {
+                assert!(large.contains(word), "{word}: {large}");
+            }
+            // 要求を置いた後に消えた 12 は partial の前置きの後に読まれるので、「変えていない」と言わない
+            let gone = hint(Hint::ResizeGoneAfterRequest, s);
+            assert!(gone.starts_with("大きさの要求は置いた。"), "{gone}");
+            assert!(!gone.contains("変えていない"), "{gone}");
+            for word in ["windows", "打ち直さず"] {
+                assert!(gone.contains(word), "{word}: {gone}");
+            }
+        }
+        for h in [
+            Hint::ResizeWindowState,
+            Hint::ResizeTooLarge,
+            Hint::ResizeDenied,
+        ] {
+            assert_eq!(hint(h, Surface::Cli), hint(h, Surface::Mcp), "{h:?}");
         }
     }
 

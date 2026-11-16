@@ -73,7 +73,8 @@ READ_ONLY = {
 CONFIG_READ = {"show", "path", "get", "validate", "list"}
 # 実入力を行う既知のサブコマンド名。オプションの値とサブコマンドを見分けるためだけに使う。
 # `mcp` は常駐の MCP サーバーで、道具として実入力を送る (D-055)。`focus` は前面化 (D-050)
-ACTIONS = {"run", "click", "dblclick", "double-click", "drag", "move", "type", "key", "scroll", "wait", "focus", "mcp", "close"}
+# `resize` は許可された窓の大きさを変える (入力は送らないが、実デスクトップの窓を変える。D-150)
+ACTIONS = {"run", "click", "dblclick", "double-click", "drag", "move", "type", "key", "scroll", "wait", "focus", "mcp", "close", "resize"}
 SAFE_FLAGS = {"--help", "-h", "--version", "-V", "--dry-run"}
 
 # 次のコマンドをそのまま実行するだけの語。読み飛ばして、実際に始まる語を見る

@@ -8,6 +8,8 @@
 //! `open_with_controls` は BUTTON と読み取り専用の EDIT を子に持つ (UIA の実機テスト用。子のメッセージは
 //! 記録しない。D-088)。`open_with_password` は `ES_PASSWORD` の EDIT を 1 つ子に持つ (D-090)。`open` は子を持たない。
 //!
+//! `open_dpi_unaware` は窓を DPI 非対応で作る (DPI 非対応の窓の大きさの読みと `resize` の実機テスト用。D-150)。
+//!
 //! `set_hide_on_close(true)` にしたフィクスチャは、`WM_CLOSE` で壊れず隠れるだけになる (トレイに入るアプリを模す。D-096)。
 //!
 //! `stall` は窓のスレッドを一時的に眠らせ、メッセージを汲まない自プロセスの窓を作る (D-105)。
@@ -34,6 +36,10 @@ use windows_sys::Win32::Graphics::Gdi::{
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Threading::GetCurrentProcessId;
+use windows_sys::Win32::UI::HiDpi::{
+    DPI_AWARENESS_CONTEXT_UNAWARE, DPI_AWARENESS_UNAWARE, GetAwarenessFromDpiAwarenessContext,
+    GetWindowDpiAwarenessContext, SetThreadDpiAwarenessContext,
+};
 use windows_sys::Win32::UI::Input::Ime::{
     GCS_COMPSTR, GCS_RESULTSTR, ImmAssociateContextEx, ImmGetContext, ImmGetOpenStatus,
     ImmReleaseContext, ImmSetOpenStatus,
@@ -44,8 +50,8 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     BS_PUSHBUTTON, CS_DBLCLKS, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
     ES_AUTOHSCROLL, ES_MULTILINE, ES_PASSWORD, ES_READONLY, GetClientRect, GetDlgItem, GetMessageW,
-    GetWindowRect, GetWindowThreadProcessId, HMENU, HTCAPTION, IDC_ARROW, IsWindowVisible,
-    LoadCursorW, MSG, PostMessageW, PostQuitMessage, RegisterClassExW, SC_KEYMENU,
+    GetWindowRect, GetWindowThreadProcessId, HMENU, HTCAPTION, IDC_ARROW, IsHungAppWindow,
+    IsWindowVisible, LoadCursorW, MSG, PostMessageW, PostQuitMessage, RegisterClassExW, SC_KEYMENU,
     SMTO_ABORTIFHUNG, SW_HIDE, SendMessageTimeoutW, SendMessageW, SetForegroundWindow,
     SetWindowDisplayAffinity, ShowWindow, ShowWindowAsync, TranslateMessage, WINDOW_STYLE, WM_APP,
     WM_CHAR, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND, WM_GETTEXT, WM_GETTEXTLENGTH, WM_IME_COMPOSITION,
@@ -595,6 +601,8 @@ enum Children {
     Caption,
     /// 子なしで、IME を外さない (`open_with_ime`。D-133)
     Ime,
+    /// 子なしで、窓を DPI 非対応 (`DPI_AWARENESS_CONTEXT_UNAWARE`) で作る (`open_dpi_unaware`。D-150)
+    DpiUnaware,
 }
 
 fn window_thread(
@@ -633,6 +641,24 @@ fn window_thread(
     } else {
         WS_POPUP | WS_VISIBLE | WS_BORDER
     };
+    // 窓の DPI 認識は作ったときのスレッドの文脈で決まる (D-150)。DPI 非対応の窓だけ、作る直前にこのスレッドの文脈を
+    // 非対応にし、作った直後に元へ戻す (このスレッドは窓 1 つ専用だが、窓の手続きの中の処理は OS が窓の文脈に
+    // 切り替えるので、戻しても窓の DPI 認識は変わらない)。`rect` はこのとき論理の座標として解釈される
+    let prev_dpi_context = if children == Children::DpiUnaware {
+        // SAFETY: 引数は windows-sys が定める擬似ハンドルの定数で、ポインタとして参照されない。呼び出したスレッド
+        //         (このフィクスチャの窓の専用スレッド) の文脈だけを変え、前の文脈を返す。失敗なら null。
+        let prev = unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_UNAWARE) };
+        if prev.is_null() {
+            // 文書は失敗時に最後のエラーを設定すると書いていないので、GetLastError を文に載せない
+            let _ = tx.send(Err(
+                "SetThreadDpiAwarenessContext(UNAWARE) が失敗 (null が返った)".to_string(),
+            ));
+            return;
+        }
+        Some(prev)
+    } else {
+        None
+    };
     // SAFETY: クラス名とタイトルは NUL 終端の UTF-16 で、呼び出しの間生きている。親とメニューは null。
     let hwnd = unsafe {
         CreateWindowExW(
@@ -650,10 +676,22 @@ fn window_thread(
             std::ptr::null(),
         )
     };
+    // GetLastError は文脈を戻す前に読む (戻す呼び出しが上書きしうる)
+    let create_err = if hwnd.is_null() {
+        super::last_error()
+    } else {
+        0
+    };
+    if let Some(prev) = prev_dpi_context {
+        // SAFETY: prev は上の SetThreadDpiAwarenessContext が返した、このスレッドの前の文脈 (null でない)。
+        //         呼び出したスレッドの文脈だけを戻す。作った窓の DPI 認識は作ったときの文脈のまま変わらない。
+        let restored = unsafe { SetThreadDpiAwarenessContext(prev) };
+        // 戻す呼び出しは、上で非対応にできた同じスレッドで有効な前の文脈を渡すので、失敗は想定しない
+        debug_assert!(!restored.is_null(), "スレッドの DPI の文脈を戻せない");
+    }
     if hwnd.is_null() {
         let _ = tx.send(Err(format!(
-            "CreateWindowExW が失敗 (GetLastError={})",
-            super::last_error()
+            "CreateWindowExW が失敗 (GetLastError={create_err})"
         )));
         return;
     }
@@ -663,7 +701,7 @@ fn window_thread(
         unsafe { ImmAssociateContextEx(hwnd, std::ptr::null_mut(), 0) };
     }
     let made = match children {
-        Children::None | Children::Caption | Children::Ime => Ok(()),
+        Children::None | Children::Caption | Children::Ime | Children::DpiUnaware => Ok(()),
         Children::Controls => create_controls(hwnd, hinst),
         Children::Password => create_password_edit(hwnd, hinst),
     };
@@ -756,6 +794,14 @@ impl FixtureWindow {
         Self::open_impl(rect, title, Children::Ime)
     }
 
+    /// DPI 非対応 (`DPI_AWARENESS_CONTEXT_UNAWARE`) の窓としてフィクスチャを開く (DPI 非対応の窓の大きさの読みと
+    /// `resize` の実機テスト用。D-150)。窓を作るスレッドの文脈を作る直前に非対応にし、作った直後に戻す。
+    /// `rect` は論理の座標として解釈されるので、表示の倍率が 100% でない画面では物理の矩形が `rect` と違う
+    /// (実際の矩形は `window_rect` / `client_rect` で読む)。子は持たない。DPI 認識の宣言を先に済ませておくのは `open` と同じ。
+    pub fn open_dpi_unaware(rect: Rect, title: &str) -> Result<FixtureWindow, String> {
+        Self::open_impl(rect, title, Children::DpiUnaware)
+    }
+
     fn open_impl(rect: Rect, title: &str, children: Children) -> Result<FixtureWindow, String> {
         // 容量 0 (ランデブー) にする。受け手が実際に受け取ったときだけ send が成功するので、
         // タイムアウトで受け手が去った後に作られたウィンドウは、作ったスレッドが必ず壊す
@@ -783,6 +829,26 @@ impl FixtureWindow {
     /// ウィンドウ全体の矩形 (スクリーン座標)。
     pub fn window_rect(&self) -> Result<Rect, String> {
         screen_rect_of(self.handle())
+    }
+
+    /// 窓が DPI 非対応で作られたか (D-150)。`GetWindowDpiAwarenessContext` の文脈を
+    /// `GetAwarenessFromDpiAwarenessContext` で読み、`DPI_AWARENESS_UNAWARE` と比べる。大きさの読み (GetClientRect
+    /// など) に頼らずに前提を確かめるための口。読み取りだけ。
+    pub fn is_dpi_unaware(&self) -> bool {
+        // SAFETY: このフィクスチャのウィンドウのハンドルを渡すだけ。返る文脈はハンドルの値で、参照も解放もしない。
+        let ctx = unsafe { GetWindowDpiAwarenessContext(self.handle()) };
+        if ctx.is_null() {
+            return false;
+        }
+        // SAFETY: 上で得た null でない DPI の文脈の値を渡すだけ。無効なら DPI_AWARENESS_INVALID が返る。
+        unsafe { GetAwarenessFromDpiAwarenessContext(ctx) == DPI_AWARENESS_UNAWARE }
+    }
+
+    /// 窓が応答していないと OS が見ているか (`IsHungAppWindow`。D-150)。メッセージは送らず、読み取りだけ。
+    /// `stall` で眠らせたフィクスチャが、resize の `not_responding` の閾値 (約 5 秒) を越えていないかを見るため
+    pub fn is_hung(&self) -> bool {
+        // SAFETY: このフィクスチャのウィンドウのハンドルを渡すだけ。無効なハンドルなら 0 が返り、メモリは参照しない。
+        unsafe { IsHungAppWindow(self.handle()) != 0 }
     }
 
     /// 子つきのフィクスチャ (`open_with_controls`) の子の窓の矩形 (スクリーン座標、`GetWindowRect`)。

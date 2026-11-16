@@ -4,11 +4,15 @@ use std::ffi::OsString;
 use std::os::windows::ffi::OsStringExt;
 
 use windows_sys::Win32::Foundation::LPARAM;
-use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, HWND, POINT, RECT};
+use windows_sys::Win32::Foundation::{
+    CloseHandle, GetLastError, HANDLE, HWND, POINT, RECT, SetLastError,
+};
 use windows_sys::Win32::Graphics::Dwm::{
     DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute,
 };
-use windows_sys::Win32::Graphics::Gdi::GetWindowRgnBox;
+use windows_sys::Win32::Graphics::Gdi::{
+    GetWindowRgnBox, MONITOR_DEFAULTTONEAREST, MapWindowPoints, MonitorFromWindow,
+};
 use windows_sys::Win32::Security::{
     GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation,
 };
@@ -16,19 +20,22 @@ use windows_sys::Win32::System::Threading::{
     GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_NAME_NATIVE, PROCESS_NAME_WIN32,
     PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
 };
+use windows_sys::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GA_ROOT, GA_ROOTOWNER, GWL_EXSTYLE, GWL_STYLE, GetAncestor, GetClassNameW,
-    GetForegroundWindow, GetLayeredWindowAttributes, GetWindowDisplayAffinity, GetWindowLongW,
-    GetWindowRect, GetWindowThreadProcessId, HTCAPTION, InternalGetWindowText, IsHungAppWindow,
-    IsIconic, IsWindow, IsWindowVisible, LWA_ALPHA, LWA_COLORKEY, PostMessageW, SMTO_ABORTIFHUNG,
-    SendMessageTimeoutW, SetForegroundWindow, WDA_EXCLUDEFROMCAPTURE, WM_CLOSE, WM_NCHITTEST,
-    WS_CAPTION, WS_EX_LAYERED, WS_EX_LAYOUTRTL, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
-    WindowFromPoint,
+    GetClientRect, GetForegroundWindow, GetLayeredWindowAttributes, GetWindowDisplayAffinity,
+    GetWindowLongW, GetWindowRect, GetWindowThreadProcessId, HTCAPTION, InternalGetWindowText,
+    IsHungAppWindow, IsIconic, IsWindow, IsWindowVisible, IsZoomed, LWA_ALPHA, LWA_COLORKEY,
+    PostMessageW, SMTO_ABORTIFHUNG, SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOMOVE,
+    SWP_NOOWNERZORDER, SWP_NOZORDER, SendMessageTimeoutW, SetForegroundWindow, SetWindowPos,
+    WDA_EXCLUDEFROMCAPTURE, WM_CLOSE, WM_NCHITTEST, WS_CAPTION, WS_EX_LAYERED, WS_EX_LAYOUTRTL,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP, WindowFromPoint,
 };
 
 use crate::device::{
-    CoverTraits, HiddenWindow, StackWindow, TopWindow, WindowInfo, WindowOwner, WindowPresence,
+    CoverTraits, HiddenWindow, StackWindow, TopWindow, WindowGeometry, WindowInfo, WindowOwner,
+    WindowPresence,
 };
 use crate::geometry::{Point, Rect};
 
@@ -771,6 +778,157 @@ pub fn post_close(hwnd: usize) -> bool {
     // SAFETY: ハンドルの値と、引数を持たないメッセージ (wParam と lParam は 0) を渡すだけ。無効なハンドルなら 0 が
     // 返り、メモリは参照しない。
     unsafe { PostMessageW(hwnd as HWND, WM_CLOSE, 0, 0) != 0 }
+}
+
+/// RECT (左上と右下) を `Rect` にする。右が左より小さいか下が上より小さければ (読みが壊れている) None。幅 0 は通す
+/// (中身の無い窓)。
+fn rect_of(r: &RECT) -> Option<Rect> {
+    let w = i64::from(r.right) - i64::from(r.left);
+    let h = i64::from(r.bottom) - i64::from(r.top);
+    if w < 0 || h < 0 {
+        return None;
+    }
+    Some(Rect::new(
+        r.left,
+        r.top,
+        u32::try_from(w).ok()?,
+        u32::try_from(h).ok()?,
+    ))
+}
+
+/// 窓の大きさの読み (D-150)。外側は `GetWindowRect` (見えない縁を含む)、枠は `describe` と同じ DWM の枠 (取れなければ
+/// 外側)、中身は `GetClientRect` を `MapWindowPoints` で RECT として (点 2 つを 1 回で) 画面に写したもの。RECT として
+/// 写すと、右から左のレイアウト (`WS_EX_LAYOUTRTL`) の窓でも left <= right に入れ替えられる (Microsoft Learn の
+/// MapWindowPoints の Remarks。点ごとの `ClientToScreen` は鏡像の窓で幅が負になる)。最大化は `IsZoomed`、DPI は窓が
+/// 主に載っている画面の有効 DPI (`MonitorFromWindow` + `GetDpiForMonitor(MDT_EFFECTIVE_DPI)`。読めなければ None で、
+/// 96 に倒さない)。最小化 (`IsIconic`) と応答しない (`IsHungAppWindow`。メッセージを送らずに読む) も読み、送る直前の
+/// 判定に使う (最小化は `TopWindow::minimized` と 2 重の確認)。
+/// 窓が無ければ `Ok(None)`。窓はあるのに外側・中身が読めない (API の失敗か、右 < 左・下 < 上の壊れた矩形) なら
+/// `Err` (呼ぶ側は 8 にする。「窓が無い」(12) と混ぜない)。読みに失敗した後に `IsWindow` を見直し、その間に窓が
+/// 消えていたなら `Ok(None)` にする。読み取りだけで、メッセージを送らない。
+pub fn geometry(hwnd: usize) -> Result<Option<WindowGeometry>, String> {
+    let h = hwnd as HWND;
+    // SAFETY: ハンドルの値を渡すだけ。無効なハンドルなら 0 が返り、メモリは参照しない。
+    if unsafe { IsWindow(h) } == 0 {
+        return Ok(None);
+    }
+    match read_geometry(h) {
+        Ok(g) => Ok(Some(g)),
+        // SAFETY: 上と同じ。読みの失敗が窓の消滅によるものかを見分ける。
+        Err(_) if unsafe { IsWindow(h) } == 0 => Ok(None),
+        Err(e) => Err(format!("窓 (hwnd {hwnd:#x}) の大きさを読めない: {e}")),
+    }
+}
+
+/// `geometry` の本体。窓があることは呼ぶ側が確かめてある。失敗の理由を文字列で返す。
+fn read_geometry(h: HWND) -> Result<WindowGeometry, String> {
+    let mut o = RECT {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    };
+    // SAFETY: 書き込み可能な RECT を渡すだけ。失敗したら 0 が返る。
+    if unsafe { GetWindowRect(h, &mut o) } == 0 {
+        return Err("GetWindowRect が失敗した".to_string());
+    }
+    let outer = rect_of(&o).ok_or_else(|| format!("外側の矩形が壊れている ({})", rect_text(&o)))?;
+    let frame = frame_rect_with_source(h).map_or(outer, |(r, _)| r);
+    let mut c = RECT {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    };
+    // SAFETY: 書き込み可能な RECT を渡すだけ。失敗したら 0 が返る。
+    if unsafe { GetClientRect(h, &mut c) } == 0 {
+        return Err("GetClientRect が失敗した".to_string());
+    }
+    // MapWindowPoints の 0 は「失敗」と「ずらしが 0 (画面の左上の窓)」の両方でありうるので、前に最後のエラーを 0 に
+    // してから呼び、0 が返ったときだけ GetLastError で見分ける (Microsoft Learn の MapWindowPoints の Return value)。
+    // SAFETY: 引数を持たず、呼んだスレッドの最後のエラーの値を書き換えるだけ。
+    unsafe { SetLastError(0) };
+    // SAFETY: RECT は POINT 2 つ (left/top と right/bottom) と同じ配置で、点の数に 2 を渡す (文書の RECT の使い方)。
+    // 書き込み先は上の RECT の領域だけ。hWndTo の null は画面座標を意味する。
+    let mapped = unsafe {
+        MapWindowPoints(
+            h,
+            std::ptr::null_mut(),
+            (&mut c as *mut RECT).cast::<POINT>(),
+            2,
+        )
+    };
+    if mapped == 0 {
+        // SAFETY: 引数を持たず、呼んだスレッドの最後のエラーの値を読むだけ。
+        let err = unsafe { GetLastError() };
+        if err != 0 {
+            return Err(format!("MapWindowPoints が失敗した (GetLastError {err})"));
+        }
+    }
+    let client =
+        rect_of(&c).ok_or_else(|| format!("中身の矩形が壊れている ({})", rect_text(&c)))?;
+    // SAFETY: ハンドルの値を渡すだけ。無効なハンドルや最大化していない窓なら 0 が返る。
+    let maximized = unsafe { IsZoomed(h) } != 0;
+    // SAFETY: ハンドルの値を渡すだけ。無効なハンドルや最小化していない窓なら 0 が返る。
+    let minimized = unsafe { IsIconic(h) } != 0;
+    // SAFETY: ハンドルの値を渡すだけ。メッセージは送らず、窓のスレッドが一定時間メッセージを汲んでいないかを読む。
+    let hung = unsafe { IsHungAppWindow(h) } != 0;
+    Ok(WindowGeometry {
+        outer,
+        frame,
+        client,
+        maximized,
+        dpi: monitor_dpi(h),
+        minimized,
+        hung,
+    })
+}
+
+/// 壊れた矩形を理由の文に載せる形 (左, 上, 右, 下)。
+fn rect_text(r: &RECT) -> String {
+    format!(
+        "left {} top {} right {} bottom {}",
+        r.left, r.top, r.right, r.bottom
+    )
+}
+
+/// 窓が主に載っている画面の有効 DPI (D-150)。`GetDpiForWindow` は DPI 非対応の窓に 96 を返すので使わない。
+/// 読めなければ None。GetDpiForMonitor の Remarks の一文 (per-monitor の DPI 認識のスレッドで使うべきでない) と、
+/// 同じ頁の表 (PROCESS_PER_MONITOR_DPI_AWARE なら実の値を返す) が食い違う。ai-cu は Per-Monitor V2 を宣言していて
+/// 実の値が要るので、表に従う。
+fn monitor_dpi(h: HWND) -> Option<u32> {
+    // SAFETY: ハンドルの値と旗を渡すだけ。MONITOR_DEFAULTTONEAREST なので、窓が有効なら必ずどれかのモニターを返す。
+    // 無効なハンドルなら null が返りうる (下で見る)。
+    let m = unsafe { MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST) };
+    if m.is_null() {
+        return None;
+    }
+    let (mut dx, mut dy) = (0u32, 0u32);
+    // SAFETY: m は上で得た null でないモニターのハンドル、dx と dy は書き込み可能な u32 (overlay.rs と同じ使い方)。
+    let hr = unsafe { GetDpiForMonitor(m, MDT_EFFECTIVE_DPI, &mut dx, &mut dy) };
+    (hr >= 0 && dx > 0).then_some(dx)
+}
+
+/// 窓の外側の大きさを `w` x `h` にする要求を 1 回置く (D-150)。左上、Z 順、前面は変えない
+/// (`SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER`)。`SWP_ASYNCWINDOWPOS` は、呼んだスレッドと窓の
+/// スレッドの入力の列が別なら、要求を窓のスレッドに置くだけで戻る (Microsoft Learn の SetWindowPos の uFlags) ので、
+/// 応答しないアプリで ai-cu が止まらない (close が SendMessage を避けたのと同じ。D-062)。戻り値は OS が受け付けたかで、
+/// 大きさが届いたかは呼ぶ側が `geometry` で読み直す。入力は送らない。
+/// 失敗なら `Err(GetLastError の値)` (SetWindowPos は失敗時に最後のエラーを設定する。Microsoft Learn の Return value)。
+/// 呼ぶ前に最後のエラーを 0 にしておき、前の呼び出しの残りの値 (たとえば 1400) を失敗の理由と取り違えない。
+/// 応答しない窓へは要求が列に残って後から効くので、呼ぶ側が `geometry` の `hung` を見てから呼ぶ。
+pub fn set_size(hwnd: usize, w: i32, h: i32) -> Result<(), u32> {
+    let flags = SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_ASYNCWINDOWPOS;
+    // SAFETY: 引数を持たず、呼んだスレッドの最後のエラーの値を書き換えるだけ。
+    unsafe { SetLastError(0) };
+    // SAFETY: ハンドルの値と整数を渡すだけ。hWndInsertAfter の null は HWND_TOP と同じ値で、SWP_NOZORDER で無視される。
+    // 無効なハンドルなら 0 が返り、メモリは参照しない。
+    let ok = unsafe { SetWindowPos(hwnd as HWND, std::ptr::null_mut(), 0, 0, w, h, flags) } != 0;
+    if ok {
+        return Ok(());
+    }
+    // SAFETY: 引数を持たず、呼んだスレッドの最後のエラーの値を読むだけ。
+    Err(unsafe { GetLastError() })
 }
 
 /// ウィンドウが入力を受け付ける (無効になっていない) か (D-062)。モーダルのダイアログ (保存の確認など) を開いている

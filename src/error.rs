@@ -185,8 +185,12 @@ pub struct DenyRule {
 pub mod reason {
     /// focus: 対象が見つからない
     pub const NOT_FOUND: &str = "not_found";
-    /// focus: 対象が最小化されている
+    /// focus と resize (7、D-150): 対象が最小化されている
     pub const MINIMIZED: &str = "minimized";
+    /// resize (7): 対象が最大化されている (D-150)。ai-cu は復元しない
+    pub const MAXIMIZED: &str = "maximized";
+    /// resize (7): 対象が応答していない (`IsHungAppWindow`。D-150)。要求が後から効いて重なるので送らない
+    pub const NOT_RESPONDING: &str = "not_responding";
     /// focus: 呼んだ後に対象が閉じられた (または題名が変わった)
     pub const CLOSED: &str = "closed";
     /// focus: 前面は ai-cu を起動した側なのに断られた
@@ -197,7 +201,7 @@ pub mod reason {
     pub const REFUSED_UNKNOWN: &str = "refused_unknown";
     /// MCP: 起動した側を特定できないので実入力を断る
     pub const HOST_UNKNOWN: &str = "host_unknown";
-    /// close: 対象がモーダルのダイアログを開いていて無効 (D-062)
+    /// close と resize: 対象がモーダルのダイアログを開いていて無効 (D-062、D-150)
     pub const TARGET_DISABLED: &str = "target_disabled";
     /// 14: スクリーンセーバーが動いている (D-066)
     pub const SCREENSAVER: &str = "screensaver";

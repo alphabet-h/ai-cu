@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 use crate::config::{EnvLookup, ProcessEnv, dev_forbid_active};
 use crate::device::{
     BackendError, CoverTraits, Desktop, FrameState, HeldInputs, HelperOutcome, HiddenWindow, Image,
-    Indicator, InputDesktop, InputEvent, InputLock, InputSink, StackWindow, TopWindow, WindowInfo,
-    WindowOwner, WindowPresence,
+    Indicator, InputDesktop, InputEvent, InputLock, InputSink, StackWindow, TopWindow,
+    WindowGeometry, WindowInfo, WindowOwner, WindowPresence,
 };
 use crate::geometry::{Point, Rect};
 use crate::win32;
@@ -389,6 +389,26 @@ impl Desktop for Win32Desktop {
         Ok(win32::window::post_close(hwnd))
     }
 
+    fn window_geometry(&self, hwnd: usize) -> Result<Option<WindowGeometry>, BackendError> {
+        focus_allowed(self.fixture_hwnd, &ProcessEnv)?;
+        win32::window::geometry(hwnd).map_err(BackendError::Os)
+    }
+
+    fn set_window_size(
+        &self,
+        hwnd: usize,
+        outer_w: u32,
+        outer_h: u32,
+    ) -> Result<bool, BackendError> {
+        resize_allowed(self.fixture_hwnd, hwnd, &ProcessEnv)?;
+        let (Ok(w), Ok(h)) = (i32::try_from(outer_w), i32::try_from(outer_h)) else {
+            return Err(BackendError::Os(format!(
+                "窓の大きさ {outer_w}x{outer_h} が SetWindowPos の範囲 (i32) を超える"
+            )));
+        };
+        set_size_result(win32::window::set_size(hwnd, w, h))
+    }
+
     fn window_presence(&self, hwnd: usize, pid: u32) -> Result<WindowPresence, BackendError> {
         focus_allowed(self.fixture_hwnd, &ProcessEnv)?;
         Ok(win32::window::presence_of(hwnd, pid))
@@ -519,6 +539,42 @@ pub fn close_allowed(
             crate::config::ENV_DEV_FORBID
         ))),
         None => Ok(()),
+    }
+}
+
+/// `resize` の最下層の拒否 (D-150。`close_allowed` と同じ形)。開発シェルでは大きさを変えない。フィクスチャ専用の装置は
+/// フィクスチャの hwnd だけに送る。純粋な判定なので単体でテストする。
+pub fn resize_allowed(
+    fixture_hwnd: Option<usize>,
+    hwnd: usize,
+    env: &dyn EnvLookup,
+) -> Result<(), BackendError> {
+    match fixture_hwnd {
+        Some(f) if f == hwnd => Ok(()),
+        Some(f) => Err(BackendError::OutOfScope(format!(
+            "大きさを変える対象 (hwnd {hwnd:#x}) がフィクスチャ (hwnd {f:#x}) ではない"
+        ))),
+        None if dev_forbid_active(env) => Err(BackendError::Forbidden(format!(
+            "開発シェル ({}) ではウィンドウの大きさを変えない。フィクスチャ限定のテストを使う",
+            crate::config::ENV_DEV_FORBID
+        ))),
+        None => Ok(()),
+    }
+}
+
+/// `SetWindowPos` の失敗の `GetLastError` の値のうち、窓が無い (無効なハンドル) を表すもの (`ERROR_INVALID_WINDOW_HANDLE`)
+const ERROR_INVALID_WINDOW_HANDLE: u32 = 1400;
+
+/// `win32::window::set_size` の結果を `set_window_size` の形に写す (D-150)。置けたら `Ok(true)`、窓が無い (1400) なら
+/// `Ok(false)` (実行器が 12)、それ以外の失敗は `BackendError::Os` (8。文に GetLastError の値を載せる)。純関数なので
+/// Win32 を呼ばずに単体でテストする。
+fn set_size_result(r: Result<(), u32>) -> Result<bool, BackendError> {
+    match r {
+        Ok(()) => Ok(true),
+        Err(ERROR_INVALID_WINDOW_HANDLE) => Ok(false),
+        Err(e) => Err(BackendError::Os(format!(
+            "窓の大きさを変える要求 (SetWindowPos) が失敗した (GetLastError {e})"
+        ))),
     }
 }
 
@@ -879,6 +935,17 @@ mod tests {
             uia_error(UiaError::TimedOut("30 秒で時間切れ".into())),
             BackendError::TimedOut("30 秒で時間切れ".into())
         );
+    }
+
+    /// SetWindowPos の失敗の写し: 置けたら true、無効なハンドル (1400) は false (12)、それ以外は Os (8) で文に値 (D-150)
+    #[test]
+    fn set_size_result_maps_invalid_handle_to_false_and_other_errors_to_os() {
+        assert_eq!(set_size_result(Ok(())), Ok(true));
+        assert_eq!(set_size_result(Err(1400)), Ok(false));
+        match set_size_result(Err(5)) {
+            Err(BackendError::Os(m)) => assert!(m.contains("GetLastError 5"), "{m}"),
+            other => panic!("Os でない: {other:?}"),
+        }
     }
 
     /// 枠を出せない警告は、同じ文なら 1 回だけ書く。違う文はそれぞれ 1 回 (D-093)
@@ -1399,6 +1466,28 @@ mod tests {
         let desktop = Win32Desktop::for_fixture(scope());
         assert!(matches!(
             desktop.post_close(0xDEAD),
+            Err(BackendError::OutOfScope(_))
+        ));
+    }
+
+    /// resize の最下層 (D-150): 開発シェルでは大きさを変えない。フィクスチャ専用の装置はフィクスチャの hwnd だけ
+    #[test]
+    fn forbid_real_input_resize_refused_in_dev_shell_and_limited_to_fixture() {
+        let dev = MapEnv::new(&[(ENV_DEV_FORBID, "1")]);
+        assert!(matches!(
+            resize_allowed(None, 0x10, &dev),
+            Err(BackendError::Forbidden(m)) if m.contains("大きさを変えない")
+        ));
+        assert!(resize_allowed(None, 0x10, &MapEnv::default()).is_ok());
+        assert!(resize_allowed(Some(0x10), 0x10, &dev).is_ok());
+        assert!(matches!(
+            resize_allowed(Some(0x10), 0x20, &MapEnv::default()),
+            Err(BackendError::OutOfScope(_))
+        ));
+        // フィクスチャ専用の装置は、フィクスチャ以外の大きさを変えない (Win32 を呼ぶ前に断る)
+        let desktop = Win32Desktop::for_fixture(scope());
+        assert!(matches!(
+            desktop.set_window_size(0xDEAD, 100, 100),
             Err(BackendError::OutOfScope(_))
         ));
     }
