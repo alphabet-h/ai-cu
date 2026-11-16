@@ -5212,6 +5212,51 @@ mod tests {
         }
     }
 
+    /// D-152: 撮影の許可が無い設定では、一手ずつの focus / resize の --title と close は 4 (rule は撮影の軸、hint は
+    /// 専用の文) で、窓に何もしない
+    #[test]
+    fn step_title_naming_refused_without_capture() {
+        let env = pixel_env(
+            "cli-step-title-no-capture",
+            "[general]\ninput_enabled = true\ncapture_enabled = false\n",
+        );
+        for args in [
+            &["focus", "notepad.exe", "--title", "a.txt"][..],
+            &[
+                "resize",
+                "notepad.exe",
+                "--title",
+                "a.txt",
+                "--width",
+                "800",
+                "--height",
+                "600",
+            ][..],
+            &["close", "notepad.exe", "--title", "a.txt"][..],
+        ] {
+            let world = World::new().shared();
+            match pixel_go(args, &env, &world) {
+                Outcome::Json { code: 4, value, .. } => {
+                    assert_eq!(value["error"]["code"], "policy_denied", "{args:?}: {value}");
+                    assert_eq!(
+                        value["error"]["rule"], "general.capture_enabled",
+                        "{args:?}: {value}"
+                    );
+                    assert_eq!(
+                        value["error"]["hint"],
+                        crate::hint::TITLE_NAMING_HINT,
+                        "{args:?}: {value}"
+                    );
+                }
+                other => panic!("{args:?}: {other:?}"),
+            }
+            let w = world.borrow();
+            assert!(w.focus_calls.is_empty(), "{args:?}");
+            assert!(w.close_calls.is_empty(), "{args:?}");
+            assert!(w.resize_calls.is_empty(), "{args:?}");
+        }
+    }
+
     /// deny.regions に当たる点は 4 (rule は deny.regions)。撮らない (D-146)
     #[test]
     fn pixel_refuses_point_in_denied_region() {

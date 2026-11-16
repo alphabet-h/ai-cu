@@ -5228,13 +5228,24 @@ mod tests {
         host_pids: &[u32],
         surface: Surface,
     ) -> Result<RunReport, AppError> {
-        let p = policy(ENABLED);
+        exec_on_with(world, &policy(ENABLED), stops, s, host_pids, surface)
+    }
+
+    /// `exec_on` の設定を渡せる形 (D-152 の撮影の許可が無い設定で補助の経路を通すため)
+    fn exec_on_with(
+        world: &Rc<RefCell<World>>,
+        p: &Policy,
+        stops: &mut StopSet,
+        s: &Script,
+        host_pids: &[u32],
+        surface: Surface,
+    ) -> Result<RunReport, AppError> {
         let mut sink = MockSink(world.clone());
         let desktop = MockDesktop(world.clone());
         let mut clock = MockClock(world.clone());
         let mut images = MemoryImages::default();
         Executor {
-            policy: &p,
+            policy: p,
             sink: &mut sink,
             desktop: &desktop,
             clock: &mut clock,
@@ -12208,6 +12219,39 @@ mod tests {
                     "readable={readable}: {}",
                     e.message
                 );
+            }
+        }
+    }
+
+    /// D-152: MCP の補助プロセスで前面にした経路 (helper = true) も、撮影の許可が無ければ結果の title を null にし、
+    /// 結果の JSON のどこにも題名を出さない。撮影の許可があれば題名を出す (対照)
+    #[test]
+    fn focus_helper_hides_title_without_capture() {
+        let s = script(r#"{"type":"focus","process":"notepad.exe"}"#);
+        for (p, readable) in [(policy(NO_CAPTURE), false), (policy(ENABLED), true)] {
+            let world = refused_world(Some(terminal()));
+            {
+                let mut w = world.borrow_mut();
+                w.top[0].info.title = "a.txt - メモ帳".into();
+                w.helper = HelperOutcome::Accepted;
+            }
+            let report =
+                exec_on_with(&world, &p, &mut StopSet::new(), &s, &[1], Surface::Mcp).unwrap();
+            assert_eq!(report.focused.len(), 1, "readable={readable}");
+            assert_eq!(report.focused[0].hwnd, 0x20);
+            assert!(report.focused[0].helper, "補助の経路を通った");
+            assert_eq!(world.borrow().helper_calls, vec![0x20]);
+            let json = serde_json::to_value(&report).unwrap();
+            if readable {
+                assert_eq!(report.focused[0].title.as_deref(), Some("a.txt - メモ帳"));
+            } else {
+                assert_eq!(report.focused[0].title, None);
+                assert_eq!(
+                    json["focused"][0].get("title"),
+                    Some(&serde_json::Value::Null),
+                    "{json}"
+                );
+                assert!(!json.to_string().contains("メモ帳"), "{json}");
             }
         }
     }

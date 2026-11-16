@@ -6279,6 +6279,110 @@ mod tests {
         assert_eq!(w.foreground.as_ref().unwrap().hwnd, host.hwnd);
     }
 
+    /// D-152 の端から端まで: 撮影の許可が無い床では、title つきの focus / resize と close は 4 (rule は撮影の軸、
+    /// fix つき、hint は専用の文) で窓に何もしない。title なしの focus と resize は成功し、結果の title は null で、
+    /// 応答のどこにも窓の題名を出さない
+    #[test]
+    fn mcp_title_naming_refused_and_titles_hidden_without_capture() {
+        let dir = unique_temp_dir("mcp-no-capture-titles");
+        let floor = floor_file(
+            &dir,
+            "[general]\ninput_enabled = true\ncapture_enabled = false\n",
+        );
+        let mut f = Fixture::new(MapEnv::default());
+        let world = f.world.clone();
+        let mut target = window("notepad.exe", "Notepad");
+        target.hwnd = 0x20;
+        target.pid = 7;
+        target.title = "a.txt - メモ帳".into();
+        {
+            let mut w = world.borrow_mut();
+            w.foreground = Some(window("Zed.exe", "Zed::Window"));
+            w.top = vec![crate::device::TopWindow {
+                info: target,
+                rect: Some(Rect::new(100, 100, 1000, 700)),
+                minimized: false,
+            }];
+            w.geometry.insert(
+                0x20,
+                crate::device::WindowGeometry {
+                    outer: Rect::new(100, 100, 1000, 700),
+                    frame: Rect::new(107, 100, 986, 693),
+                    client: Rect::new(108, 131, 984, 661),
+                    maximized: false,
+                    dpi: Some(96),
+                    minimized: false,
+                    hung: false,
+                },
+            );
+        }
+        let mut s = f.server(paths(&floor));
+        // (a) 題名での名指しは 4
+        for (id, (tool, args)) in [
+            (
+                "focus",
+                json!({ "process": "notepad.exe", "title": "a.txt" }),
+            ),
+            (
+                "resize",
+                json!({ "process": "notepad.exe", "title": "a.txt", "width": 800, "height": 600 }),
+            ),
+            (
+                "close",
+                json!({ "process": "notepad.exe", "title": "a.txt" }),
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let r = reply(&mut s, &call(id as i64 + 1, tool, args));
+            assert_eq!(r["result"]["isError"], true, "{tool}: {r}");
+            let v = text_json(&r);
+            assert_eq!(v["error"]["code"], "policy_denied", "{tool}: {v}");
+            assert_eq!(v["error"]["exit_code"], 4, "{tool}: {v}");
+            assert_eq!(
+                v["error"]["hint"],
+                crate::hint::TITLE_NAMING_HINT,
+                "{tool}: {v}"
+            );
+            assert_eq!(v["error"]["rule"], "general.capture_enabled", "{tool}: {v}");
+            assert!(
+                v["error"]["fix"].as_str().is_some_and(|s| !s.is_empty()),
+                "{tool}: {v}"
+            );
+            let w = world.borrow();
+            assert!(w.focus_calls.is_empty(), "{tool}");
+            assert!(w.close_calls.is_empty(), "{tool}");
+            assert!(w.resize_calls.is_empty(), "{tool}");
+        }
+        // (b) title なしの focus と resize は成功し、題名を出さない
+        let r = reply(
+            &mut s,
+            &call(10, "focus", json!({ "process": "notepad.exe" })),
+        );
+        assert_eq!(r["result"]["isError"], false, "{r}");
+        let v = text_json(&r);
+        assert_eq!(v["focused"][0]["hwnd"], 0x20, "{v}");
+        assert_eq!(v["focused"][0].get("title"), Some(&Value::Null), "{v}");
+        assert!(!r.to_string().contains("メモ帳"), "{r}");
+        let r = reply(
+            &mut s,
+            &call(
+                11,
+                "resize",
+                json!({ "process": "notepad.exe", "width": 800, "height": 600 }),
+            ),
+        );
+        assert_eq!(r["result"]["isError"], false, "{r}");
+        let v = text_json(&r);
+        assert_eq!(v["resized"][0]["hwnd"], 0x20, "{v}");
+        assert_eq!(v["resized"][0].get("title"), Some(&Value::Null), "{v}");
+        assert!(!r.to_string().contains("メモ帳"), "{r}");
+        let w = world.borrow();
+        assert_eq!(w.focus_calls, vec![0x20]);
+        assert_eq!(w.resize_calls.len(), 1);
+    }
+
     /// 手引きの MCP の節は、補助プロセスで前面化を試すことと、それでも断られたら人に頼むことを書く (D-057)
     #[test]
     fn guide_explains_focus_helper_for_mcp() {
