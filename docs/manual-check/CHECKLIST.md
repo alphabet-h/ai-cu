@@ -1254,7 +1254,7 @@ target/release/ai-cu.exe resize notepad.exe --title <題> --width 1280 --height 
 target/release/ai-cu.exe windows
 ```
 - [ ] 終了コード `0`。`resized[0]` の `area` が `client`、`logical` が true、`dpi` が `120`、`requested` が `{"width": 1600, "height": 900}`、`exact` が true
-- [ ] `resized[0].client` の `w` と `h` が `1600` と `900` (物理)。`frame` は `client` より題名の帯とメニューの分だけ大きい (差を記録する)
+- [ ] `resized[0].client` の `w` と `h` が `1600` と `900` (物理)。`frame` と `client` の差を記録する (Windows 11 のメモ帳は題名の帯を自前で描き、中身が窓全体に広がるので、差は縁の数 px だけ。題名の帯のある古い形の窓なら帯とメニューの分だけ大きい)
 - [ ] `windows` のメモ帳の `rect` の左上が `<X0> <Y0>` のまま (左上が動いていない)
 - [ ] `windows` の `foreground` が準備で控えた端末のまま (前面を変えていない)
 
