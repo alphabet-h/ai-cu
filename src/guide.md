@@ -144,6 +144,7 @@ ai-cu pixel 2546,965 2600,965    # 2 点の色を読む (点は X,Y の形。オ
 - 入力欄を `click` して続けて `type` / `key` を書くと、間に 200 ミリ秒待つ (最初の文字が落ちるのを避ける)。それでも先頭が欠けるアプリでは、間に `wait` (300〜500) を書く。`text` で値を読めない入力欄 (gpui など) は、撮って確かめる
 - `key` の例: `ctrl+s`、`alt+tab`、`enter`、`f5`、`shift+left`。`Win` を含む組み合わせ、`Alt+F4`、`Ctrl+Alt+` 系、`Ctrl+Shift+Esc`、`Ctrl+Esc`、`PrintScreen` (修飾キーにかかわらず。画面は `screenshot` か `shot` で撮る) は常に拒否される (設定でも許可できない。`modifiers` に `ctrl` と `alt` を両方書いたクリックも)
 - 窓のタイトルバーの `drag` は窓がカーソルの後から動くので、1 歩を掴んだ点から進む向きの窓の端までの距離の半分以下にする (`steps` を増やし、`duration_ms` は 1 歩 50 ms ほど)。各点の下が許可された窓かを見るため
+- マウスの点がモニターの間の隙間なら 7 の `off_monitor`、別のアプリが絞ったカーソルの動く範囲 (ClipCursor) の外なら 7 の `cursor_clipped` で、送らずに断る (`error.detail.clip` が範囲。範囲の中の点を選び直す)。送った後に範囲へ寄せられて止まったときは 6 の `cursor_clipped` で、人の操作ではない
 - 1 回の操作列は短く保つ (数個から十数個)。長い手順は、区切りごとに撮って確かめながら進める
 - `screenshot`、`wait_stable`、`wait_change` の `region` は必ず書く (省略すると全画面になる)。`path` は絶対パスで書く (相対パスは ai-cu を起動した作業ディレクトリが基準)
 - `wait_stable` / `wait_change` は撮るたびに `screenshot` と同じ判定を通す (待つ間に deny の窓が現れたら 7)。動き続ける部分 (動画、スピナー、点滅) は `region` から外すか `threshold` を上げる。狭い `region` の `wait_change` はキャレットの点滅でも満たしうる

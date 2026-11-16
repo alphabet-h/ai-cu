@@ -22,7 +22,11 @@
 //!
 //! 修飾キーつきのクリックの実機テスト用に、左ボタンの押下の時点の修飾キーの状態、キーの離し、`SC_KEYMENU` を記録する。
 //! `SC_KEYMENU` は既定の処理に渡さず捨てる (メニューのモードに残らないように。D-137)。
+//!
+//! `clip_cursor_for_test` はカーソルの動く範囲 (`ClipCursor`) をフィクスチャの中に数秒だけ掛ける (ClipCursor の範囲の
+//! 外の点を断るガードの実機テスト用。`ClipCursorGuard` の `Drop` と見張りのスレッドで必ず外す。D-151)。
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
@@ -48,17 +52,18 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, SetFocus, VK_CONTROL, VK_MENU, VK_SHIFT,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    BS_PUSHBUTTON, CS_DBLCLKS, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
-    ES_AUTOHSCROLL, ES_MULTILINE, ES_PASSWORD, ES_READONLY, GetClientRect, GetDlgItem, GetMessageW,
-    GetWindowRect, GetWindowThreadProcessId, HMENU, HTCAPTION, IDC_ARROW, IsHungAppWindow,
-    IsWindowVisible, LoadCursorW, MSG, PostMessageW, PostQuitMessage, RegisterClassExW, SC_KEYMENU,
-    SMTO_ABORTIFHUNG, SW_HIDE, SendMessageTimeoutW, SendMessageW, SetForegroundWindow,
-    SetWindowDisplayAffinity, ShowWindow, ShowWindowAsync, TranslateMessage, WINDOW_STYLE, WM_APP,
-    WM_CHAR, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND, WM_GETTEXT, WM_GETTEXTLENGTH, WM_IME_COMPOSITION,
-    WM_IME_ENDCOMPOSITION, WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDBLCLK,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCHITTEST, WM_PAINT,
-    WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSCOMMAND, WM_SYSKEYDOWN, WM_SYSKEYUP, WNDCLASSEXW,
-    WS_BORDER, WS_CHILD, WS_CLIPCHILDREN, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
+    BS_PUSHBUTTON, CS_DBLCLKS, ClipCursor, CreateWindowExW, DefWindowProcW, DestroyWindow,
+    DispatchMessageW, ES_AUTOHSCROLL, ES_MULTILINE, ES_PASSWORD, ES_READONLY, GetClientRect,
+    GetDlgItem, GetMessageW, GetWindowRect, GetWindowThreadProcessId, HMENU, HTCAPTION, IDC_ARROW,
+    IsHungAppWindow, IsWindowVisible, LoadCursorW, MSG, PostMessageW, PostQuitMessage,
+    RegisterClassExW, SC_KEYMENU, SMTO_ABORTIFHUNG, SW_HIDE, SendMessageTimeoutW, SendMessageW,
+    SetForegroundWindow, SetWindowDisplayAffinity, ShowWindow, ShowWindowAsync, TranslateMessage,
+    WINDOW_STYLE, WM_APP, WM_CHAR, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND, WM_GETTEXT,
+    WM_GETTEXTLENGTH, WM_IME_COMPOSITION, WM_IME_ENDCOMPOSITION, WM_IME_STARTCOMPOSITION,
+    WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+    WM_MOUSEWHEEL, WM_NCHITTEST, WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSCOMMAND,
+    WM_SYSKEYDOWN, WM_SYSKEYUP, WNDCLASSEXW, WS_BORDER, WS_CHILD, WS_CLIPCHILDREN,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
 };
 
 use crate::geometry::{Point, Rect};
@@ -1096,6 +1101,96 @@ impl FixtureWindow {
     }
 }
 
+/// `clip_cursor_for_test` で掛けたカーソルの動く範囲 (`ClipCursor`) を外す値。フィクスチャの実機テスト専用 (D-151)。
+/// カーソルは共有の資源なので、掛けたら必ず外す (Microsoft Learn の ClipCursor)。外す処理は 2 つあり、どちらか先に
+/// 来た方が 1 回だけ外す: `Drop` (パニックで巻き戻るときも) と、`max` 経ったら外す見張りのスレッド (テストが固まっても
+/// 範囲が残らないように)。`Drop` は見張りのスレッドの終わりを待つので、`Drop` の後に見張りが外すことは無い
+#[doc(hidden)]
+pub struct ClipCursorGuard {
+    /// 外したか (見張りと `Drop` のどちらが先でも、`ClipCursor(NULL)` は 1 回だけ)
+    released: Arc<AtomicBool>,
+    /// 見張りを起こす合図 (落とすと見張りの待ちが切れる)
+    wake: Option<mpsc::Sender<()>>,
+    watcher: Option<JoinHandle<()>>,
+}
+
+/// まだ外していなければ範囲を外す (`ClipCursor(NULL)`)。外せなくても続ける (外すのは後始末で、返す先が無い)
+fn release_clip(released: &AtomicBool) {
+    if !released.swap(true, Ordering::SeqCst) {
+        // SAFETY: NULL を渡すと範囲を外すだけで、ポインタは読まれない (Microsoft Learn の ClipCursor)。
+        unsafe { ClipCursor(std::ptr::null()) };
+    }
+}
+
+/// `Rect` を `ClipCursor` の RECT の 4 辺 (左, 上, 右, 下。右と下は含まない) に直す (純関数)。幅か高さが 0 か、
+/// 右か下が i32 に収まらなければ `None`
+fn clip_edges(r: Rect) -> Option<(i32, i32, i32, i32)> {
+    if r.w == 0 || r.h == 0 {
+        return None;
+    }
+    let right = r.x.checked_add(i32::try_from(r.w).ok()?)?;
+    let bottom = r.y.checked_add(i32::try_from(r.h).ok()?)?;
+    Some((r.x, r.y, right, bottom))
+}
+
+/// カーソルの動く範囲を `r` (物理ピクセルの画面座標) に絞り、外す値を返す。フィクスチャの実機テスト専用 (D-151)。
+/// `max` 経つと見張りのスレッドが外す (返した値の `Drop` でも外す)。掛けた時点でカーソルが範囲の外なら、OS が
+/// 範囲の中へ寄せる。`r` が空か、`ClipCursor` か見張りのスレッドの起動に失敗したら `Err` (掛けていれば外してから返す)。
+/// 範囲はフィクスチャの中に置く (判定が壊れていてもクリックがフィクスチャに落ちるように。D-151)。
+/// 製品の経路から呼ばない (実行時ガードを通らずに、利用者と共有のカーソルを絞る)
+#[doc(hidden)]
+pub fn clip_cursor_for_test(r: Rect, max: Duration) -> Result<ClipCursorGuard, String> {
+    let (left, top, right, bottom) =
+        clip_edges(r).ok_or_else(|| format!("範囲が空か大きすぎる: {r}"))?;
+    let rect = RECT {
+        left,
+        top,
+        right,
+        bottom,
+    };
+    // SAFETY: rect は呼び出しの間生きている読み取り専用の RECT。関数はそこを読むだけ。
+    if unsafe { ClipCursor(&rect) } == 0 {
+        return Err(format!(
+            "ClipCursor が失敗 (GetLastError={})",
+            super::last_error()
+        ));
+    }
+    let released = Arc::new(AtomicBool::new(false));
+    let (wake, rx) = mpsc::channel::<()>();
+    let flag = released.clone();
+    let spawned = std::thread::Builder::new()
+        .name("ai-cu-clip-watch".into())
+        .spawn(move || {
+            // 期限切れでも、合図でも、送り手が落ちても外す
+            let _ = rx.recv_timeout(max);
+            release_clip(&flag);
+        });
+    match spawned {
+        Ok(watcher) => Ok(ClipCursorGuard {
+            released,
+            wake: Some(wake),
+            watcher: Some(watcher),
+        }),
+        Err(e) => {
+            release_clip(&released);
+            Err(format!("見張りのスレッドを起こせない ({e})。範囲は外した"))
+        }
+    }
+}
+
+impl Drop for ClipCursorGuard {
+    fn drop(&mut self) {
+        release_clip(&self.released);
+        // 合図を送ってから送り手を落とし、見張りの終わりを待つ (待ちは合図ですぐ切れる)
+        if let Some(wake) = self.wake.take() {
+            let _ = wake.send(());
+        }
+        if let Some(t) = self.watcher.take() {
+            let _ = t.join();
+        }
+    }
+}
+
 impl Drop for FixtureWindow {
     fn drop(&mut self) {
         // 閉じる前に生存の印を偽にする (残った `FixtureStaller` が閉じた後の窓に置かないように。D-108)
@@ -1158,6 +1253,23 @@ mod tests {
         assert!(!may_post(true, 0, me));
         // pid 0 は読めない印なので、0 同士でも置かない
         assert!(!may_post(true, 0, 0));
+    }
+
+    /// 4 辺は右と下を含まない形 (x + w、y + h)。空の範囲と i32 に収まらない辺は掛けない (D-151)
+    #[test]
+    fn clip_edges_converts_rect_and_rejects_empty_or_overflow() {
+        assert_eq!(
+            clip_edges(Rect::new(960, 540, 320, 400)),
+            Some((960, 540, 1280, 940))
+        );
+        assert_eq!(
+            clip_edges(Rect::new(-1920, -10, 1920, 20)),
+            Some((-1920, -10, 0, 10))
+        );
+        assert_eq!(clip_edges(Rect::new(0, 0, 0, 10)), None);
+        assert_eq!(clip_edges(Rect::new(0, 0, 10, 0)), None);
+        assert_eq!(clip_edges(Rect::new(i32::MAX - 5, 0, 10, 10)), None);
+        assert_eq!(clip_edges(Rect::new(0, 0, 10, u32::MAX)), None);
     }
 
     #[test]

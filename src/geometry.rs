@@ -100,6 +100,16 @@ impl Rect {
         self.w == 0 || self.h == 0
     }
 
+    /// 点を矩形の中へ丸める (x は [x, x+w-1]、y は [y, y+h-1]。ClipCursor の範囲への OS の寄せと同じ形。D-151)。
+    /// 幅か高さが 0 なら、その軸は原点に寄せる
+    pub fn clamp_point(&self, p: Point) -> Point {
+        fn axis(v: i32, origin: i32, size: u32) -> i32 {
+            let last = i64::from(origin) + i64::from(size.max(1)) - 1;
+            i64::from(v).clamp(i64::from(origin), last) as i32
+        }
+        Point::new(axis(p.x, self.x, self.w), axis(p.y, self.y, self.h))
+    }
+
     /// この矩形から `other` との重なりを除いた残り (D-077)。重ならなければ自分 1 つ、覆われれば空。
     /// 上の帯、下の帯、重なりの高さの左と右の順で最大 4 つ (幅か高さが 0 のものは入れない)。
     pub fn subtract(&self, other: &Rect) -> Vec<Rect> {
@@ -230,6 +240,15 @@ mod tests {
         assert!(r.contains(Point::new(9, 9)));
         assert!(!r.contains(Point::new(10, 9)));
         assert!(!r.contains(Point::new(-1, 0)));
+    }
+
+    #[test]
+    fn rect_clamp_point_keeps_inside_and_rounds_to_last_pixel() {
+        let r = Rect::new(0, 200, 500, 500);
+        assert_eq!(r.clamp_point(Point::new(100, 300)), Point::new(100, 300));
+        assert_eq!(r.clamp_point(Point::new(800, 100)), Point::new(499, 200));
+        assert_eq!(r.clamp_point(Point::new(-5, 900)), Point::new(0, 699));
+        assert!(r.contains(r.clamp_point(Point::new(i32::MAX, i32::MIN))));
     }
 
     #[test]

@@ -172,7 +172,7 @@ pub enum BackendError {
     OutOfScope(String),
     /// OS の呼び出しの失敗
     Os(String),
-    /// 入力デスクトップが使えない (画面のロック、UAC など。`GetCursorPos` の `ERROR_ACCESS_DENIED`。D-066)
+    /// 入力デスクトップが使えない (画面のロック、UAC など。`GetCursorPos` と GetClipCursor (D-151) の `ERROR_ACCESS_DENIED`。D-066)
     DesktopUnavailable(String),
     /// OS の呼び出しの時間切れ (UIA の読み取りの時間切れ、返らないスレッドの上限、UIA 自身の時間切れ (どの HRESULT かは src/win32/uia.rs の `is_uia_timeout`。フォーカスの判定と、要素と木の読み。要素と木の読みは最初の時間切れで残りを読まずに返る (D-110))。D-104)。8 (`os_error`) に写す
     TimedOut(String),
@@ -315,6 +315,13 @@ pub trait Desktop {
     /// 仮想デスクトップ全体の矩形 (原点は負になりうる)
     fn virtual_screen(&self) -> Result<Rect, BackendError>;
     fn cursor_pos(&self) -> Result<Point, BackendError>;
+    /// 点がどれかのモニターの上か (`MonitorFromPoint` の `MONITOR_DEFAULTTONULL`。モニターの間の隙間は偽。D-151)。
+    /// 失敗の形は無いが、口は他の読みと同じく Result にそろえる
+    fn on_monitor(&self, p: Point) -> Result<bool, BackendError>;
+    /// カーソルの動く範囲 (`GetClipCursor`)。絞られていなければ `None` (読んだ矩形が仮想画面と同じときだけ
+    /// 絞りなしとみなす。`backend::confined_clip`。D-151)。失敗の写しは `cursor_pos` と同じ
+    /// (5 は `DesktopUnavailable`、ほかは `Os`)
+    fn cursor_clip(&self) -> Result<Option<Rect>, BackendError>;
     fn foreground_window(&self) -> Result<Option<WindowInfo>, BackendError>;
     /// 座標の下のウィンドウ (ルートの親)
     fn window_at(&self, p: Point) -> Result<Option<WindowInfo>, BackendError>;

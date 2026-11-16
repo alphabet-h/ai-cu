@@ -232,6 +232,19 @@ pub struct World {
     pub resize_gone: bool,
     /// `window_geometry` が、窓はあるのに読めない (`Err(BackendError::Os)`、8) を返す (D-150)
     pub geometry_broken: bool,
+    /// モニターの矩形 (`on_monitor` が見る。D-151)。空なら `screen` を 1 つのモニターとみなす。既定は空
+    pub monitors: Vec<Rect>,
+    /// カーソルの動く範囲 (ClipCursor。D-151)。None なら絞りなしで `cursor_clip` は `Ok(None)`。
+    /// Some なら sink の移動のカーソルをこの範囲に寄せる (OS の寄せを模す)。既定は None
+    pub clip: Option<Rect>,
+    /// `(n, e)`: 送った束が n 個以上 (`sent.len() >= n`) になってから `cursor_clip` が e を返す (n = 0 なら始めから。D-151)
+    pub clip_fail: Option<(usize, BackendError)>,
+    /// n 回目 (0 始まり) の send の後に `clip` をこの矩形にし、今のカーソルを範囲に寄せる (送った後に別のアプリが
+    /// 範囲を掛けたことを模す。D-151)。既定は空
+    pub clip_after_sends: Vec<(usize, Rect)>,
+    /// `(n, r)`: n 回のカーソルの読みの後 (0 始まりで n 番目の読みの前) に `clip` を r にし、今のカーソルを範囲に寄せる
+    /// (移動を送る前、待ちの途中に別のアプリが範囲を掛けたことを模す。D-151)。既定は空
+    pub clip_after_reads: Vec<(usize, Rect)>,
 }
 
 /// `MockInputLock` への呼び出しの記録 (D-113)。呼ばれた時点のモックの時計の `now_ms`、送ったバッチの数 (`sent.len()`)、
@@ -358,6 +371,11 @@ impl World {
             resize_ignored: false,
             resize_gone: false,
             geometry_broken: false,
+            monitors: Vec::new(),
+            clip: None,
+            clip_fail: None,
+            clip_after_sends: Vec::new(),
+            clip_after_reads: Vec::new(),
         }
     }
 
@@ -388,6 +406,11 @@ pub fn window(process: &str, class: &str) -> WindowInfo {
     }
 }
 
+/// 点を矩形の中へ丸める (x は [x, x+w-1]、y は [y, y+h-1]。ClipCursor の範囲への OS の寄せを模す。D-151)
+fn clamp_to(r: Rect, p: Point) -> Point {
+    r.clamp_point(p)
+}
+
 pub struct MockSink(pub Rc<RefCell<World>>);
 
 impl InputSink for MockSink {
@@ -398,11 +421,24 @@ impl InputSink for MockSink {
         }
         for e in events {
             if let InputEvent::MoveTo { x, y } = e {
-                w.cursor = Point::new(*x, *y);
+                let p = Point::new(*x, *y);
+                w.cursor = match w.clip {
+                    Some(r) => clamp_to(r, p),
+                    None => p,
+                };
             }
         }
         w.sent.push(events.to_vec());
         let n = w.sent.len() - 1;
+        let clip = w
+            .clip_after_sends
+            .iter()
+            .rfind(|(k, _)| *k == n)
+            .map(|(_, r)| *r);
+        if let Some(r) = clip {
+            w.clip = Some(r);
+            w.cursor = clamp_to(r, w.cursor);
+        }
         let moves: Vec<Point> = w
             .user_moves
             .iter()
@@ -444,6 +480,15 @@ impl Desktop for MockDesktop {
         if let Some(p) = moved {
             w.cursor = p;
         }
+        let clip = w
+            .clip_after_reads
+            .iter()
+            .rfind(|(k, _)| *k == n)
+            .map(|(_, r)| *r);
+        if let Some(r) = clip {
+            w.clip = Some(r);
+            w.cursor = clamp_to(r, w.cursor);
+        }
         if let Some((until, e)) = &w.cursor_fail_until_reads
             && n < *until
         {
@@ -455,6 +500,24 @@ impl Desktop for MockDesktop {
             return Err(e.clone());
         }
         Ok(w.cursor)
+    }
+
+    fn on_monitor(&self, p: Point) -> Result<bool, BackendError> {
+        let w = self.0.borrow();
+        if w.monitors.is_empty() {
+            return Ok(w.screen.contains(p));
+        }
+        Ok(w.monitors.iter().any(|m| m.contains(p)))
+    }
+
+    fn cursor_clip(&self) -> Result<Option<Rect>, BackendError> {
+        let w = self.0.borrow();
+        if let Some((n, e)) = &w.clip_fail
+            && w.sent.len() >= *n
+        {
+            return Err(e.clone());
+        }
+        Ok(w.clip)
     }
 
     fn foreground_window(&self) -> Result<Option<WindowInfo>, BackendError> {
@@ -1323,6 +1386,74 @@ mod tests {
         assert_eq!(w.borrow().capture_calls, 3);
     }
 
+    /// `monitors` が空なら画面全体が 1 つのモニター、あればその矩形のどれかの上だけが真 (D-151)
+    #[test]
+    fn mock_on_monitor_defaults_to_screen_and_honors_monitors() {
+        let w = World::new().shared();
+        let d = MockDesktop(w.clone());
+        assert_eq!(d.on_monitor(Point::new(100, 100)), Ok(true));
+        assert_eq!(d.on_monitor(Point::new(-1, 0)), Ok(false), "画面の外");
+        w.borrow_mut().monitors = vec![Rect::new(0, 0, 1920, 1080), Rect::new(2000, 0, 1920, 1080)];
+        assert_eq!(d.on_monitor(Point::new(1950, 500)), Ok(false), "隙間");
+        assert_eq!(d.on_monitor(Point::new(2100, 500)), Ok(true), "2 枚目");
+    }
+
+    /// `cursor_clip` は既定で絞りなし (`Ok(None)`)、`clip` があればそれ、`clip_fail = (n, e)` は
+    /// 送った束が n 個以上になってから e (D-151)
+    #[test]
+    fn mock_cursor_clip_defaults_to_none_and_fails_when_set() {
+        let w = World::new().shared();
+        let d = MockDesktop(w.clone());
+        assert_eq!(d.cursor_clip(), Ok(None));
+        let r = Rect::new(0, 0, 500, 500);
+        w.borrow_mut().clip = Some(r);
+        assert_eq!(d.cursor_clip(), Ok(Some(r)));
+
+        let e = BackendError::Os("GetClipCursor".into());
+        w.borrow_mut().clip_fail = Some((0, e.clone()));
+        assert_eq!(d.cursor_clip(), Err(e.clone()), "(0, e) は始めから");
+
+        let w1 = World::new().shared();
+        w1.borrow_mut().clip_fail = Some((1, e.clone()));
+        let d1 = MockDesktop(w1.clone());
+        assert_eq!(d1.cursor_clip(), Ok(None), "送る前は読める");
+        MockSink(w1.clone())
+            .send(&[InputEvent::MoveTo { x: 10, y: 10 }])
+            .unwrap();
+        assert_eq!(d1.cursor_clip(), Err(e), "1 回送った後は失敗");
+    }
+
+    /// 範囲があれば移動のカーソルを範囲に寄せ、`clip_after_sends` は n 回目の send の後に範囲を掛けて
+    /// 今のカーソルを寄せる (D-151)
+    #[test]
+    fn mock_sink_clamps_moves_into_clip() {
+        let w = World::new().shared();
+        w.borrow_mut().clip = Some(Rect::new(0, 0, 100, 100));
+        MockSink(w.clone())
+            .send(&[InputEvent::MoveTo { x: 500, y: 50 }])
+            .unwrap();
+        assert_eq!(w.borrow().cursor, Point::new(99, 50));
+        assert_eq!(
+            w.borrow().sent,
+            vec![vec![InputEvent::MoveTo { x: 500, y: 50 }]],
+            "送った記録は寄せる前の点"
+        );
+
+        let w = World::new().shared();
+        let r = Rect::new(0, 200, 500, 500);
+        w.borrow_mut().clip_after_sends = vec![(0, r)];
+        let mut sink = MockSink(w.clone());
+        sink.send(&[InputEvent::MoveTo { x: 800, y: 100 }]).unwrap();
+        assert_eq!(w.borrow().cursor, Point::new(499, 200), "0 回目の後に寄る");
+        assert_eq!(w.borrow().clip, Some(r));
+        sink.send(&[InputEvent::MoveTo { x: -5, y: 900 }]).unwrap();
+        assert_eq!(
+            w.borrow().cursor,
+            Point::new(0, 699),
+            "掛けた後の移動も寄る"
+        );
+    }
+
     /// `cursor_fail_after_reads = (n, e)` は n 回目までは読め、その後は e を返す
     #[test]
     fn mock_cursor_fail_after_reads_succeeds_n_times() {
@@ -1362,6 +1493,23 @@ mod tests {
             Ok(Point::new(900, 900)),
             "3 回の読みの後に動いた"
         );
+    }
+
+    /// `clip_after_reads = (n, r)` は n 回の読みの後に範囲を掛け、今のカーソルを寄せる (D-151)
+    #[test]
+    fn mock_clip_after_reads_sets_clip_and_clamps_cursor() {
+        let w = World::new().shared();
+        let r = Rect::new(0, 200, 500, 500);
+        w.borrow_mut().clip_after_reads = vec![(1, r)];
+        let d = MockDesktop(w.clone());
+        assert_eq!(d.cursor_pos(), Ok(Point::new(100, 100)));
+        assert_eq!(d.cursor_clip(), Ok(None), "読む前は範囲なし");
+        assert_eq!(
+            d.cursor_pos(),
+            Ok(Point::new(100, 200)),
+            "1 回の読みの後に寄る"
+        );
+        assert_eq!(d.cursor_clip(), Ok(Some(r)));
     }
 
     fn tree_el(name: &str) -> crate::elements::UiElement {
