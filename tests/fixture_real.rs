@@ -3571,7 +3571,8 @@ fn fixture_real_on_monitor_reads_primary_center_and_outside() {
 /// と一致し、右半分の点の click は送る前に 7 の `cursor_clipped` で断られ、フィクスチャにボタンが届かない。外した後の
 /// `cursor_clip` は `None` (D-151)。範囲はフィクスチャの中なので、判定が壊れていてもクリックはフィクスチャに落ちる。
 /// 範囲は `ClipCursorGuard` の Drop と 10 秒の見張りで必ず外す。テストの前から範囲が掛かっていれば掛けずに止め、
-/// 読み戻しが掛けた矩形と違えば送らずに止める
+/// 読み戻しが掛けた矩形と違えば送らずに止める。限界: 掛ける前の確かめ (範囲が無いこと) と `ClipCursor` の間に
+/// 利用者のアプリが範囲を掛けると、それを上書きし、外すときに消してしまう (窓は短いので許す)
 #[test]
 #[ignore = "実機のフィクスチャ限定。cargo test -- --ignored --test-threads=1"]
 fn fixture_real_click_outside_cursor_clip_is_refused() {

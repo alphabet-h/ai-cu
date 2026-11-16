@@ -1782,7 +1782,7 @@ impl<'a> Server<'a> {
             return Ok(None);
         }
         let mut out = tool_output(outcome);
-        // 人か停止の仕組みが止めた (6 (cursor_clipped を除く。D-151)、予告の間の 10):人が離れるまで次の実入力を断る
+        // 人か停止の仕組みが止めた (6 (cursor_clipped を除く。D-151)、予告の間の 10): 人が離れるまで次の実入力を断る
         if is_input && stopped_by_user {
             self.cooldown = true;
         }
@@ -5316,6 +5316,37 @@ mod tests {
             false,
             "停止の直後でなければ無操作は求めない (D-049)"
         );
+    }
+
+    /// 送った後に別のアプリが範囲 (ClipCursor) を掛けてカーソルを寄せた 6 `cursor_clipped` は人の操作ではないので、
+    /// 止められた後の待ち (cooldown) を立てない。次の実入力は、人が操作中 (無操作が短い) でも 10 で断られない (D-151)
+    #[test]
+    fn mcp_cursor_clipped_stop_does_not_set_cooldown() {
+        let dir = unique_temp_dir("mcp-clip-no-cooldown");
+        let floor = floor_file(&dir, ENABLED);
+        let mut f = Fixture::new(MapEnv::default());
+        let world = f.world.clone();
+        let mut s = f.server(paths(&floor));
+        world.borrow_mut().clip_after_sends =
+            vec![(0, crate::geometry::Rect::new(0, 200, 500, 500))];
+        let r = reply(
+            &mut s,
+            &call(
+                1,
+                "run",
+                json!({ "actions": [{ "type": "click", "x": 800, "y": 100 }, { "type": "wait", "ms": 100 }] }),
+            ),
+        );
+        assert_eq!(exit_code(&r), 6, "{r}");
+        assert_eq!(text_json(&r)["error"]["reason"], "cursor_clipped", "{r}");
+        assert_eq!(world.borrow().sent.len(), 1);
+        world.borrow_mut().clip_after_sends.clear();
+        world.borrow_mut().clip = None;
+        world.borrow_mut().idle_ms = 100;
+        assert_eq!(status_of(&mut s, 2)["cooldown"], false);
+        let r = reply(&mut s, &call(3, "click", json!({ "x": 1, "y": 1 })));
+        assert_eq!(r["result"]["isError"], false, "{r}");
+        assert_eq!(world.borrow().sent.len(), 2);
     }
 
     /// `status` の床: 目印のファイル (作らない) と、target.exe だけを許す (D-073)

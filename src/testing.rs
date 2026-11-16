@@ -242,6 +242,9 @@ pub struct World {
     /// n 回目 (0 始まり) の send の後に `clip` をこの矩形にし、今のカーソルを範囲に寄せる (送った後に別のアプリが
     /// 範囲を掛けたことを模す。D-151)。既定は空
     pub clip_after_sends: Vec<(usize, Rect)>,
+    /// `(n, r)`: n 回のカーソルの読みの後 (0 始まりで n 番目の読みの前) に `clip` を r にし、今のカーソルを範囲に寄せる
+    /// (移動を送る前、待ちの途中に別のアプリが範囲を掛けたことを模す。D-151)。既定は空
+    pub clip_after_reads: Vec<(usize, Rect)>,
 }
 
 /// `MockInputLock` への呼び出しの記録 (D-113)。呼ばれた時点のモックの時計の `now_ms`、送ったバッチの数 (`sent.len()`)、
@@ -372,6 +375,7 @@ impl World {
             clip: None,
             clip_fail: None,
             clip_after_sends: Vec::new(),
+            clip_after_reads: Vec::new(),
         }
     }
 
@@ -404,11 +408,7 @@ pub fn window(process: &str, class: &str) -> WindowInfo {
 
 /// 点を矩形の中へ丸める (x は [x, x+w-1]、y は [y, y+h-1]。ClipCursor の範囲への OS の寄せを模す。D-151)
 fn clamp_to(r: Rect, p: Point) -> Point {
-    fn axis(v: i32, origin: i32, size: u32) -> i32 {
-        let last = i64::from(origin) + i64::from(size.max(1)) - 1;
-        i64::from(v).clamp(i64::from(origin), last) as i32
-    }
-    Point::new(axis(p.x, r.x, r.w), axis(p.y, r.y, r.h))
+    r.clamp_point(p)
 }
 
 pub struct MockSink(pub Rc<RefCell<World>>);
@@ -479,6 +479,15 @@ impl Desktop for MockDesktop {
             .map(|(_, p)| *p);
         if let Some(p) = moved {
             w.cursor = p;
+        }
+        let clip = w
+            .clip_after_reads
+            .iter()
+            .rfind(|(k, _)| *k == n)
+            .map(|(_, r)| *r);
+        if let Some(r) = clip {
+            w.clip = Some(r);
+            w.cursor = clamp_to(r, w.cursor);
         }
         if let Some((until, e)) = &w.cursor_fail_until_reads
             && n < *until
@@ -1484,6 +1493,23 @@ mod tests {
             Ok(Point::new(900, 900)),
             "3 回の読みの後に動いた"
         );
+    }
+
+    /// `clip_after_reads = (n, r)` は n 回の読みの後に範囲を掛け、今のカーソルを寄せる (D-151)
+    #[test]
+    fn mock_clip_after_reads_sets_clip_and_clamps_cursor() {
+        let w = World::new().shared();
+        let r = Rect::new(0, 200, 500, 500);
+        w.borrow_mut().clip_after_reads = vec![(1, r)];
+        let d = MockDesktop(w.clone());
+        assert_eq!(d.cursor_pos(), Ok(Point::new(100, 100)));
+        assert_eq!(d.cursor_clip(), Ok(None), "読む前は範囲なし");
+        assert_eq!(
+            d.cursor_pos(),
+            Ok(Point::new(100, 200)),
+            "1 回の読みの後に寄る"
+        );
+        assert_eq!(d.cursor_clip(), Ok(Some(r)));
     }
 
     fn tree_el(name: &str) -> crate::elements::UiElement {
