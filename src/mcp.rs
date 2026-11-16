@@ -1759,7 +1759,7 @@ impl<'a> Server<'a> {
         // 失敗の結果に mcp:inline の画像を入れるなら、捨てるクライアントがあることを hint に足す (D-136)。
         // 既定の文の置き換えの後に置く (前だと hint が既定の文と一致しなくなり、置き換えが効かない)
         note_inline_images_on_failure(&mut outcome, &images.taken, inline);
-        // 人か停止の仕組みが止めた (6) か、予告の間に人の入力があった (10 の lead_input)。判定は error.rs の 1 か所 (D-093)
+        // 人か停止の仕組みが止めた (6。cursor_clipped を除く。D-151) か、予告の間に人の入力があった (10 の lead_input)。判定は error.rs の 1 か所 (D-093)
         let stopped_by_user = matches!(
             &outcome,
             Outcome::Json { value, .. } if stopped_by_user_json(&value["error"])
@@ -1782,7 +1782,7 @@ impl<'a> Server<'a> {
             return Ok(None);
         }
         let mut out = tool_output(outcome);
-        // 人か停止の仕組みが止めた (6、予告の間の 10): 人が離れるまで次の実入力を断る
+        // 人か停止の仕組みが止めた (6 (cursor_clipped を除く。D-151)、予告の間の 10):人が離れるまで次の実入力を断る
         if is_input && stopped_by_user {
             self.cooldown = true;
         }

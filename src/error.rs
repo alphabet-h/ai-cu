@@ -223,9 +223,11 @@ pub mod reason {
 }
 
 /// JSON にした失敗の error オブジェクト (`to_json()` の `error`) が、人か停止要因に止められた実行のものか (D-093)。
-/// `AppError::stopped_by_user` と同じ判定を、AppError が JSON に変わった後 (MCP のクールダウン) で行う
+/// `AppError::stopped_by_user` と同じ判定を、AppError が JSON に変わった後 (MCP のクールダウン) で行う。
+/// 6 のうち `cursor_clipped` (カーソルの動く範囲への寄せ) は人の操作ではないので除く (D-151)
 pub fn stopped_by_user_json(error: &serde_json::Value) -> bool {
-    error["code"] == ErrorKind::Stopped.code() || error["reason"] == reason::LEAD_INPUT
+    (error["code"] == ErrorKind::Stopped.code() && error["reason"] != reason::CURSOR_CLIPPED)
+        || error["reason"] == reason::LEAD_INPUT
 }
 
 impl AppError {
@@ -287,9 +289,11 @@ impl AppError {
     }
 
     /// 人か停止要因に止められた実行か (D-093): 6 (マウス、目印、取り消し、時間の上限) と、予告の間の人の入力の 10
-    /// (`reason: lead_input`)。実行器はこれが真なら枠を残さない。JSON 版は `stopped_by_user_json`
+    /// (`reason: lead_input`)。実行器はこれが真なら枠を残さない。JSON 版は `stopped_by_user_json`。
+    /// 6 のうち `cursor_clipped` (カーソルの動く範囲への寄せ) は人の操作ではないので除く (D-151)
     pub fn stopped_by_user(&self) -> bool {
-        self.kind == ErrorKind::Stopped || self.reason == Some(reason::LEAD_INPUT)
+        (self.kind == ErrorKind::Stopped && self.reason != Some(reason::CURSOR_CLIPPED))
+            || self.reason == Some(reason::LEAD_INPUT)
     }
 
     pub fn to_json(&self) -> serde_json::Value {
@@ -645,7 +649,7 @@ mod tests {
     }
 
     /// 止められた実行の判定 (D-093) は、AppError と、その `to_json()` の error オブジェクトの両方で同じ答えになる。
-    /// 6 は理由を問わず真、予告の間の 10 (`lead_input`) は真、他の 10 と 7 は偽
+    /// 6 は `cursor_clipped` (D-151) を除いて真、予告の間の 10 (`lead_input`) は真、他の 10 と 7 は偽
     #[test]
     fn stopped_by_user_covers_stopped_and_lead_input() {
         let cases = [
@@ -653,6 +657,15 @@ mod tests {
             (
                 AppError::new(ErrorKind::Stopped, "上限").with_reason(reason::KEYS_HELD),
                 true,
+            ),
+            (
+                AppError::new(ErrorKind::Stopped, "範囲").with_reason(reason::CURSOR_CLIPPED),
+                false,
+            ),
+            (
+                AppError::new(ErrorKind::ForegroundGuard, "範囲")
+                    .with_reason(reason::CURSOR_CLIPPED),
+                false,
             ),
             (
                 AppError::new(ErrorKind::UserActive, "予告").with_reason(reason::LEAD_INPUT),

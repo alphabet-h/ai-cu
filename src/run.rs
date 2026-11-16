@@ -1003,6 +1003,8 @@ struct State {
     /// 直前に自分が送った移動の始点と終点 (この線分から離れたら、利用者が動かしたとみなす)
     prev: Option<Point>,
     expected: Option<Point>,
+    /// この実行で移動 (MoveTo) を含む束を送ったか。送った後のずれだけをカーソルの動く範囲への寄せと読む (D-151)
+    sent_move: bool,
 }
 
 /// 束 `events` を送った後に押されたままのボタン。`held` は送る前に押されたままのボタン。
@@ -1106,6 +1108,7 @@ impl State {
                 InputEvent::MoveTo { x, y } => {
                     self.prev = self.expected;
                     self.expected = Some(Point::new(x, y));
+                    self.sent_move = true;
                 }
                 InputEvent::Button { .. } => {}
                 InputEvent::Key {
@@ -1643,7 +1646,7 @@ impl Executor<'_> {
             if let Some(r) = self.stops.poll() {
                 return Err(Self::stopped(r));
             }
-            self.check_user_mouse(state)?;
+            self.check_user_mouse(state, surface)?;
         }
         if wait_ms > LEAD_INPUT_GRACE_MS
             && let Ok(idle) = self.desktop.idle_ms()
@@ -1849,12 +1852,15 @@ impl Executor<'_> {
         if self.clock.now_ms().saturating_sub(ctx.start_ms) > limit {
             return Err(Self::stopped(StopReason::Deadline { limit_ms: limit }));
         }
-        self.check_user_mouse(state)
+        self.check_user_mouse(state, ctx.surface)
     }
 
     /// 利用者のマウスの移動 (6)。直前に自分が送った移動の線分から閾値より離れていれば止める。
-    /// 停止の確認 (`check_stop`) と予告の間 (D-093) が共有する (判定はここだけ)
-    fn check_user_mouse(&mut self, state: &mut State) -> Result<(), AppError> {
+    /// 停止の確認 (`check_stop`) と予告の間 (D-093) が共有する (判定はここだけ)。
+    /// 閾値を超え、この実行で移動を送った後なら、カーソルの動く範囲 (ClipCursor) を読み、予定の点が範囲の外なら
+    /// 人の操作ではなく範囲への寄せとして 6 `cursor_clipped` にする (D-151)。範囲が読めないか絞られていなければ
+    /// 今どおり人の操作の 6。閾値の内のずれと、移動を送る前 (予告の間、待ちだけの経路) は範囲を読まない
+    fn check_user_mouse(&mut self, state: &mut State, surface: Surface) -> Result<(), AppError> {
         // 監視なしで始めた (ロック中の close、resize、wait、wait_for だけの操作列。D-066、D-068、D-150): 読めるようになった時点の点から監視を始める
         if state.prev.is_none() && state.expected.is_none() {
             match self.desktop.cursor_pos() {
@@ -1871,16 +1877,31 @@ impl Executor<'_> {
             let actual = self.desktop.cursor_pos().map_err(backend_error)?;
             let d = actual.distance_to_segment(prev, expected);
             if d > f64::from(self.policy.mouse_threshold_px()) {
-                // 停止の状況: 読んだカーソルと、直前の移動の線分 (D-065)
+                // 停止の状況: 読んだカーソルと、直前の移動の線分 (D-065)。cursor_clipped の 6 も同じ形に clip を足す
+                let mut detail = serde_json::json!({
+                    "cursor": { "x": actual.x, "y": actual.y },
+                    "from": { "x": prev.x, "y": prev.y },
+                    "expected": { "x": expected.x, "y": expected.y },
+                    "distance_px": d.round() as i64,
+                });
+                if state.sent_move
+                    && let Ok(Some(clip)) = self.desktop.cursor_clip()
+                    && !clip.contains(expected)
+                {
+                    detail["clip"] = serde_json::json!(clip);
+                    return Err(AppError::new(
+                        ErrorKind::Stopped,
+                        format!(
+                            "カーソルがカーソルの動く範囲 (ClipCursor) {clip} に寄せられ、予定の位置 ({}, {}) に届かず ({}, {}) で止まった (人の操作ではない)。残りは送らない",
+                            expected.x, expected.y, actual.x, actual.y
+                        ),
+                    )
+                    .with_reason(reason::CURSOR_CLIPPED)
+                    .with_detail(detail)
+                    .with_hint(hint(Hint::CursorClipped, surface)));
+                }
                 return Err(
-                    Self::stopped(StopReason::UserMouse { distance_px: d }).with_detail(
-                        serde_json::json!({
-                            "cursor": { "x": actual.x, "y": actual.y },
-                            "from": { "x": prev.x, "y": prev.y },
-                            "expected": { "x": expected.x, "y": expected.y },
-                            "distance_px": d.round() as i64,
-                        }),
-                    ),
+                    Self::stopped(StopReason::UserMouse { distance_px: d }).with_detail(detail)
                 );
             }
             // 到着したら線分を終点に縮める。以後は終点からの距離で見る (長い移動を戻る操作を見逃さない)
@@ -8485,6 +8506,124 @@ mod tests {
         assert_eq!(w.point_password_calls, 0);
         assert!(w.sent.iter().any(|b| is_button(b, true)), "{:?}", w.sent);
         assert!(is_button(w.sent.last().unwrap(), false), "{:?}", w.sent);
+    }
+
+    /// 送った後のずれの判定に使う操作列: click (800, 100) の後に待つ (モックの始めのカーソルは (100, 100)。
+    /// click の束は移動を 1 つ含むので、送った後の線分は (100, 100) → (800, 100))
+    const CLICK_THEN_WAIT: &str = r#"{"type":"click","x":800,"y":100},{"type":"wait","ms":100}"#;
+
+    /// 送った後に別のアプリが範囲を掛けてカーソルを寄せ、寄せた点が線分から閾値より離れれば、人の操作ではなく
+    /// 6 `cursor_clipped` で止め、残りを送らない。人に止められた扱い (`stopped_by_user`) にしない (D-151)
+    #[test]
+    fn clip_set_after_send_stops_with_cursor_clipped() {
+        for surface in [Surface::Cli, Surface::Mcp] {
+            let mut w = World::new();
+            w.clip_after_sends = vec![(0, Rect::new(0, 200, 500, 500))];
+            let world = w.shared();
+            let e = exec_on(
+                &world,
+                &mut StopSet::new(),
+                &script(CLICK_THEN_WAIT),
+                &[],
+                surface,
+            )
+            .unwrap_err();
+            assert_eq!(e.kind, ErrorKind::Stopped, "{e}");
+            assert_eq!(e.reason, Some(reason::CURSOR_CLIPPED));
+            let d = detail(&e);
+            assert_eq!(
+                d["clip"],
+                serde_json::json!({"x": 0, "y": 200, "w": 500, "h": 500})
+            );
+            assert_eq!(d["expected"], serde_json::json!({"x": 800, "y": 100}));
+            assert_eq!(d["cursor"], serde_json::json!({"x": 499, "y": 200}));
+            assert_eq!(d["from"], serde_json::json!({"x": 100, "y": 100}));
+            assert_eq!(d["distance_px"].as_i64(), Some(100), "{d}");
+            assert!(100 > i64::from(policy(ENABLED).mouse_threshold_px()));
+            assert!(e.message.contains("予定の位置 (800, 100)"), "{}", e.message);
+            assert!(e.message.contains("(499, 200)"), "{}", e.message);
+            assert!(!e.message.contains("利用者"), "{}", e.message);
+            assert!(!e.stopped_by_user(), "{e:?}");
+            assert!(!crate::error::stopped_by_user_json(&e.to_json()["error"]));
+            let h = e.hint.as_deref().unwrap();
+            assert!(h.ends_with(hint(Hint::CursorClipped, surface)), "{h}");
+            // wait の後には何も送らない (click の束だけ)
+            assert_eq!(world.borrow().sent.len(), 1, "{:?}", world.borrow().sent);
+        }
+    }
+
+    /// 範囲の縁が線分を横切り、寄せた点が線分の上に乗る (閾値の内) なら止めない (D-151)
+    #[test]
+    fn clip_on_segment_within_threshold_does_not_stop() {
+        let mut w = World::new();
+        w.clip_after_sends = vec![(0, Rect::new(0, 0, 500, 500))];
+        let world = w.shared();
+        let (r, _) = exec(
+            &world,
+            &policy(ENABLED),
+            &mut StopSet::new(),
+            &script(CLICK_THEN_WAIT),
+        );
+        r.unwrap();
+        assert_eq!(world.borrow().cursor, Point::new(499, 100));
+    }
+
+    /// 範囲が無いときの人の移動は、今どおり reason の無い 6 (人に止められた扱い)
+    #[test]
+    fn user_move_without_clip_stays_plain_stop() {
+        let mut w = World::new();
+        w.user_moves.push((0, Point::new(1500, 900)));
+        let world = w.shared();
+        let (r, _) = exec(
+            &world,
+            &policy(ENABLED),
+            &mut StopSet::new(),
+            &script(CLICK_THEN_WAIT),
+        );
+        let e = r.unwrap_err();
+        assert_eq!(e.kind, ErrorKind::Stopped, "{e}");
+        assert_eq!(e.reason, None);
+        assert!(detail(&e).get("clip").is_none(), "{:?}", e.detail);
+        assert!(e.stopped_by_user());
+    }
+
+    /// 送った後だけ範囲が読めなければ、隠さずに今どおりの 6 (reason なし)。送る前のガードは読める
+    #[test]
+    fn clip_read_failure_after_send_stays_plain_stop() {
+        let mut w = World::new();
+        w.clip_after_sends = vec![(0, Rect::new(0, 200, 500, 500))];
+        w.clip_fail = Some((1, BackendError::Os("GetClipCursor が失敗".into())));
+        let world = w.shared();
+        let (r, _) = exec(
+            &world,
+            &policy(ENABLED),
+            &mut StopSet::new(),
+            &script(CLICK_THEN_WAIT),
+        );
+        let e = r.unwrap_err();
+        assert_eq!(e.kind, ErrorKind::Stopped, "{e}");
+        assert_eq!(e.reason, None);
+        assert_eq!(world.borrow().sent.len(), 1);
+    }
+
+    /// 移動を送っていない (待ちだけの) 経路は、範囲が掛かっていても今どおり人の操作の 6 (範囲を読まない。
+    /// 何も送っていないのに「予定の位置に届かず」と言わない。D-151)
+    #[test]
+    fn clip_before_any_move_stays_plain_stop() {
+        let mut w = World::new();
+        w.clip = Some(Rect::new(0, 200, 500, 500));
+        w.cursor_moves_after_reads = vec![(2, Point::new(1500, 900))];
+        let world = w.shared();
+        let (r, _) = exec(
+            &world,
+            &policy(ENABLED),
+            &mut StopSet::new(),
+            &script(r#"{"type":"wait","ms":300}"#),
+        );
+        let e = r.unwrap_err();
+        assert_eq!(e.kind, ErrorKind::Stopped, "{e}");
+        assert_eq!(e.reason, None);
+        assert!(world.borrow().sent.is_empty());
     }
 
     const ALLOW_TARGET_AND_NOTEPAD: &str = "[allow]\nprocesses=[\"target\",\"notepad\"]\n";
