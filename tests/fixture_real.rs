@@ -3570,7 +3570,8 @@ fn fixture_real_on_monitor_reads_primary_center_and_outside() {
 /// フィクスチャの左半分にカーソルの動く範囲 (`ClipCursor`) を掛けると、`cursor_clip` の読みが掛けた矩形 (物理ピクセル)
 /// と一致し、右半分の点の click は送る前に 7 の `cursor_clipped` で断られ、フィクスチャにボタンが届かない。外した後の
 /// `cursor_clip` は `None` (D-151)。範囲はフィクスチャの中なので、判定が壊れていてもクリックはフィクスチャに落ちる。
-/// 範囲は `ClipCursorGuard` の Drop と 5 秒の見張りで必ず外す
+/// 範囲は `ClipCursorGuard` の Drop と 10 秒の見張りで必ず外す。テストの前から範囲が掛かっていれば掛けずに止め、
+/// 読み戻しが掛けた矩形と違えば送らずに止める
 #[test]
 #[ignore = "実機のフィクスチャ限定。cargo test -- --ignored --test-threads=1"]
 fn fixture_real_click_outside_cursor_clip_is_refused() {
@@ -3579,9 +3580,21 @@ fn fixture_real_click_outside_cursor_clip_is_refused() {
     let left = Rect::new(c.x, c.y, c.w / 2, c.h);
     let target = f.at(c.w as i32 * 3 / 4, c.h as i32 / 2);
     let desktop = Win32Desktop::for_fixture(f.scope());
+    // 利用者のアプリ (全画面のゲームなど) が既に範囲を掛けていれば、上書きして消さないよう掛けずに中断する
+    let before = desktop.cursor_clip();
+    assert!(
+        matches!(before, Ok(None)),
+        "テストの前から範囲が掛かっている (利用者のアプリの範囲には触れない): {before:?}"
+    );
     let guard =
-        clip_cursor_for_test(left, Duration::from_secs(5)).expect("ClipCursor を掛けられない");
+        clip_cursor_for_test(left, Duration::from_secs(10)).expect("ClipCursor を掛けられない");
     let read = desktop.cursor_clip();
+    // 送る前に、OS が実際に掛けた範囲が左半分そのものか確かめる (ずれていると、判定が壊れたときに寄せた先が
+    // フィクスチャの外になりうる)。合わなければ guard を落としてから止める
+    if !matches!(read, Ok(Some(r)) if r == left) {
+        drop(guard);
+        panic!("読み戻しが掛けた矩形と違うので送らずに止める: set={left} read={read:?}");
+    }
     f.win.clear_events();
     let r = f.execute(&format!(
         r#"{{"type":"click","x":{},"y":{}}}"#,

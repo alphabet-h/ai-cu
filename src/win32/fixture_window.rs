@@ -1105,6 +1105,7 @@ impl FixtureWindow {
 /// カーソルは共有の資源なので、掛けたら必ず外す (Microsoft Learn の ClipCursor)。外す処理は 2 つあり、どちらか先に
 /// 来た方が 1 回だけ外す: `Drop` (パニックで巻き戻るときも) と、`max` 経ったら外す見張りのスレッド (テストが固まっても
 /// 範囲が残らないように)。`Drop` は見張りのスレッドの終わりを待つので、`Drop` の後に見張りが外すことは無い
+#[doc(hidden)]
 pub struct ClipCursorGuard {
     /// 外したか (見張りと `Drop` のどちらが先でも、`ClipCursor(NULL)` は 1 回だけ)
     released: Arc<AtomicBool>,
@@ -1135,7 +1136,9 @@ fn clip_edges(r: Rect) -> Option<(i32, i32, i32, i32)> {
 /// カーソルの動く範囲を `r` (物理ピクセルの画面座標) に絞り、外す値を返す。フィクスチャの実機テスト専用 (D-151)。
 /// `max` 経つと見張りのスレッドが外す (返した値の `Drop` でも外す)。掛けた時点でカーソルが範囲の外なら、OS が
 /// 範囲の中へ寄せる。`r` が空か、`ClipCursor` か見張りのスレッドの起動に失敗したら `Err` (掛けていれば外してから返す)。
-/// 範囲はフィクスチャの中に置く (判定が壊れていてもクリックがフィクスチャに落ちるように。D-151)
+/// 範囲はフィクスチャの中に置く (判定が壊れていてもクリックがフィクスチャに落ちるように。D-151)。
+/// 製品の経路から呼ばない (実行時ガードを通らずに、利用者と共有のカーソルを絞る)
+#[doc(hidden)]
 pub fn clip_cursor_for_test(r: Rect, max: Duration) -> Result<ClipCursorGuard, String> {
     let (left, top, right, bottom) =
         clip_edges(r).ok_or_else(|| format!("範囲が空か大きすぎる: {r}"))?;
