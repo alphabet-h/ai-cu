@@ -230,7 +230,8 @@ pub struct General {
     /// 画面撮影の総スイッチ。既定は false
     #[serde(default)]
     pub capture_enabled: bool,
-    /// パスワードの要素 (UIA の IsPassword) にフォーカスがあるときの type / key を許す。既定は false (D-090)
+    /// パスワードの要素 (UIA の IsPassword) にフォーカスがあるときの type / key と、パスワードの要素の上での
+    /// 右クリックとドロップ (drag の離す点) を許す。既定は false (D-090、D-149)
     #[serde(default)]
     pub password_input: bool,
 }
@@ -809,7 +810,8 @@ version = 1
 input_enabled = false
 # 画面撮影を許すか (既定 false)
 capture_enabled = false
-# パスワード欄にフォーカスがあるときの type / key を許すか (既定 false = パスワードは人が打つ)
+# パスワード欄にフォーカスがあるときの type / key と、パスワード欄の上での右クリックとドロップを許すか
+# (既定 false = パスワードは人が打つ)
 password_input = false
 
 # allow のリストは、空なら制限なし、1 件でもあれば一致が必須。deny は allow より強い。

@@ -435,6 +435,13 @@ impl Desktop for Win32Desktop {
         focused_password_allowed(self.fixture_hwnd, &ProcessEnv)?;
         win32::uia::focused_is_password().map_err(uia_error)
     }
+
+    fn point_is_password(&self, p: Point) -> Result<Option<bool>, BackendError> {
+        // 門は要素の読みと同じ uia_allowed を点の下の根の窓に当てる (開発シェルでは断り、フィクスチャ専用の装置では
+        // 点の下がフィクスチャのときだけ読む)。capture_enabled は通さない (真偽 1 つだけを読む。D-054 の追記、D-149)
+        uia_allowed(self.fixture_hwnd, win32::window::root_at(p), &ProcessEnv)?;
+        win32::uia::point_is_password(p).map_err(uia_error)
+    }
 }
 
 /// UIA の層の誤りを装置の層の誤りに写す (D-104)。時間切れは `TimedOut`、他は今までどおり `Os`

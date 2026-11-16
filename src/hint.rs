@@ -76,6 +76,9 @@ pub enum Hint {
     /// パスワード欄かを確かめる間に前面のウィンドウが変わった (7。D-090)。新しい前面は許可された窓でもありうるので、
     /// 「許可されていない」と言う `KeyboardGuard` の文は使わない
     ForegroundChanged,
+    /// 右クリックかドロップの点の下の要素がパスワード欄で、`general.password_input` が許していない (4。D-149)。
+    /// 何も押していない。左クリックは断らない
+    PasswordFieldMouse,
     /// 予告の間 (枠を出してから動かすまで) に人の入力があった (10。`reason: lead_input`。D-093)
     LeadUserActive,
     /// 1 つの操作のキーの束の途中で、前面が別のプロセスに変わった (7。`reason: target_changed`。D-100)。
@@ -91,7 +94,7 @@ pub enum Hint {
 }
 
 impl Hint {
-    pub const ALL: [Hint; 31] = [
+    pub const ALL: [Hint; 32] = [
         Hint::MouseGuard,
         Hint::KeyboardGuard,
         Hint::Elevated,
@@ -123,6 +126,7 @@ impl Hint {
         Hint::DragGuardMidway,
         Hint::PixelSensitive,
         Hint::PixelUserActive,
+        Hint::PasswordFieldMouse,
     ];
 }
 
@@ -155,6 +159,10 @@ pub const PASSWORD_FIELD_HINT: &str = "何も送っていない。キーと文�
 /// パスワード欄かを確かめる間に前面のウィンドウが変わった (CLI。D-090)
 pub const FOREGROUND_CHANGED_HINT: &str = "何も送っていない。パスワード欄かを確かめる間に前面のウィンドウが変わった (変わった後の窓は error.detail)。`ai-cu windows` や `ai-cu find` で前面とフォーカスを確かめ、必要なら `ai-cu focus` で対象を前面にしてから送り直す";
 const MCP_PASSWORD_FIELD_HINT: &str = "何も送っていない。キーと文字の届く先 (フォーカス) がパスワード欄なので断った。パスワードは AI が打たず、人間に打ってもらう。Enter や Tab などのキーもこの欄では断るので、送信やフォーカスの移動はボタンや別の要素を click して行う (位置は find の道具で確かめる)。打たせてよいなら、人間が設定の general.password_input を true にする (error.fix の文をそのまま人間に伝える。設定は自分で書き換えない)";
+/// 右クリックかドロップの点がパスワード欄 (CLI。D-149)
+pub const PASSWORD_FIELD_MOUSE_HINT: &str = "何も押していない (この操作のボタンの押下から先は何も送っていない)。右クリックかドロップの点 (error.detail.point) の下がパスワードの要素なので断った (右クリックの貼り付けやドロップで、パスワード欄に文字が入りうる)。パスワードは AI が入れず、人間に入れてもらう。左クリックは断らないので、フォーカスの移動や送信のボタンは左クリックで行う (位置は `ai-cu find` で確かめる)。入れさせてよいなら、人間が設定の general.password_input を true にする (error.fix の文をそのまま人間に伝える。設定は自分で書き換えない)";
+/// 右クリックかドロップの点がパスワード欄 (MCP。D-149)
+const MCP_PASSWORD_FIELD_MOUSE_HINT: &str = "何も押していない (この操作のボタンの押下から先は何も送っていない)。右クリックかドロップの点 (error.detail.point) の下がパスワードの要素なので断った (右クリックの貼り付けやドロップで、パスワード欄に文字が入りうる)。パスワードは AI が入れず、人間に入れてもらう。左クリックは断らないので、フォーカスの移動や送信のボタンは左クリックの click で行う (位置は find の道具で確かめる)。入れさせてよいなら、人間が設定の general.password_input を true にする (error.fix の文をそのまま人間に伝える。設定は自分で書き換えない)";
 const MCP_FOREGROUND_CHANGED_HINT: &str = "何も送っていない。パスワード欄かを確かめる間に前面のウィンドウが変わった (変わった後の窓は error.detail)。windows や find の道具で前面とフォーカスを確かめ、必要なら focus の道具で対象を前面にしてから送り直す (run なら先頭に focus)";
 
 /// 押されたままのキーとボタン (D-066)。CLI の文。MCP は再試行の前に `status` を読む文 (`MCP_KEYS_HELD_HINT`。D-073)
@@ -254,6 +262,8 @@ pub fn hint(kind: Hint, surface: Surface) -> &'static str {
         Hint::PasswordField => PASSWORD_FIELD_HINT,
         Hint::ForegroundChanged if mcp => MCP_FOREGROUND_CHANGED_HINT,
         Hint::ForegroundChanged => FOREGROUND_CHANGED_HINT,
+        Hint::PasswordFieldMouse if mcp => MCP_PASSWORD_FIELD_MOUSE_HINT,
+        Hint::PasswordFieldMouse => PASSWORD_FIELD_MOUSE_HINT,
         Hint::LeadUserActive if mcp => MCP_LEAD_USER_ACTIVE_HINT,
         Hint::LeadUserActive => LEAD_USER_ACTIVE_HINT,
         Hint::TargetChanged if mcp => MCP_TARGET_CHANGED_HINT,
@@ -576,6 +586,7 @@ mod tests {
                 Hint::DragGuardMidway => 28,
                 Hint::PixelSensitive => 29,
                 Hint::PixelUserActive => 30,
+                Hint::PasswordFieldMouse => 31,
             }
         }
         let mut seen: Vec<usize> = Hint::ALL.iter().map(|h| index(*h)).collect();
@@ -614,6 +625,7 @@ mod tests {
             Hint::WindowsEmpty,
             Hint::PasswordField,
             Hint::ForegroundChanged,
+            Hint::PasswordFieldMouse,
             Hint::LeadUserActive,
             Hint::TargetChanged,
             Hint::DragGuardMidway,
@@ -724,6 +736,25 @@ mod tests {
             assert!(h.starts_with("何も送っていない。"), "{h}");
             assert!(h.contains("前面のウィンドウが変わった"), "{h}");
             assert!(!h.contains("許可されていない"), "{h}");
+        }
+    }
+
+    /// 右クリックとドロップの点のパスワード欄の 4 の文 (D-149): 何も押していないこと、左クリックは断らないこと、
+    /// 許す設定の名前、設定を自分で書き換えないことを書く
+    #[test]
+    fn password_field_mouse_hint() {
+        for s in SURFACES {
+            let h = hint(Hint::PasswordFieldMouse, s);
+            for word in [
+                "何も押していない",
+                "何も送っていない",
+                "左クリック",
+                "general.password_input",
+                "自分で書き換えない",
+                "error.fix",
+            ] {
+                assert!(h.contains(word), "{word}: {h}");
+            }
         }
     }
 

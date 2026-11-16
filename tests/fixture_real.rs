@@ -2964,6 +2964,57 @@ fn fixture_real_type_into_password_edit_refused_by_default_and_allowed_by_config
     );
 }
 
+/// パスワード欄の右クリック (D-149): フィクスチャ限定の実入力で、既定の設定 (password_input 偽) のまま
+/// パスワードの EDIT の中心を右クリックすると、点の下の要素の IsPassword を読んで 4 (rule が `general.password_input`) で
+/// 断り、何も送っていない (誤りの進み具合が executed 0・partial 偽。`detail.point` が押す点)。同じ点の左クリックは
+/// 断らずに通る (D-090 の hint の「フォーカスの移動はクリックで」を保つ)。左クリックを後に置くのは、断った後に
+/// ボタンが押されたままでない (10 にならない) ことも見るため
+#[test]
+#[ignore = "実機のフィクスチャ限定。cargo test -- --ignored --test-threads=1"]
+fn fixture_real_password_right_click_refused() {
+    let f = Fixture::open_with_password("password-right-click");
+    let edit = f
+        .win
+        .child_rect(FIXTURE_PASSWORD_ID)
+        .expect("パスワード欄の矩形");
+    assert!(
+        f.client.contains_rect(&edit),
+        "パスワード欄がクライアント領域 {} からはみ出す: {edit}",
+        f.client
+    );
+    let c = edit.center();
+    f.activate();
+
+    // (1) 右クリック: 押す前に読んで 4。何も送っていない
+    let r = f.execute(&format!(
+        r#"{{"type":"click","x":{},"y":{},"button":"right"}}"#,
+        c.x, c.y
+    ));
+    let e = match r {
+        Ok(rep) => panic!("パスワード欄の右クリックが通った: {rep:?}"),
+        Err(e) => e,
+    };
+    assert_password_refused(Err(e.clone()), "右クリック");
+    let d = e.detail.as_ref().expect("detail");
+    assert_eq!(d["point"]["x"], c.x, "{d}");
+    assert_eq!(d["point"]["y"], c.y, "{d}");
+    let p = e.progress.as_ref().expect("progress");
+    assert_eq!(p["executed"], 0, "{p}");
+    assert_eq!(p["partial"], false, "{p}");
+
+    // (2) 同じ点の左クリックは通る (押されたままのボタンが無いので 10 にもならない)
+    let r = f
+        .execute(&format!(r#"{{"type":"click","x":{},"y":{}}}"#, c.x, c.y))
+        .expect("パスワード欄の左クリック");
+    assert_eq!(r.executed, 1);
+    assert_eq!(
+        f.win.password_edit_text().as_deref(),
+        Ok(FIXTURE_PASSWORD_TEXT),
+        "欄の文字列が変わった"
+    );
+    println!("FIXTURE password right_click refused=1 left_click=ok");
+}
+
 /// `wait_for` の文字列の条件が満たされる側 (D-068、D-088): 子つきのフィクスチャの窓に `"text":"二行目"` を付けると、
 /// 1 回目の確認でエディットが満たし、`waited[0].element` の種類がエディットの種類、矩形がエディットの窓の矩形になる。
 /// 読むだけ (入力も撮影もしない)
