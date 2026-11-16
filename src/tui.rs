@@ -1345,6 +1345,24 @@ impl App {
                         )
                     });
                 }
+                for z in &r.resized {
+                    lines.push(format!(
+                        "大きさを変えた actions[{}]: {} \"{}\" 枠 {}x{} (中身 {}x{})",
+                        z.action_index,
+                        z.process,
+                        z.title,
+                        z.frame.w,
+                        z.frame.h,
+                        z.client.w,
+                        z.client.h
+                    ));
+                    if !z.exact {
+                        lines.push(format!(
+                            "⚠ actions[{}]: 狙い {}x{} ({}) に届かなかった (アプリの最小・最大の大きさなど。上の行が実際の大きさ)",
+                            z.action_index, z.requested.width, z.requested.height, z.area
+                        ));
+                    }
+                }
                 self.overlay = Overlay::RunResult {
                     title: "実行した".into(),
                     lines,
@@ -6139,6 +6157,63 @@ mod tests {
         let text = finish(&mut a, info(true, false));
         assert!(has(&text, "閉じた actions[0]"), "{text}");
         assert!(!has(&text, "隠れた"), "{text}");
+    }
+
+    /// resize (D-150): 確認の画面は大きさを変えることを言い、結果の画面は実際の大きさと、届かなかったことを出す
+    #[test]
+    fn tui_confirm_and_result_describe_resize() {
+        let r = report(
+            r#"{"type":"resize","process":"notepad.exe","title":"a.txt","width":1280,"height":720}"#,
+            ENABLED,
+        );
+        assert_eq!(r.first_batch, Some(FirstBatch::Resize));
+        assert_eq!(r.resizes, 1);
+        let lines = confirm_lines(&r).join("\n");
+        assert!(lines.contains("窓の大きさを変える"), "{lines}");
+        assert!(lines.contains("resize が 1 件"), "{lines}");
+        assert!(!lines.contains("待ちと撮影だけ"), "{lines}");
+        let mut a = app();
+        a.on_preflight(Ok(r));
+        a.update(&press(KeyCode::Char('y')));
+        a.set_self_window(Some(me()));
+        a.tick(RUN_COUNTDOWN_MS);
+        let info = |exact, cw, ch| crate::run::ResizeInfo {
+            action_index: 0,
+            hwnd: 0x20,
+            process: "notepad.exe".into(),
+            title: "a.txt - メモ帳".into(),
+            area: "client",
+            logical: false,
+            dpi: Some(120),
+            requested: crate::run::Size {
+                width: 1280,
+                height: 720,
+            },
+            frame: Rect::new(100, 100, cw + 2, ch + 32),
+            client: Rect::new(101, 131, cw, ch),
+            exact,
+        };
+        let finish = |a: &mut App, z: crate::run::ResizeInfo| {
+            a.on_run_finished(Ok(crate::run::RunReport {
+                executed: 1,
+                screenshots: Vec::new(),
+                focused: Vec::new(),
+                closed: Vec::new(),
+                waited: Vec::new(),
+                resized: vec![z],
+                elapsed_ms: 1000,
+            }));
+            draw(a, 160, 32)
+        };
+        let text = finish(&mut a, info(true, 1280, 720));
+        assert!(has(&text, "大きさを変えた actions[0]"), "{text}");
+        assert!(has(&text, "1282x752"), "{text}");
+        assert!(!has(&text, "届かなかった"), "{text}");
+        // アプリの最小の大きさで狙いに届かない: 成功のまま、届かなかったことと実際の大きさを出す
+        let text = finish(&mut a, info(false, 1400, 720));
+        assert!(has(&text, "大きさを変えた actions[0]"), "{text}");
+        assert!(has(&text, "1400x720"), "{text}");
+        assert!(has(&text, "届かなかった"), "{text}");
     }
 
     #[test]

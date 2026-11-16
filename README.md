@@ -81,7 +81,7 @@ cargo install --git https://github.com/alphabet-h/ai-cu --locked
 | `ai-cu validate <FILE\|->` | 操作列 JSON を検証する (装置に触れない) |
 | `ai-cu run <FILE\|-> [--dry-run]` | 操作列 JSON を実行する。`--dry-run` は装置に触れず、検証と展開した手順だけを出す |
 | `ai-cu schema` | 操作列 JSON の書式を JSON で出す |
-| `ai-cu click X Y` など | 一手ずつの操作 (`click`、`double-click`、`drag`、`move`、`scroll`、`type`、`key`、`focus`、`close`、`wait-for`)。`--shot` で操作の後に撮る |
+| `ai-cu click X Y` など | 一手ずつの操作 (`click`、`double-click`、`drag`、`move`、`scroll`、`type`、`key`、`focus`、`close`、`resize`、`wait-for`)。`--shot` で操作の後に撮る |
 | `ai-cu config show\|path\|validate` | 設定の層、場所、検証結果を出す (読み取り専用) |
 | `ai-cu mcp [--log PATH]` | MCP サーバー (stdio) として待ち受ける ([MCP サーバーモード](#mcp-サーバーモード)) |
 | `ai-cu` (引数なし) | 設定を編集する TUI (端末のときだけ)。`r` で操作列 JSON を選んで検証・実行できる |
@@ -123,7 +123,7 @@ codex mcp add ai-cu -- C:\Users\<名前>\.cargo\bin\ai-cu.exe mcp    # Codex CLI
 ```
 
 - 登録するのは、置いた `ai-cu.exe` の絶対パス (上の例は `cargo install` の置き場。ビルド済みの exe なら置いたフォルダ。`ai-cu guide --setup` が、その実行ファイルのパスを埋めた文例を出す)。`target/release` を直に登録すると、常駐の間 `cargo build --release` が失敗する
-- 道具は 20 個: 読み取りの `guide`、`config`、`windows`、`shot`、`pixel`、`find`、`tree`、`text`、`wait_for`、`status`、一手ずつの操作、操作列の `run`
+- 道具は 21 個: 読み取りの `guide`、`config`、`windows`、`shot`、`pixel`、`find`、`tree`、`text`、`wait_for`、`status`、一手ずつの操作、操作列の `run`
 - 設定は CLI と同じ解決で、呼び出しごとに読み直す
 - 撮った画像は結果に `image` (png、base64) として入り、既定で長辺を 1568 に縮める
 - クライアントの取り消し (Claude Code の Esc) と標準入力の EOF で、実行を止める
@@ -147,6 +147,7 @@ codex mcp add ai-cu -- C:\Users\<名前>\.cargo\bin\ai-cu.exe mcp    # Codex CLI
 | `screenshot` | 画面の矩形か対象のウィンドウを png に保存する |
 | `focus` | 許可されたアプリのウィンドウを前面にする |
 | `close` | 許可されたアプリのウィンドウに `WM_CLOSE` を置く (× ボタンと同じ) |
+| `resize` | 許可されたアプリの窓の大きさを変える (中身か枠、物理か論理。左上と前面は変えない) |
 | `wait_for` | ウィンドウ、要素、文字列が出る (消える) まで待つ |
 | `wait_stable` | 画面が落ち着くまで待つ |
 | `wait_change` | 画面が変わるまで待つ |
@@ -205,7 +206,7 @@ mouse_threshold_px = 50   # 利用者がマウスをこれ以上動かしたら�
 
 [capture]
 full_screen = false       # 全画面 (region の省略、画面全体を覆う矩形) の撮影を許すか (既定 false)
-min_idle_ms = 3000        # shot、pixel、focus、前面にある対象への close の前に求める、人の最後の入力からの無操作 (ミリ秒。0 なら求めない)
+min_idle_ms = 3000        # shot、pixel、focus、前面にある対象への close と resize の前に求める、人の最後の入力からの無操作 (ミリ秒。0 なら求めない)
 save_dirs = []            # 撮影の保存先として許すフォルダ (絶対パス)。空なら制限なし。書いた層はすべてが許すときだけ通す
 
 [mcp]
@@ -241,14 +242,14 @@ sound = false             # 予告の間に入るときに通知音を 1 回鳴�
 | 0 | - | 成功 |
 | 1 | `internal` | 内部エラー |
 | 2 | `usage` | 使い方の誤り (引数、端末なしでの引数なし起動) |
-| 3 | `invalid_script` | 操作列の誤り (JSON、未知のフィールド、形、画面の外の座標) |
+| 3 | `invalid_script` | 操作列の誤り (JSON、未知のフィールド、形、画面の外の座標、`resize` の論理の大きさを換算すると上限を超える) |
 | 4 | `policy_denied` | 設定による拒否 (総スイッチ、allow / deny、組み込みの拒否、上限、保存先、パスワード欄) |
 | 5 | `config` | 設定ファイルの誤り (構文、未知のキー、未知の版、指定したファイルが無い) |
 | 6 | `stopped` | 緊急停止 (目印のファイル、最大実行時間、利用者のマウス操作) |
 | 7 | `foreground_guard` | フォアグラウンドガード (届く先のウィンドウが不許可、管理者権限、ウィンドウが無い、ai-cu を起動した側のウィンドウなど) |
-| 8 | `os_error` | OS の呼び出しの失敗 (`SendInput`、撮影、保存、UI Automation の時間切れ) |
+| 8 | `os_error` | OS の呼び出しの失敗 (`SendInput`、撮影、保存、UI Automation の時間切れ、`resize` で DPI か窓の大きさを読めない) |
 | 9 | `forbidden_dev_env` | 開発シェル (`AI_CU_DEV_FORBID_REAL_INPUT`) での実入力と実画面の撮影の拒否 |
-| 10 | `user_active` | 人が操作中なので、撮らなかった、前面にしなかった、閉じなかった、送らなかった |
+| 10 | `user_active` | 人が操作中なので、撮らなかった、前面にしなかった、閉じなかった、大きさを変えなかった、送らなかった |
 | 11 | `focus_failed` | `focus` の対象を前面にできなかった |
 | 12 | `window_not_found` | 対象のウィンドウが見つからない (許可の外と ai-cu を起動した側の窓は探さない)、最小化されている、または画面の外 |
 | 13 | `element_not_found` | `text` の条件で、文字列を持つ要素が無い |
@@ -265,7 +266,7 @@ sound = false             # 予告の間に入るときに通知音を 1 回鳴�
 - **事前検証 (`validate`)**: 操作列の形、ポリシー、上限、画面の範囲を、装置に触れずに確かめる
 - **`--dry-run`**: 入力を送らず、検証の結果と、各操作がどの入力のバッチに展開されるかを出す
 - **フォアグラウンドガード**: `SendInput` の各バッチの直前に、入力が届く先のウィンドウを取り直してポリシーに通す
-- **起動した側の除外**: ai-cu を起動した側 (エージェント、シェル、端末) のウィンドウには、設定にかかわらず送らない。窓の名指し (`focus`、`close`、`find`、`shot --window` など) も、許可の外と起動した側の窓を探さず、`windows` に出る窓だけから選ぶ
+- **起動した側の除外**: ai-cu を起動した側 (エージェント、シェル、端末) のウィンドウには、設定にかかわらず送らない。窓の名指し (`focus`、`close`、`resize`、`find`、`shot --window` など) も、許可の外と起動した側の窓を探さず、`windows` に出る窓だけから選ぶ
 - **緊急停止**: 目印のファイル、最大実行時間、利用者のマウス操作 (MCP では取り消しも) で止め、押したままのキーとボタンを離す
 - **操作の前の枠と予告の間**: 画面を変える操作の前に、画面の縁に青い枠を出し、枠が出ていなければ予告の間を待つ
 - **入力の排他**: 画面を変える操作を含む実行は、別の ai-cu と交ざらないよう、入力の錠を取ってから動く。TUI は開いている間ずっと錠を持つので、その間の別の ai-cu の画面を変える操作は TUI の編集に届かず 16 になる (ai-cu の錠を見ない道具の打鍵は防げない)
@@ -279,7 +280,8 @@ sound = false             # 予告の間に入るときに通知音を 1 回鳴�
 - **毎回の承認 (MCP)**: `mcp.require_approval` に書いた道具は、Claude Code が呼ぶたびに人の確認を出す
 - **前面化の制限**: `focus` は `SetForegroundWindow` を 1 回呼ぶだけで、前面ロックの回避策は使わない
 - **閉じる操作の制限**: `close` は題名を必須にして `WM_CLOSE` を 1 回置くだけで、強制終了はしない
-- **実行時ガード (開発用)**: 環境変数 `AI_CU_DEV_FORBID_REAL_INPUT` があると、入力、撮影、前面化、閉じる操作の最下層が拒否する
+- **大きさの変更の制限**: `resize` は `close` と同じ守り (許可、名指しの範囲、無効な窓、人の操作中、入力の排他、枠) を通し、大きさだけを変える。左上、前面、Z 順は変えず、最小化・最大化の窓は元に戻さずに断る
+- **実行時ガード (開発用)**: 環境変数 `AI_CU_DEV_FORBID_REAL_INPUT` があると、入力、撮影、前面化、閉じる操作、大きさの変更の最下層が拒否する
 - **DPI の確認**: Per-Monitor V2 の DPI 認識を宣言できなければ、座標を扱う `run`、`shot`、`pixel` を拒否する
 - **後始末**: 停止や失敗のときも、押したかもしれないキーとボタンを離す
 - **TUI からの実行**: CLI の `run` と同じ経路を通り、判定は保存済みの設定ファイルで行う

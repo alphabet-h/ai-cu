@@ -1239,6 +1239,53 @@ Stop-Process -Name pw-probe
 
 結果が違ったときは、D-149 の実装を疑う: (a) の右の `click` が `0` で通ったら右クリックの判定が掛かっていない、(c) の `drag` が `0` で通ったか、断った後に `length` が変わったら押す前のドロップの判定が掛かっていない (`partial` が true なのは始点への移動のためで、失敗の印ではない)、断った後の左の `click` が `10` ならボタンが押されたまま残っている。`length` が 12 でなくなったら、何かがパスワード欄に入った (pw-probe を閉じて起動し直してから記録する)。
 
+## 37. 窓の大きさを変える (resize、D-150)
+
+`resize` が、許可された窓の大きさだけを変え (左上と前面は変えない)、論理の大きさを画面の倍率で物理に換算し、最大化の窓を 7 で断ることを確かめる。題名の帯と DPI の倍率は実機のフィクスチャ (縁なし) では出ないので、メモ帳で見る。
+基本の層は手順 0 の設定 (allow に notepad、`input_enabled` が true) のまま行い、設定ファイルは作らない。基本の層の `allow.actions` を書いているなら、`resize` が並んでいることを `target/release/ai-cu.exe config show` で確かめる (無ければ 4 になる。AI は設定を書き換えず、そのまま記録して止まる)。
+入力は送らないが窓の大きさを変えるので、`AI_CU_MANUAL_CHECK=1` のセッションで、release のパスを文字どおり書き、GO を 1 回もらってから行う。端末は前面のままでよく、カウントダウンも Alt+Tab も要らない。撮影はしない。主画面の倍率は 125% (有効 DPI 120) の前提で期待の値を書く (倍率が違えば、論理の値 × 倍率に読み替える)。
+
+準備: 人が空の新しいメモ帳の窓を 1 つ開き、最大化していない状態で、画面の中ほど (右と下に 1700 px 以上の余白。足りなければ左上に寄せる) に置き、端末を前面に戻す。AI は `target/release/ai-cu.exe windows` で、題名に「タイトルなし」を含むメモ帳の窓が 1 つだけであることと、その `rect` (左上 `<X0> <Y0>`) と `foreground` (端末) を控える。以下の `<題>` は「タイトルなし」。
+
+(a) 論理の大きさで中身を変える:
+
+```
+target/release/ai-cu.exe resize notepad.exe --title <題> --width 1280 --height 720 --logical
+target/release/ai-cu.exe windows
+```
+- [ ] 終了コード `0`。`resized[0]` の `area` が `client`、`logical` が true、`dpi` が `120`、`requested` が `{"width": 1600, "height": 900}`、`exact` が true
+- [ ] `resized[0].client` の `w` と `h` が `1600` と `900` (物理)。`frame` は `client` より題名の帯とメニューの分だけ大きい (差を記録する)
+- [ ] `windows` のメモ帳の `rect` の左上が `<X0> <Y0>` のまま (左上が動いていない)
+- [ ] `windows` の `foreground` が準備で控えた端末のまま (前面を変えていない)
+
+(b) 見えている枠の大きさで変える (物理):
+
+```
+target/release/ai-cu.exe resize notepad.exe --title <題> --width 1000 --height 700 --frame
+```
+- [ ] 終了コード `0`。`resized[0]` の `area` が `frame`、`logical` が false、`requested` が `{"width": 1000, "height": 700}`、`exact` が true
+- [ ] `resized[0].frame` の `w` と `h` が `1000` と `700`、左上が `<X0> <Y0>` のまま
+- [ ] `client` は `frame` より、(a) で記録した差の分だけ小さい
+
+(c) 最大化の窓は 7 で断り、大きさを変えない: 人がメモ帳を最大化し、端末を前面に戻して手を離す。AI は次を打つ:
+
+```
+target/release/ai-cu.exe windows
+target/release/ai-cu.exe resize notepad.exe --title <題> --width 800 --height 600
+target/release/ai-cu.exe windows
+```
+- [ ] `resize` は終了コード `7`、`"code":"foreground_guard"`、`error.reason` が `maximized`、`error.detail` が無い、`hint` が「人に元に戻してもらう (ai-cu は元に戻さない)」旨を言う。`resized` は無い
+- [ ] 前後の `windows` のメモ帳の `rect` が同じ (大きさが変わっていない)。人の目でもメモ帳が最大化のまま
+
+(d) 前面を変えない: (a) から (c) を通して、`windows` の `foreground` が端末のままだったことを確かめる (メモ帳が前面に出ていない)。
+- [ ] (人の目) (a) と (b) の間、メモ帳が前面に出ず、タスクバーのボタンも点滅しなかった
+
+後片付け: 人がメモ帳の最大化を解き、保存せずに閉じる。
+
+記録する値: 使った release の版 (`target/release/ai-cu.exe --version`)、各コマンドの終了コードと出力の JSON (`resized[0]` の全部)、(a) の `frame` と `client` の差、左上の値。「実施の記録」の節のとおり、手元に日付つきで書く。
+
+結果が違ったときは、D-150 の実装を疑う: (a) の `client` が 1600x900 から外れて `exact` が true なら中身の読みが物理になっていない、`dpi` が `null` か `96` なら画面の DPI の読みを疑う。左上が動いたら `SWP_NOMOVE` が効いていない、前面が変わったら `SWP_NOACTIVATE` が効いていない。(c) で大きさが変わったら最大化の判定が掛かっていない。
+
 ## 結果が違ったとき
 
 - 手順 1 で `dev_mode: true`: この端末に `AI_CU_DEV_FORBID_REAL_INPUT` がある。`Remove-Item Env:AI_CU_DEV_FORBID_REAL_INPUT` で外す
@@ -1255,8 +1302,8 @@ ai-cu.exe を呼んで確かめられる。開発セッション (このリポ�
 手を離す。別のディレクトリで開いたセッション (hook 無し) に頼む形も使える (2026-10-08 に実施)。そのときの依頼文に書くこと:
 
 - 使うのは release の ai-cu.exe だけ。リポジトリを編集しない、cargo を走らせない
-- 実際の設定ファイルは読むだけ。手順 9 と 10 は `--config=` の上書き層 (deny と stop だけを足す。`version = 1` と `[general] input_enabled = true` が要る) で行い、allow を広げる設定は作らない。手順 23 も上書き層で行う (`version = 1`、`[general] capture_enabled = true`、deny だけ)。手順 24 も上書き層で行う (`version = 1`、`[general] capture_enabled = true`、`[mcp] require_approval = ["windows"]` だけ。登録と確認の画面は人が行う)。手順 25 は `guide --setup` と `validate` だけで、設定ファイルを作らない (TUI の左の一覧で fix の場所を探すのは人)。手順 26 は基本の層のまま行い、設定ファイルを作らない (基本の層の `allow.actions` を書いた設定では `wait_stable` / `wait_change` を並べないと 4 になる。そのときは記録して止まる)。手順 27 は基本の層のまま行い、設定ファイルを作らない (撮影の許可が要る。実入力は送らない)。手順 28 は確認専用のアプリ pw-probe (`tools/pw-probe`、D-092) で行う。人がビルドし、基本の層の `allow.processes` に `pw-probe.exe` がある (入れたままでよい。無ければ人が TUI で足す) ことを確かめてから、(a) の読み取りは GO 無しで、(b) から (d) は GO をもらって行い、設定ファイルを作らない (`general.password_input` は書かない)。送る文字は無害な 1 文字 (`x`、`a`、`b`、`y`)。読めないアプリでは 4 にならず文字が入るので、先に (a) の `find` で `secret` の `password` が true になることを確かめてから (b) を行う。pw-probe は AI が起動してよい (起動は実入力ではない)。手順 29 は基本の層のまま行い、(d) だけ上書き層 (`version = 1`、`[general] input_enabled = true`、`[indicator] sound = true` だけ) を `target/manual-check/` に作る。枠は撮影に写らないので、枠と札の見え方と音は人に聞いて記録する。手順 30 は基本の層のまま行い、設定ファイルを作らない。ignored の段がフィクスチャへ実入力を送るので GO の後に行う。枠と札は撮影に写らないので、人に聞いて記録する。cargo を走らせるので、別のディレクトリのセッションへの依頼には入れず、開発セッションの主エージェントが行う (D-111)。手順 33 は基本の層のまま行い、設定ファイルを作らない。一手ずつの `focus`、`key`、`type` は実入力なので GO の後に行う。IME の表示は撮影では確かめず、人に聞いて記録する (D-131)。17 の新しい項 (ツールチップ。D-142) は基本の層のまま、設定ファイルを作らず、GO の後に行う。手順 35 は TUI を人が開くための上書き層 (`version = 1` と `[general] input_enabled = true` だけ。`target/manual-check/s35-config.toml`) を作り、TUI の部分は人が行う。AI の `run` はメモ帳への実入力なので GO の後に行う。手順 34 は基本の層のまま (a) を行い、(b) から (d) は上書き層 (`version = 1`、`[general] capture_enabled = true` (d は false)、deny だけ) を `target/manual-check/` に作る。入力を送らないので GO は要らない。(c) の窓の配置は人に頼む (D-146)。手順 36 は手順 28 と同じく pw-probe で、基本の層のまま設定ファイルを作らずに行う (`general.password_input` は書かない)。最初の `find` は GO 無しで、(a) から (c) は GO をもらって行う。先に `find` で `secret` の `password` が true になることを確かめてから (a) を行う (読めないアプリでは 4 にならず押してしまう)。pw-probe は AI が起動してよい (D-149)
-- `--dry-run` の無い `run` は手順 6、7、8、9、17、20、26、28 (c)、29、31、35 だけ (35 は TUI を開いたままメモ帳へ送る `run` と、錠を持つための `focus` と `wait` の `run`。17 はメモ帳のボタンの上へ `move` するだけで、クリックしない。26 の `run` は `focus` と画面の待ちだけで、入力は送らない。28 (c) は pw-probe のふつうの欄に Tab を含む `type` を送る標準入力の `run -`。28 の (b) と (d) は `run` ではなく一手ずつの `focus`、`click`、`key`、`type` で、これも実入力。31 は基本の層のまま (allow に notepad) で、設定ファイルを作らずに 2 本の `run` を同時にメモ帳へ送る実入力なので、GO をもらってから行う。33 は `run` を使わないが、28 の (b) と (d) と同じく一手ずつの `focus`、`key`、`type` が実入力。36 も `run` を使わないが、一手ずつの `focus`、`click` (右と左)、`double-click`、`drag` が実入力)。7 と 8 は実行の直前にターンを終え、人の GO を待つ (GO の後、人は枠が出てから約 3 秒 (予告の間) 待って Alt+Tab でメモ帳を前面にし、マウスに触れない)。7 は `sample-with-focus.json` (sample.json の先頭に `focus` を足したもの) を使えば、端末が前面のままで済み、Alt+Tab の合図が要らない (2026-10-09 に実施)
+- 実際の設定ファイルは読むだけ。手順 9 と 10 は `--config=` の上書き層 (deny と stop だけを足す。`version = 1` と `[general] input_enabled = true` が要る) で行い、allow を広げる設定は作らない。手順 23 も上書き層で行う (`version = 1`、`[general] capture_enabled = true`、deny だけ)。手順 24 も上書き層で行う (`version = 1`、`[general] capture_enabled = true`、`[mcp] require_approval = ["windows"]` だけ。登録と確認の画面は人が行う)。手順 25 は `guide --setup` と `validate` だけで、設定ファイルを作らない (TUI の左の一覧で fix の場所を探すのは人)。手順 26 は基本の層のまま行い、設定ファイルを作らない (基本の層の `allow.actions` を書いた設定では `wait_stable` / `wait_change` を並べないと 4 になる。そのときは記録して止まる)。手順 27 は基本の層のまま行い、設定ファイルを作らない (撮影の許可が要る。実入力は送らない)。手順 28 は確認専用のアプリ pw-probe (`tools/pw-probe`、D-092) で行う。人がビルドし、基本の層の `allow.processes` に `pw-probe.exe` がある (入れたままでよい。無ければ人が TUI で足す) ことを確かめてから、(a) の読み取りは GO 無しで、(b) から (d) は GO をもらって行い、設定ファイルを作らない (`general.password_input` は書かない)。送る文字は無害な 1 文字 (`x`、`a`、`b`、`y`)。読めないアプリでは 4 にならず文字が入るので、先に (a) の `find` で `secret` の `password` が true になることを確かめてから (b) を行う。pw-probe は AI が起動してよい (起動は実入力ではない)。手順 29 は基本の層のまま行い、(d) だけ上書き層 (`version = 1`、`[general] input_enabled = true`、`[indicator] sound = true` だけ) を `target/manual-check/` に作る。枠は撮影に写らないので、枠と札の見え方と音は人に聞いて記録する。手順 30 は基本の層のまま行い、設定ファイルを作らない。ignored の段がフィクスチャへ実入力を送るので GO の後に行う。枠と札は撮影に写らないので、人に聞いて記録する。cargo を走らせるので、別のディレクトリのセッションへの依頼には入れず、開発セッションの主エージェントが行う (D-111)。手順 33 は基本の層のまま行い、設定ファイルを作らない。一手ずつの `focus`、`key`、`type` は実入力なので GO の後に行う。IME の表示は撮影では確かめず、人に聞いて記録する (D-131)。17 の新しい項 (ツールチップ。D-142) は基本の層のまま、設定ファイルを作らず、GO の後に行う。手順 35 は TUI を人が開くための上書き層 (`version = 1` と `[general] input_enabled = true` だけ。`target/manual-check/s35-config.toml`) を作り、TUI の部分は人が行う。AI の `run` はメモ帳への実入力なので GO の後に行う。手順 34 は基本の層のまま (a) を行い、(b) から (d) は上書き層 (`version = 1`、`[general] capture_enabled = true` (d は false)、deny だけ) を `target/manual-check/` に作る。入力を送らないので GO は要らない。(c) の窓の配置は人に頼む (D-146)。手順 36 は手順 28 と同じく pw-probe で、基本の層のまま設定ファイルを作らずに行う (`general.password_input` は書かない)。最初の `find` は GO 無しで、(a) から (c) は GO をもらって行う。先に `find` で `secret` の `password` が true になることを確かめてから (a) を行う (読めないアプリでは 4 にならず押してしまう)。pw-probe は AI が起動してよい (D-149)。手順 37 は基本の層のまま、設定ファイルを作らずに行う。入力は送らないが窓の大きさを変えるので GO の後に行い、メモ帳の配置と最大化は人に頼む (D-150)
+- `--dry-run` の無い `run` は手順 6、7、8、9、17、20、26、28 (c)、29、31、35 だけ (35 は TUI を開いたままメモ帳へ送る `run` と、錠を持つための `focus` と `wait` の `run`。17 はメモ帳のボタンの上へ `move` するだけで、クリックしない。26 の `run` は `focus` と画面の待ちだけで、入力は送らない。28 (c) は pw-probe のふつうの欄に Tab を含む `type` を送る標準入力の `run -`。28 の (b) と (d) は `run` ではなく一手ずつの `focus`、`click`、`key`、`type` で、これも実入力。31 は基本の層のまま (allow に notepad) で、設定ファイルを作らずに 2 本の `run` を同時にメモ帳へ送る実入力なので、GO をもらってから行う。33 は `run` を使わないが、28 の (b) と (d) と同じく一手ずつの `focus`、`key`、`type` が実入力。36 も `run` を使わないが、一手ずつの `focus`、`click` (右と左)、`double-click`、`drag` が実入力。37 も `run` を使わないが、一手ずつの `resize` が窓の大きさを変える)。7 と 8 は実行の直前にターンを終え、人の GO を待つ (GO の後、人は枠が出てから約 3 秒 (予告の間) 待って Alt+Tab でメモ帳を前面にし、マウスに触れない)。7 は `sample-with-focus.json` (sample.json の先頭に `focus` を足したもの) を使えば、端末が前面のままで済み、Alt+Tab の合図が要らない (2026-10-09 に実施)
 - 手順 2 の前提 (allow に notepad があり、端末と端末を内蔵するエディタが allow に無く deny にある、input_enabled が true、dev_mode が false) が崩れていたら、run 系を走らせずに止まる。allow に `pw-probe` や利用者がふだん使うアプリがあるのは崩れではない
 - 画像は全画面を撮らない。手順 12 の画像は寸法だけ調べて消す。メモ帳の内容は `windows` で矩形を取り、その範囲だけ撮って読んでよい
 - コマンド、終了コード、出力をそのまま記録し、期待と違っても直さず報告する
