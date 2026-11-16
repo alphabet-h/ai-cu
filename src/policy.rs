@@ -161,6 +161,8 @@ impl Policy {
             .unwrap_or(&self.layers[0])
     }
 
+    /// 操作の種類を、層ごとの総スイッチ、`deny.actions`、`allow.actions` で判定する。
+    /// 画面を読む待ち (`wait_for`、`wait_stable`、`wait_change`) は、通った後に撮影の許可も求める (D-153)
     pub fn check_action_kind(&self, kind: ActionKind) -> Check {
         // wait は何も動かさないので、総スイッチと actions の次元の対象外
         if kind == ActionKind::Wait {
@@ -168,7 +170,8 @@ impl Policy {
         }
         for l in &self.layers {
             // wait_for は読むだけ (要素の名前と文字列は画面上の情報) なので、撮影の総スイッチで見る (D-068)。
-            // wait_stable と wait_change は撮影を繰り返すだけなので同じ (D-081)
+            // wait_stable と wait_change は撮影を繰り返すだけなので同じ (D-081)。
+            // actions の軸でも、自分の名前に加えて screenshot を求める (D-153。この繰り返しの後で判定する)
             if matches!(
                 kind,
                 ActionKind::Screenshot
@@ -218,6 +221,24 @@ impl Policy {
                     format!("操作 {} は allow.actions に無い: {}", kind.name(), l.source),
                 ));
             }
+        }
+        // 画面を読む待ち (wait_for、wait_stable、wait_change) は、自分の名前の許可に加えて
+        // 撮影 (screenshot) の許可も要る (D-153)。自分の名前の判定を先に済ませ、通ったときだけ撮影を判定する。
+        // 断るときは撮影を断った軸の rule と fix をそのまま写し、message の頭に待ちの文を足す
+        if matches!(
+            kind,
+            ActionKind::WaitFor | ActionKind::WaitStable | ActionKind::WaitChange
+        ) {
+            return self
+                .check_action_kind(ActionKind::Screenshot)
+                .map_err(|mut d| {
+                    d.message = format!(
+                        "{} は画面を読むので撮影 (screenshot) と同じ許可が要る: {}",
+                        kind.name(),
+                        d.message
+                    );
+                    d
+                });
         }
         Ok(())
     }
@@ -1137,6 +1158,88 @@ mod tests {
         let only_click = policy(&[&format!("{ENABLED}[allow]\nactions=[\"click\"]\n")]);
         assert!(only_click.check_action_kind(ActionKind::WaitFor).is_err());
         assert!(only_click.check_action_kind(ActionKind::Wait).is_ok());
+    }
+
+    /// 画面を読む待ちは、自分の名前の許可に加えて撮影 (screenshot) の許可も要る (D-153)。
+    /// 撮影で断るときは撮影を断った軸の rule と fix を写し、自分の名前で断るときの文は今までどおり
+    #[test]
+    fn policy_screen_waits_also_need_screenshot_permission() {
+        let head = "は画面を読むので撮影 (screenshot) と同じ許可が要る";
+        for kind in [
+            ActionKind::WaitFor,
+            ActionKind::WaitStable,
+            ActionKind::WaitChange,
+        ] {
+            let name = kind.name();
+            // (a) 自分の名前だけを並べた allow.actions は、撮影の軸 (allow.actions) で断る
+            let d = policy(&[&format!("{ENABLED}[allow]\nactions = [\"{name}\"]\n")])
+                .check_action_kind(kind)
+                .unwrap_err();
+            assert_eq!(d.rule, Some("allow.actions"), "{name}");
+            assert!(
+                d.fix.as_deref().unwrap().contains("に screenshot を足す"),
+                "{name}: {:?}",
+                d.fix
+            );
+            assert!(d.message.starts_with(name), "{name}: {}", d.message);
+            assert!(d.message.contains(head), "{name}: {}", d.message);
+            assert!(d.message.contains("撮影"), "{name}: {}", d.message);
+            // (b) 自分の名前と screenshot の両方を並べれば通る
+            assert!(
+                policy(&[&format!(
+                    "{ENABLED}[allow]\nactions = [\"{name}\", \"screenshot\"]\n"
+                )])
+                .check_action_kind(kind)
+                .is_ok(),
+                "{name}"
+            );
+            // (c) deny.actions の screenshot でも断る (rule は deny.actions)
+            let d = policy(&[&format!("{ENABLED}[deny]\nactions = [\"screenshot\"]\n")])
+                .check_action_kind(kind)
+                .unwrap_err();
+            assert_eq!(d.rule, Some("deny.actions"), "{name}");
+            assert!(d.message.contains(head), "{name}: {}", d.message);
+            assert!(
+                d.fix.as_deref().unwrap().contains("から screenshot を外す"),
+                "{name}: {:?}",
+                d.fix
+            );
+            // (d) 自分の名前が deny.actions に当たるなら、今までどおり自分の名前の文
+            let d = policy(&[&format!("{ENABLED}[deny]\nactions = [\"{name}\"]\n")])
+                .check_action_kind(kind)
+                .unwrap_err();
+            assert_eq!(d.rule, Some("deny.actions"), "{name}");
+            assert!(!d.message.contains(head), "{name}: {}", d.message);
+            assert!(
+                d.fix
+                    .as_deref()
+                    .unwrap()
+                    .contains(&format!("から {name} を外す")),
+                "{name}: {:?}",
+                d.fix
+            );
+            // (e) allow.actions を書かず撮影の総スイッチだけなら通る
+            assert!(
+                policy(&["[general]\ncapture_enabled = true\n"])
+                    .check_action_kind(kind)
+                    .is_ok(),
+                "{name}"
+            );
+            // (f) 自分の名前も screenshot も断られる設定では、自分の名前の判定が先に断る
+            let d = policy(&[&format!("{ENABLED}[allow]\nactions = [\"click\"]\n")])
+                .check_action_kind(kind)
+                .unwrap_err();
+            assert_eq!(d.rule, Some("allow.actions"), "{name}");
+            assert!(
+                d.fix
+                    .as_deref()
+                    .unwrap()
+                    .contains(&format!("に {name} を足す")),
+                "{name}: {:?}",
+                d.fix
+            );
+            assert!(!d.message.contains(head), "{name}: {}", d.message);
+        }
     }
 
     #[test]

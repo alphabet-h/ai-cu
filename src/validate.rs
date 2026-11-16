@@ -302,7 +302,7 @@ fn check_action_policy(
                 issues.push(Issue::denied(Some(i), d));
             }
             // 題名での名指し (focus / resize の title、close は title が必須) は撮影と同じ許可が要る (D-152)。
-            // wait_for は範囲の外 (actions の軸は wait_for の名で判定する)
+            // wait_for はここで見ない。撮影の許可そのものが要り、無ければ操作の種類の判定で断る (D-153)
             let named_by_title = match action {
                 Action::Focus { title, .. } | Action::Resize { title, .. } => title.is_some(),
                 Action::Close { .. } => true,
@@ -787,10 +787,27 @@ mod tests {
                 "{json}"
             );
         }
-        // wait_for は範囲の外 (D-152 の目標外)
+        // wait_for は撮影の許可そのものが要る (D-153): 題名の名指しの判定ではなく操作の種類の判定で 4
         let wait = script(r#"{"type":"wait_for","process":"notepad.exe","title":"a"}"#);
         let wait_only = policy(&format!("{ENABLED}[allow]\nactions = [\"wait_for\"]\n"));
-        assert!(validate(&wait, &wait_only, None).ok());
+        let v = validate(&wait, &wait_only, None);
+        assert_eq!(v.error_kind(), Some(ErrorKind::PolicyDenied));
+        assert_eq!(v.error_kind().map(ErrorKind::exit_code), Some(4));
+        assert_eq!(v.issues.len(), 1, "{:?}", v.issues);
+        assert_eq!(v.issues[0].rule, Some("allow.actions"));
+        assert!(
+            v.issues[0]
+                .fix
+                .as_deref()
+                .unwrap()
+                .contains("に screenshot を足す"),
+            "{:?}",
+            v.issues[0].fix
+        );
+        let wait_and_shot = policy(&format!(
+            "{ENABLED}[allow]\nactions = [\"wait_for\", \"screenshot\"]\n"
+        ));
+        assert!(validate(&wait, &wait_and_shot, None).ok());
     }
 
     /// wait_for の対象 (D-068): 撮影の総スイッチ (capture_enabled) だけで通り、input_enabled は要らない。
