@@ -1108,7 +1108,12 @@ impl App {
     /// `run` がイベントを時間つきで待つか (真なら `poll`、偽なら `read`)。カウントダウンの間と、
     /// 錠を待つ間 (取り直しの試みを周回させる。D-147)
     pub fn wants_tick(&self) -> bool {
-        matches!(self.overlay, Overlay::Countdown { .. }) || self.lock == LockState::Waiting
+        self.counting_down() || self.lock == LockState::Waiting
+    }
+
+    /// 実行のカウントダウン中か (判定はここ 1 か所。`wants_tick` と `step` が使う。D-148)
+    fn counting_down(&self) -> bool {
+        matches!(self.overlay, Overlay::Countdown { .. })
     }
 
     /// `Unavailable` の警告をメッセージの行に出し直す (文は `hold_input_lock` が組んだもの。D-147)
@@ -1283,12 +1288,17 @@ impl App {
 
     /// 1 周回分の更新: イベントがあれば処理し、その後に経過時間を進める (純関数)。
     /// `run` が毎周回これを呼ぶので、キーが届いた周回でもカウントダウンは実時間で進む。
+    /// この周回を待ち始めたときからカウントダウンだったときだけ、実際の経過で時間を進める
+    /// (確認の画面を読んでいた時間を引かない。D-148)。
     pub fn step(&mut self, ev: Option<&Event>, elapsed_ms: u64) -> Vec<Effect> {
+        let counting = self.counting_down();
         let mut out = Vec::new();
         if let Some(ev) = ev {
             out.push(self.update(ev));
         }
-        out.push(self.tick(elapsed_ms));
+        if counting {
+            out.push(self.tick(elapsed_ms));
+        }
         out.retain(|e| *e != Effect::None);
         if out.is_empty() {
             out.push(Effect::None);
@@ -5939,7 +5949,7 @@ mod tests {
             vec![Effect::None]
         );
         assert!(
-            matches!(&a.overlay, Overlay::Countdown { remaining_ms, .. } if *remaining_ms == RUN_COUNTDOWN_MS - 1210)
+            matches!(&a.overlay, Overlay::Countdown { remaining_ms, .. } if *remaining_ms == RUN_COUNTDOWN_MS - 1200)
         );
         // タイムアウトの周回
         assert_eq!(a.step(None, 1000), vec![Effect::None]);
@@ -5953,6 +5963,42 @@ mod tests {
             vec![Effect::None]
         );
         assert_eq!(b.selected, 1);
+    }
+
+    #[test]
+    fn tui_step_does_not_count_time_spent_on_confirm_screen() {
+        // 確認の画面を 10 秒読んでから y: 武装の周回の経過は数えない (D-148)
+        let mut a = app();
+        a.on_preflight(Ok(report(r#"{"type":"click","x":10,"y":10}"#, ENABLED)));
+        assert!(matches!(a.overlay, Overlay::RunConfirm { .. }));
+        assert_eq!(
+            a.step(Some(&press(KeyCode::Char('y'))), 10_000),
+            vec![Effect::ArmRun]
+        );
+        assert!(
+            matches!(&a.overlay, Overlay::Countdown { remaining_ms, self_window: None, .. } if *remaining_ms == RUN_COUNTDOWN_MS),
+            "{:?}",
+            a.overlay
+        );
+        a.set_self_window(Some(me()));
+        assert_eq!(a.step(None, RUN_COUNTDOWN_MS - 1), vec![Effect::None]);
+        assert!(
+            matches!(&a.overlay, Overlay::Countdown { remaining_ms, .. } if *remaining_ms == 1)
+        );
+        let effects = a.step(None, 1);
+        assert!(matches!(effects[..], [Effect::RunScript(_)]), "{effects:?}");
+        // 5 秒未満でも縮まない
+        let mut b = app();
+        b.on_preflight(Ok(report(r#"{"type":"click","x":10,"y":10}"#, ENABLED)));
+        assert_eq!(
+            b.step(Some(&press(KeyCode::Char('y'))), 3_000),
+            vec![Effect::ArmRun]
+        );
+        assert!(
+            matches!(&b.overlay, Overlay::Countdown { remaining_ms, .. } if *remaining_ms == RUN_COUNTDOWN_MS),
+            "{:?}",
+            b.overlay
+        );
     }
 
     /// 呼び出しを記録する runner (TUI の配線のテスト用)
