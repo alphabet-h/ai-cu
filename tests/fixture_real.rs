@@ -13,6 +13,8 @@
 //! - 予告の間 (D-093) のテストだけは、人の手の代わりに別スレッドからフィクスチャの中へ入力を送る (D-095)
 //! - 帯つきのフィクスチャの drag のテストとその帯なしの対照だけ、矩形をクライアント領域から上へ 120 px 広げる。動いた窓の上の点を送るため
 //!   で、座標の下がフィクスチャであることとプロセスの許可の確かめは残す (D-036 の追記、D-132)
+//! - カーソルの動く範囲 (`ClipCursor`) を掛けるのは、範囲の外の点を断るテストだけ。範囲はフィクスチャの左半分で、
+//!   `ClipCursorGuard` の Drop と数秒の見張りのスレッドで必ず外す (D-151)
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -42,6 +44,7 @@ use ai_cu::win32::fixture_window::{
     FIXTURE_BUTTON_ID, FIXTURE_BUTTON_TEXT, FIXTURE_CAPTION_HEIGHT, FIXTURE_EDIT_ID,
     FIXTURE_EDIT_TEXT, FIXTURE_GCS_COMPSTR, FIXTURE_GCS_RESULTSTR, FIXTURE_PASSWORD_ID,
     FIXTURE_PASSWORD_TEXT, FIXTURE_RGB, FixtureEvent, FixtureRegion, FixtureWindow,
+    clip_cursor_for_test,
 };
 use ai_cu::win32::input_mutex::InputMutex;
 use ai_cu::win32::overlay::{
@@ -3533,6 +3536,100 @@ fn fixture_real_scope_rejects_outside_before_sending() {
         ))
         .unwrap_err();
     println!("FIXTURE scope rejected: {e}");
+}
+
+/// 主モニタの中央はモニターの上、仮想画面の右下の外はどのモニターの上でもない (`MonitorFromPoint` の
+/// `MONITOR_DEFAULTTONULL`。D-151)。読むだけで、入力は送らない
+#[test]
+#[ignore = "実機のフィクスチャ限定。cargo test -- --ignored --test-threads=1"]
+fn fixture_real_on_monitor_reads_primary_center_and_outside() {
+    let _watchdog = Watchdog::start("on_monitor");
+    dpi::ensure_per_monitor_v2().expect("Per-Monitor V2 を宣言できない");
+    let primary = screen::primary_screen().expect("主モニタ");
+    let vs = screen::virtual_screen().expect("仮想画面");
+    let center = primary.center();
+    let outside = Point::new(vs.x + vs.w as i32 + 10, vs.y + vs.h as i32 + 10);
+    let desktop = Win32Desktop::new();
+    let on_center = desktop.on_monitor(center).expect("on_monitor");
+    let on_outside = desktop.on_monitor(outside).expect("on_monitor");
+    println!(
+        "FIXTURE on_monitor center={center:?}:{on_center} outside={outside:?}:{on_outside} primary={primary} virtual={vs} raw_center={} raw_outside={}",
+        screen::point_on_monitor(center),
+        screen::point_on_monitor(outside)
+    );
+    assert!(
+        on_center,
+        "主モニタの中央 {center:?} がモニターの上と読めない"
+    );
+    assert!(
+        !on_outside,
+        "仮想画面の外 {outside:?} がモニターの上と読めた"
+    );
+}
+
+/// フィクスチャの左半分にカーソルの動く範囲 (`ClipCursor`) を掛けると、`cursor_clip` の読みが掛けた矩形 (物理ピクセル)
+/// と一致し、右半分の点の click は送る前に 7 の `cursor_clipped` で断られ、フィクスチャにボタンが届かない。外した後の
+/// `cursor_clip` は `None` (D-151)。範囲はフィクスチャの中なので、判定が壊れていてもクリックはフィクスチャに落ちる。
+/// 範囲は `ClipCursorGuard` の Drop と 5 秒の見張りで必ず外す
+#[test]
+#[ignore = "実機のフィクスチャ限定。cargo test -- --ignored --test-threads=1"]
+fn fixture_real_click_outside_cursor_clip_is_refused() {
+    let f = Fixture::open("clip");
+    let c = f.client;
+    let left = Rect::new(c.x, c.y, c.w / 2, c.h);
+    let target = f.at(c.w as i32 * 3 / 4, c.h as i32 / 2);
+    let desktop = Win32Desktop::for_fixture(f.scope());
+    let guard =
+        clip_cursor_for_test(left, Duration::from_secs(5)).expect("ClipCursor を掛けられない");
+    let read = desktop.cursor_clip();
+    f.win.clear_events();
+    let r = f.execute(&format!(
+        r#"{{"type":"click","x":{},"y":{}}}"#,
+        target.x, target.y
+    ));
+    let is_button = |x: &FixtureEvent| {
+        matches!(
+            x,
+            FixtureEvent::ButtonDown { .. }
+                | FixtureEvent::ButtonUp { .. }
+                | FixtureEvent::DoubleClick { .. }
+        )
+    };
+    let ev = f.events_until(|e| e.iter().any(is_button));
+    // 断言の前に外す (外した後の読みも見る)
+    drop(guard);
+    let released = desktop.cursor_clip();
+    let raw = input::clip_cursor_rect();
+    let vs = screen::virtual_screen();
+    let buttons: Vec<&FixtureEvent> = ev.iter().filter(|x| is_button(x)).collect();
+    let refused_reason = r.as_ref().err().and_then(|e| e.reason);
+    println!(
+        "FIXTURE clip set={left} read={read:?} target={target:?} refused_reason={refused_reason:?} events={buttons:?} released={released:?} raw_after={raw:?} virtual={vs:?} raw_equals_virtual={}",
+        matches!((&raw, &vs), (Ok(a), Ok(b)) if a == b)
+    );
+    assert!(
+        matches!(read, Ok(Some(r)) if r == left),
+        "読み戻しが掛けた矩形と違う: set={left} read={read:?}"
+    );
+    let e = r.expect_err("範囲の外の click が断られなかった");
+    assert_eq!(e.kind, ErrorKind::ForegroundGuard, "{e}");
+    assert_eq!(e.reason, Some(ai_cu::error::reason::CURSOR_CLIPPED), "{e}");
+    let clip = e
+        .detail
+        .as_deref()
+        .and_then(|d| d.get("clip"))
+        .cloned()
+        .expect("detail.clip");
+    assert_eq!(
+        clip,
+        serde_json::json!({"x": left.x, "y": left.y, "w": left.w, "h": left.h}),
+        "{e}"
+    );
+    assert!(buttons.is_empty(), "ボタンが届いた: {buttons:?}");
+    assert!(
+        matches!(released, Ok(None)),
+        "外した後の cursor_clip が絞りなしでない: {released:?}"
+    );
 }
 
 /// ロックしていない今の画面で、入力デスクトップが使える側を返し、WTS のロックが非ロックと読め、
