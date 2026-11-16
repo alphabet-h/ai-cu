@@ -222,6 +222,25 @@ impl Policy {
         Ok(())
     }
 
+    /// 窓の題名を読ませてよいか (D-152)。撮影の許可 (`check_action_kind(Screenshot)`) と同じ判定で、
+    /// `windows` が 4 になる設定では focus / close / resize の題名も伏せる
+    pub fn titles_readable(&self) -> bool {
+        self.check_action_kind(ActionKind::Screenshot).is_ok()
+    }
+
+    /// 題名での名指し (focus / resize の `title`、close) を許すか (D-152)。撮影の許可と同じ判定で、
+    /// 断るときは撮影を断った軸の `rule` と `fix` をそのまま写し、message の頭に名指しの文を足す
+    pub fn check_title_naming(&self) -> Check {
+        self.check_action_kind(ActionKind::Screenshot)
+            .map_err(|mut d| {
+                d.message = format!(
+                    "題名での名指し (title) は撮影と同じ許可が要る (撮影が許可されていないと窓の題名は読ませない): {}",
+                    d.message
+                );
+                d
+            })
+    }
+
     pub fn check_key(&self, combo: &KeyCombo) -> Check {
         if let Some(why) = combo.builtin_denied() {
             return Err(Denied {
@@ -1562,5 +1581,84 @@ mod tests {
                 .check_duration(600, 1000)
                 .is_ok()
         );
+    }
+
+    /// 題名を読ませてよいかは撮影の許可に従う (D-152): 総スイッチ、allow.actions、deny.actions、追加の層
+    #[test]
+    fn titles_readable_follows_screenshot_permission() {
+        let no_capture = "[general]\ninput_enabled = true\ncapture_enabled = false\n";
+        assert!(policy(&[ENABLED]).titles_readable());
+        assert!(!policy(&[no_capture]).titles_readable());
+        assert!(
+            !policy(&[&format!("{ENABLED}[allow]\nactions = [\"focus\"]\n")]).titles_readable()
+        );
+        assert!(
+            policy(&[&format!(
+                "{ENABLED}[allow]\nactions = [\"focus\", \"screenshot\"]\n"
+            )])
+            .titles_readable()
+        );
+        assert!(
+            !policy(&[&format!("{ENABLED}[deny]\nactions = [\"screenshot\"]\n")]).titles_readable()
+        );
+        // 床は撮影を許し、追加の層 (--config) だけが断る
+        let p = Policy::new(vec![
+            floor_at(ENABLED, "F.toml"),
+            overlay_at(no_capture, "O.toml"),
+        ]);
+        assert!(!p.titles_readable());
+        assert!(p.check_action_kind(ActionKind::Focus).is_ok());
+    }
+
+    /// 題名での名指しの拒否は、撮影を断った軸の rule と fix を写し、message の頭に名指しの文を足す (D-152)
+    #[test]
+    fn check_title_naming_carries_denied_axis() {
+        let head = "題名での名指し (title) は撮影と同じ許可が要る";
+        let d = policy(&["[general]\ninput_enabled = true\ncapture_enabled = false\n"])
+            .check_title_naming()
+            .unwrap_err();
+        assert_eq!(d.rule, Some("general.capture_enabled"));
+        assert!(d.message.starts_with(head), "{}", d.message);
+        assert!(
+            d.message.contains("general.capture_enabled = false"),
+            "{}",
+            d.message
+        );
+        assert!(d.fix.is_some());
+        let d = policy(&[&format!("{ENABLED}[allow]\nactions = [\"focus\"]\n")])
+            .check_title_naming()
+            .unwrap_err();
+        assert_eq!(d.rule, Some("allow.actions"));
+        assert!(d.message.starts_with(head), "{}", d.message);
+        assert!(
+            d.fix.as_deref().unwrap().contains("に screenshot を足す"),
+            "{:?}",
+            d.fix
+        );
+        let d = policy(&[&format!("{ENABLED}[deny]\nactions = [\"screenshot\"]\n")])
+            .check_title_naming()
+            .unwrap_err();
+        assert_eq!(d.rule, Some("deny.actions"));
+        // 追加の層だけが断るなら、fix は追加の層を指す
+        let d = Policy::new(vec![
+            floor_at(ENABLED, "F.toml"),
+            overlay_at(
+                "[general]\ninput_enabled = true\ncapture_enabled = false\n",
+                "O.toml",
+            ),
+        ])
+        .check_title_naming()
+        .unwrap_err();
+        assert_eq!(d.rule, Some("general.capture_enabled"));
+        assert!(
+            d.fix
+                .as_deref()
+                .unwrap()
+                .contains("追加の層の設定ファイル O.toml"),
+            "{:?}",
+            d.fix
+        );
+        // 撮影ありなら通る
+        assert!(policy(&[ENABLED]).check_title_naming().is_ok());
     }
 }
