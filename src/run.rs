@@ -266,6 +266,39 @@ pub fn check_named_process(policy: &Policy, process: &str) -> Result<(), AppErro
         .map_err(|d| d.into_error(ErrorKind::PolicyDenied))
 }
 
+/// focus / close / resize の結果に出す窓の題名 (D-152)。撮影の許可 (`windows` と同じ) が無ければ None
+/// (JSON の null) にし、許可された窓の題名を読ませない。3 つの結果 (`FocusInfo`、`CloseInfo`、`ResizeInfo`) が通る
+fn shown_title(policy: &Policy, w: &WindowInfo) -> Option<String> {
+    policy.titles_readable().then(|| w.title.clone())
+}
+
+/// focus / close / resize の失敗の message に書く対象の表示 (D-152)。撮影の許可が無ければ題名を外し、
+/// process と hwnd だけにする
+fn target_label(policy: &Policy, w: &WindowInfo) -> String {
+    if policy.titles_readable() {
+        format!(
+            "process={:?}, title={:?}, hwnd={:#x}",
+            w.process, w.title, w.hwnd
+        )
+    } else {
+        format!("process={:?}, hwnd={:#x}", w.process, w.hwnd)
+    }
+}
+
+/// 題名での名指し (focus / resize の title、close) の守りの重ね (D-152)。検証 (validate) が先に同じ判定で 4 にするが、
+/// 検証を通らない経路が将来できても題名の部分一致の成否を漏らさないよう、実行器の入口 (探す前) でも掛ける。
+/// `named_by_title` が真で撮影の許可が無ければ、検証の拒否と同じ形の 4 (`rule` と `fix` は撮影を断った軸、
+/// hint は面によらない `TITLE_NAMING_HINT`)
+fn refuse_title_naming(policy: &Policy, named_by_title: bool) -> Result<(), AppError> {
+    if !named_by_title {
+        return Ok(());
+    }
+    policy.check_title_naming().map_err(|d| {
+        d.into_error(ErrorKind::PolicyDenied)
+            .with_hint(crate::hint::TITLE_NAMING_HINT)
+    })
+}
+
 /// `find` / `text` と `wait_for` で共有する、読み取りの対象のウィンドウの判定 (D-054、D-068)。
 /// 自分の端末 (`self_hwnd`。TUI からの実行) と ai-cu を起動した側 (`host_pids`) のウィンドウは、設定にかかわらず
 /// 読まない (7)。設定 (プロセス、クラス) に通らなければ 4。撮影の `resolve_capture_window` は撮らない旨の文なので別
@@ -632,18 +665,20 @@ pub struct FocusInfo {
     pub action_index: usize,
     pub hwnd: usize,
     pub process: String,
-    pub title: String,
+    /// 窓の題名。撮影の許可が無ければ null (キーは残す。D-152)
+    pub title: Option<String>,
     /// 補助プロセス (D-057) で前面にしたか。CLI と、直接の呼び出しで足りたときは false
     pub helper: bool,
 }
 
 impl FocusInfo {
-    fn new(action_index: usize, w: &WindowInfo, helper: bool) -> Self {
+    /// `title` は `shown_title` で作る (撮影の許可が無ければ None。D-152)
+    fn new(action_index: usize, w: &WindowInfo, title: Option<String>, helper: bool) -> Self {
         FocusInfo {
             action_index,
             hwnd: w.hwnd,
             process: w.process.clone(),
-            title: w.title.clone(),
+            title,
             helper,
         }
     }
@@ -655,7 +690,8 @@ pub struct CloseInfo {
     pub action_index: usize,
     pub hwnd: usize,
     pub process: String,
-    pub title: String,
+    /// 窓の題名。撮影の許可が無ければ null (D-152。そのときは close そのものが 4 なので、今は None の経路は無い)
+    pub title: Option<String>,
     /// 待つ上限 (`CLOSE_SETTLE_MS`) のうちに見える窓から消えたか (破棄とは限らない。`hidden` を見る)。
     /// false なら保存の確認などが出ていることが多い
     pub gone: bool,
@@ -694,7 +730,8 @@ pub struct ResizeInfo {
     pub action_index: usize,
     pub hwnd: usize,
     pub process: String,
-    pub title: String,
+    /// 窓の題名。撮影の許可が無ければ null (キーは残す。D-152)
+    pub title: Option<String>,
     /// 大きさの基準 (`client` か `frame`)
     pub area: &'static str,
     /// 論理の大きさで指定したか
@@ -2186,6 +2223,8 @@ impl Executor<'_> {
         state: &mut State,
         ctx: &mut Ctx<'_>,
     ) -> Result<(), AppError> {
+        // 題名での名指しは撮影の許可が要る (検証の守りの重ね。探す前に断る。D-152)
+        refuse_title_naming(self.policy, title.is_some())?;
         // 名指しの候補は `windows` に出る窓と TUI の端末を除いた窓だけ (D-139)。`check_stop` / `settle` が
         // `&mut self` を取るので、述語が使う値は先に写す (借用を重ねない)
         let (policy, host_pids, self_hwnd) = (self.policy, ctx.host_pids, ctx.self_hwnd);
@@ -2207,10 +2246,8 @@ impl Executor<'_> {
         // 前面にしてよい相手か。フォアグラウンドガードと同じ判定 (設定、自分の端末、管理者権限)。設定と自分の端末は
         // 述語を通った窓には当たらない (守りの重ね。D-139)。権限の 7 は残る
         self.check_window(&w.info, ctx, "前面にする対象", Hint::FocusDenied)?;
-        let describe = format!(
-            "process={:?}, title={:?}, hwnd={:#x}",
-            w.info.process, w.info.title, w.info.hwnd
-        );
+        // 撮影の許可が無ければ題名を外す (D-152)
+        let describe = target_label(policy, &w.info);
         if w.minimized {
             return Err(AppError::new(
                 ErrorKind::FocusFailed,
@@ -2223,7 +2260,8 @@ impl Executor<'_> {
         // 呼ぶ前の前面の hwnd を控える。呼んだ後に前面が変わったか (partial) をこれと比べる (D-065)
         let mut before: Option<usize> = None;
         if let Some(fg) = self.reached(&w, ctx, false, &mut before)? {
-            ctx.focused.push(FocusInfo::new(i, &fg, false));
+            ctx.focused
+                .push(FocusInfo::new(i, &fg, shown_title(policy, &fg), false));
             return Ok(());
         }
         // 人が操作中なら前面を奪わない (D-049 の無操作の判定を focus にも掛ける。CLI の都度起動では、端末が前面なら
@@ -2234,7 +2272,8 @@ impl Executor<'_> {
             .set_foreground(w.info.hwnd)
             .map_err(backend_error)?;
         if let Some(fg) = self.settle(&w, accepted, before, state, ctx)? {
-            ctx.focused.push(FocusInfo::new(i, &fg, false));
+            ctx.focused
+                .push(FocusInfo::new(i, &fg, shown_title(policy, &fg), false));
             return Ok(());
         }
         // 失敗の理由を分ける: 対象が閉じられた (同じウィンドウを取り直せない) / 断られた (前面で 3 つに分ける)。
@@ -2288,7 +2327,12 @@ impl Executor<'_> {
             let helper_accepted = outcome == HelperOutcome::Accepted;
             helper = Some(outcome);
             if let Some(reached) = self.settle(&w, helper_accepted, before, state, ctx)? {
-                ctx.focused.push(FocusInfo::new(i, &reached, true));
+                ctx.focused.push(FocusInfo::new(
+                    i,
+                    &reached,
+                    shown_title(policy, &reached),
+                    true,
+                ));
                 return Ok(());
             }
             if !still_there(self.desktop)? {
@@ -2362,6 +2406,8 @@ impl Executor<'_> {
             AppError::new(ErrorKind::WindowNotFound, message)
                 .with_hint(hint(Hint::CloseNotFound, ctx.surface))
         };
+        // close は title が必須なので、撮影の許可が無ければ常に断る (検証の守りの重ね。探す前に。D-152)
+        refuse_title_naming(self.policy, true)?;
         // 名指しの候補は `windows` に出る窓と TUI の端末を除いた窓だけ (D-139)
         let (policy, host_pids, self_hwnd) = (self.policy, ctx.host_pids, ctx.self_hwnd);
         let Some(w) = self
@@ -2378,10 +2424,8 @@ impl Executor<'_> {
         // 閉じてよい相手か。フォアグラウンドガードと同じ判定 (設定、自分の端末、起動した側、管理者権限)。権限の
         // ほかは述語を通った窓には当たらない (守りの重ね。D-139)
         self.check_window(&w.info, ctx, "閉じる対象", Hint::CloseDenied)?;
-        let describe = format!(
-            "process={:?}, title={:?}, hwnd={:#x}",
-            w.info.process, w.info.title, w.info.hwnd
-        );
+        // 撮影の許可が無ければ題名を外す (D-152。今は入口で断るので、守りの重ね)
+        let describe = target_label(policy, &w.info);
         // モーダルのダイアログを開いている (無効な) ウィンドウは、閉じるボタンも押せない。click と同じ範囲に留める。
         // 対象 (か所有されたダイアログ) が前面で人が操作中なら取り上げない
         self.refuse_if_disabled_or_active(
@@ -2426,7 +2470,7 @@ impl Executor<'_> {
             action_index: i,
             hwnd: w.info.hwnd,
             process: w.info.process.clone(),
-            title: w.info.title.clone(),
+            title: shown_title(self.policy, &w.info),
             gone,
             hidden,
         });
@@ -2501,6 +2545,8 @@ impl Executor<'_> {
                 .with_hint(hint(Hint::ResizeNotFound, surface))
         };
         let (process, title) = (spec.process, spec.title);
+        // 題名での名指しは撮影の許可が要る (検証の守りの重ね。探す前に断る。D-152)
+        refuse_title_naming(self.policy, title.is_some())?;
         // 名指しの候補は `windows` に出る窓と TUI の端末を除いた窓だけ (D-139)
         let (policy, host_pids, self_hwnd) = (self.policy, ctx.host_pids, ctx.self_hwnd);
         let Some(w) = self
@@ -2516,10 +2562,8 @@ impl Executor<'_> {
         };
         // 大きさを変えてよい相手か。close と同じ判定 (設定、自分の端末、起動した側、管理者権限)
         self.check_window(&w.info, ctx, "大きさを変える対象", Hint::ResizeDenied)?;
-        let describe = format!(
-            "process={:?}, title={:?}, hwnd={:#x}",
-            w.info.process, w.info.title, w.info.hwnd
-        );
+        // 撮影の許可が無ければ題名を外す (D-152)
+        let describe = target_label(policy, &w.info);
         let window_state = |message: String, why: &'static str| {
             AppError::new(ErrorKind::ForegroundGuard, message)
                 .with_reason(why)
@@ -2655,7 +2699,7 @@ impl Executor<'_> {
             action_index: i,
             hwnd: w.info.hwnd,
             process: w.info.process.clone(),
-            title: w.info.title.clone(),
+            title: shown_title(self.policy, &w.info),
             area: spec.area.as_str(),
             logical: spec.logical,
             dpi: g.dpi,
@@ -3993,7 +4037,7 @@ mod tests {
                 action_index: 0,
                 hwnd: 0x20,
                 process: "Notepad.exe".into(),
-                title: "a.txt - メモ帳".into(),
+                title: Some("a.txt - メモ帳".into()),
                 helper: false,
             }],
             "前面にしたウィンドウを結果に出す"
@@ -4422,7 +4466,7 @@ mod tests {
                 action_index: 0,
                 hwnd: 0x21,
                 process: "Notepad.exe".into(),
-                title: "b.txt - メモ帳".into(),
+                title: Some("b.txt - メモ帳".into()),
                 gone: true,
                 hidden: false,
             }]
@@ -11925,5 +11969,246 @@ mod tests {
         assert!(w.lock_events.is_empty());
         assert!(w.shows.is_empty());
         assert_eq!(w.keys_held_calls, 0);
+    }
+
+    /// 入力は許し、撮影を切った設定 (D-152)
+    const NO_CAPTURE: &str = "[general]\ninput_enabled = true\ncapture_enabled = false\n";
+
+    /// 断った軸の設定のキー (`rule`)
+    fn deny_rule(e: &AppError) -> Option<&'static str> {
+        e.deny.as_ref().map(|d| d.rule)
+    }
+
+    /// 端末が前面で、メモ帳 (0x20、題名 "a.txt - メモ帳") を前面にしてよい world
+    fn titled_notepad_world() -> World {
+        let mut w = World::new();
+        w.foreground = Some(terminal());
+        w.top = vec![top(0x20, "notepad.exe", "a.txt - メモ帳")];
+        w
+    }
+
+    /// D-152: 撮影の許可が無ければ、process だけの focus は今までどおり成功し、結果の title は null (キーは残す)。
+    /// 撮影の許可があれば題名を出す (対照)
+    #[test]
+    fn focus_hides_title_without_capture() {
+        let s = script(r#"{"type":"focus","process":"notepad.exe"}"#);
+        let world = titled_notepad_world().shared();
+        let (r, _) = exec(&world, &policy(NO_CAPTURE), &mut StopSet::new(), &s);
+        let report = r.unwrap();
+        assert_eq!(report.focused.len(), 1);
+        assert_eq!(report.focused[0].hwnd, 0x20);
+        assert_eq!(report.focused[0].title, None);
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(
+            json["focused"][0].get("title"),
+            Some(&serde_json::Value::Null),
+            "{json}"
+        );
+        assert!(!json.to_string().contains("メモ帳"), "{json}");
+        assert_eq!(world.borrow().focus_calls, vec![0x20]);
+        // 対照: 撮影の許可があれば題名を出す
+        let world = titled_notepad_world().shared();
+        let (r, _) = exec(&world, &policy(ENABLED), &mut StopSet::new(), &s);
+        assert_eq!(
+            r.unwrap().focused[0].title.as_deref(),
+            Some("a.txt - メモ帳")
+        );
+    }
+
+    /// D-152: 既に前面の早い成功の経路も、同じ作り方で題名を伏せる
+    #[test]
+    fn focus_already_foreground_hides_title_without_capture() {
+        let mut w = titled_notepad_world();
+        w.foreground = Some(w.top[0].info.clone());
+        let world = w.shared();
+        let (r, _) = exec(
+            &world,
+            &policy(NO_CAPTURE),
+            &mut StopSet::new(),
+            &script(r#"{"type":"focus","process":"notepad.exe"}"#),
+        );
+        let report = r.unwrap();
+        assert!(
+            world.borrow().focus_calls.is_empty(),
+            "既に前面なら呼ばない"
+        );
+        assert_eq!(report.focused[0].hwnd, 0x20);
+        assert_eq!(report.focused[0].title, None);
+    }
+
+    /// D-152: capture_enabled は真でも allow.actions に screenshot が無ければ (`windows` が 4 の設定)、題名を伏せる
+    #[test]
+    fn focus_hides_title_when_screenshot_not_in_allow_actions() {
+        let p = policy(&format!(
+            "{ENABLED}[allow]\nactions = [\"focus\", \"close\", \"resize\"]\n"
+        ));
+        let world = titled_notepad_world().shared();
+        let (r, _) = exec(
+            &world,
+            &p,
+            &mut StopSet::new(),
+            &script(r#"{"type":"focus","process":"notepad.exe"}"#),
+        );
+        let report = r.unwrap();
+        assert_eq!(report.focused[0].hwnd, 0x20);
+        assert_eq!(report.focused[0].title, None);
+    }
+
+    /// D-152: 撮影の許可が無ければ、process だけの resize は成功し、結果の title は null。撮影の許可があれば出す (対照)
+    #[test]
+    fn resize_hides_title_without_capture() {
+        let s = script(r#"{"type":"resize","process":"notepad.exe","width":800,"height":600}"#);
+        let world = resize_world(Some(96)).shared();
+        let (r, _) = exec(&world, &policy(NO_CAPTURE), &mut StopSet::new(), &s);
+        let report = r.unwrap();
+        assert_eq!(report.resized[0].hwnd, 0x20);
+        assert_eq!(report.resized[0].title, None);
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(
+            json["resized"][0].get("title"),
+            Some(&serde_json::Value::Null),
+            "{json}"
+        );
+        assert!(!json.to_string().contains("メモ帳"), "{json}");
+        assert_eq!(world.borrow().resize_calls.len(), 1);
+        let world = resize_world(Some(96)).shared();
+        let (r, _) = exec(&world, &policy(ENABLED), &mut StopSet::new(), &s);
+        assert_eq!(
+            r.unwrap().resized[0].title.as_deref(),
+            Some("a.txt - メモ帳")
+        );
+    }
+
+    /// 題名での名指し (focus / resize の title、close) の操作 (D-152)
+    const TITLED_NAMING: [&str; 3] = [
+        r#"{"type":"focus","process":"notepad.exe","title":"a.txt"}"#,
+        r#"{"type":"resize","process":"notepad.exe","title":"a.txt","width":800,"height":600}"#,
+        r#"{"type":"close","process":"notepad.exe","title":"a.txt"}"#,
+    ];
+
+    /// D-152: 撮影の許可が無ければ、title での名指しと close は (検証で) 4。rule は撮影を断った軸、hint は専用の文。
+    /// 窓に何もしない
+    #[test]
+    fn titled_naming_and_close_refused_without_capture() {
+        for json in TITLED_NAMING {
+            let world = resize_world(Some(96)).shared();
+            let (r, _) = exec(
+                &world,
+                &policy(NO_CAPTURE),
+                &mut StopSet::new(),
+                &script(json),
+            );
+            let e = r.unwrap_err();
+            assert_eq!(e.kind, ErrorKind::PolicyDenied, "{json}: {e}");
+            assert_eq!(e.kind.exit_code(), 4);
+            assert_eq!(deny_rule(&e), Some("general.capture_enabled"), "{json}");
+            assert_eq!(
+                e.hint.as_deref(),
+                Some(crate::hint::TITLE_NAMING_HINT),
+                "{json}"
+            );
+            let w = world.borrow();
+            assert!(w.focus_calls.is_empty(), "{json}");
+            assert!(w.close_calls.is_empty(), "{json}");
+            assert!(w.resize_calls.is_empty(), "{json}");
+        }
+    }
+
+    /// D-152 の守りの重ね: 検証を通さずに実行器の本体 (`execute_checked`) へ渡しても、title での名指しと close は
+    /// 探す前に 4 で断る (入口の配線を撃つ)
+    #[test]
+    fn executor_refuses_titled_naming_without_validation() {
+        let p = policy(NO_CAPTURE);
+        for json in TITLED_NAMING {
+            let world = resize_world(Some(96)).shared();
+            let s = script(json);
+            let plans = s
+                .actions
+                .iter()
+                .map(|a| crate::plan::plan(a).unwrap())
+                .collect();
+            let v = crate::validate::Validation {
+                issues: vec![],
+                plans,
+            };
+            let mut sink = MockSink(world.clone());
+            let desktop = MockDesktop(world.clone());
+            let mut clock = MockClock(world.clone());
+            let mut images = MemoryImages::default();
+            let mut stops = StopSet::new();
+            let screen = desktop.virtual_screen().unwrap();
+            let mut released = false;
+            let e = Executor {
+                policy: &p,
+                sink: &mut sink,
+                desktop: &desktop,
+                clock: &mut clock,
+                stops: &mut stops,
+                images: &mut images,
+                indicator: &mut MockIndicator(world.clone()),
+                input_lock: &mut MockInputLock(world.clone()),
+            }
+            .execute_checked(
+                screen,
+                &v,
+                &opts(None, &[], Surface::Cli),
+                true,
+                false,
+                &mut released,
+            )
+            .unwrap_err();
+            assert_eq!(e.kind, ErrorKind::PolicyDenied, "{json}: {e}");
+            assert_eq!(e.action_index, Some(0), "{json}");
+            assert_eq!(deny_rule(&e), Some("general.capture_enabled"), "{json}");
+            let w = world.borrow();
+            assert_eq!(w.find_window_calls, 0, "探す前に断る: {json}");
+            assert!(w.focus_calls.is_empty(), "{json}");
+            assert!(w.close_calls.is_empty(), "{json}");
+            assert!(w.resize_calls.is_empty(), "{json}");
+        }
+    }
+
+    /// D-152: 守りの重ねの自由関数。撮影の許可が無く題名で名指ししたときだけ 4 (rule と fix は撮影の軸、hint は専用の文)
+    #[test]
+    fn refuse_title_naming_denies_only_titled_naming_without_capture() {
+        let no_capture = policy(NO_CAPTURE);
+        let e = refuse_title_naming(&no_capture, true).unwrap_err();
+        assert_eq!(e.kind, ErrorKind::PolicyDenied);
+        assert_eq!(deny_rule(&e), Some("general.capture_enabled"));
+        assert!(e.deny.as_ref().unwrap().fix.is_some(), "{e:?}");
+        assert!(e.message.starts_with("題名での名指し"), "{}", e.message);
+        assert_eq!(e.hint.as_deref(), Some(crate::hint::TITLE_NAMING_HINT));
+        assert!(refuse_title_naming(&no_capture, false).is_ok());
+        assert!(refuse_title_naming(&policy(ENABLED), true).is_ok());
+        let no_shot_action = policy(&format!("{ENABLED}[allow]\nactions = [\"focus\"]\n"));
+        let e = refuse_title_naming(&no_shot_action, true).unwrap_err();
+        assert_eq!(deny_rule(&e), Some("allow.actions"));
+    }
+
+    /// D-152: 撮影の許可が無ければ、失敗の message (最小化の 11 と 7) の対象の表示から題名を外し、process と hwnd で
+    /// 示す。撮影の許可があれば題名を含む (対照)
+    #[test]
+    fn failure_message_omits_title_without_capture() {
+        let focus = script(r#"{"type":"focus","process":"notepad.exe"}"#);
+        let resize =
+            script(r#"{"type":"resize","process":"notepad.exe","width":800,"height":600}"#);
+        for (p, readable) in [(policy(NO_CAPTURE), false), (policy(ENABLED), true)] {
+            for s in [&focus, &resize] {
+                let mut w = resize_world(Some(96));
+                w.top[0].minimized = true;
+                let world = w.shared();
+                let (r, _) = exec(&world, &p, &mut StopSet::new(), s);
+                let e = r.unwrap_err();
+                assert_eq!(e.reason, Some(reason::MINIMIZED), "{e}");
+                assert!(e.message.contains("hwnd=0x20"), "{}", e.message);
+                assert!(e.message.contains("\"notepad.exe\""), "{}", e.message);
+                assert_eq!(
+                    e.message.contains("a.txt"),
+                    readable,
+                    "readable={readable}: {}",
+                    e.message
+                );
+            }
+        }
     }
 }
