@@ -406,7 +406,7 @@ impl Desktop for Win32Desktop {
                 "窓の大きさ {outer_w}x{outer_h} が SetWindowPos の範囲 (i32) を超える"
             )));
         };
-        Ok(win32::window::set_size(hwnd, w, h))
+        set_size_result(win32::window::set_size(hwnd, w, h))
     }
 
     fn window_presence(&self, hwnd: usize, pid: u32) -> Result<WindowPresence, BackendError> {
@@ -559,6 +559,22 @@ pub fn resize_allowed(
             crate::config::ENV_DEV_FORBID
         ))),
         None => Ok(()),
+    }
+}
+
+/// `SetWindowPos` の失敗の `GetLastError` の値のうち、窓が無い (無効なハンドル) を表すもの (`ERROR_INVALID_WINDOW_HANDLE`)
+const ERROR_INVALID_WINDOW_HANDLE: u32 = 1400;
+
+/// `win32::window::set_size` の結果を `set_window_size` の形に写す (D-150)。置けたら `Ok(true)`、窓が無い (1400) なら
+/// `Ok(false)` (実行器が 12)、それ以外の失敗は `BackendError::Os` (8。文に GetLastError の値を載せる)。純関数なので
+/// Win32 を呼ばずに単体でテストする。
+fn set_size_result(r: Result<(), u32>) -> Result<bool, BackendError> {
+    match r {
+        Ok(()) => Ok(true),
+        Err(ERROR_INVALID_WINDOW_HANDLE) => Ok(false),
+        Err(e) => Err(BackendError::Os(format!(
+            "窓の大きさを変える要求 (SetWindowPos) が失敗した (GetLastError {e})"
+        ))),
     }
 }
 
@@ -919,6 +935,17 @@ mod tests {
             uia_error(UiaError::TimedOut("30 秒で時間切れ".into())),
             BackendError::TimedOut("30 秒で時間切れ".into())
         );
+    }
+
+    /// SetWindowPos の失敗の写し: 置けたら true、無効なハンドル (1400) は false (12)、それ以外は Os (8) で文に値 (D-150)
+    #[test]
+    fn set_size_result_maps_invalid_handle_to_false_and_other_errors_to_os() {
+        assert_eq!(set_size_result(Ok(())), Ok(true));
+        assert_eq!(set_size_result(Err(1400)), Ok(false));
+        match set_size_result(Err(5)) {
+            Err(BackendError::Os(m)) => assert!(m.contains("GetLastError 5"), "{m}"),
+            other => panic!("Os でない: {other:?}"),
+        }
     }
 
     /// 枠を出せない警告は、同じ文なら 1 回だけ書く。違う文はそれぞれ 1 回 (D-093)

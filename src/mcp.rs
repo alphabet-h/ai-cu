@@ -6194,6 +6194,8 @@ mod tests {
                     client: Rect::new(108, 131, 984, 661),
                     maximized: false,
                     dpi: Some(120),
+                    minimized: false,
+                    hung: false,
                 },
             );
         }

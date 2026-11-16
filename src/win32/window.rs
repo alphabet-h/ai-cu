@@ -801,7 +801,8 @@ fn rect_of(r: &RECT) -> Option<Rect> {
 /// 写すと、右から左のレイアウト (`WS_EX_LAYOUTRTL`) の窓でも left <= right に入れ替えられる (Microsoft Learn の
 /// MapWindowPoints の Remarks。点ごとの `ClientToScreen` は鏡像の窓で幅が負になる)。最大化は `IsZoomed`、DPI は窓が
 /// 主に載っている画面の有効 DPI (`MonitorFromWindow` + `GetDpiForMonitor(MDT_EFFECTIVE_DPI)`。読めなければ None で、
-/// 96 に倒さない)。最小化 (`IsIconic`) は読まない (判定は `TopWindow::minimized` の 1 か所)。
+/// 96 に倒さない)。最小化 (`IsIconic`) と応答しない (`IsHungAppWindow`。メッセージを送らずに読む) も読み、送る直前の
+/// 判定に使う (最小化は `TopWindow::minimized` と 2 重の確認)。
 /// 窓が無ければ `Ok(None)`。窓はあるのに外側・中身が読めない (API の失敗か、右 < 左・下 < 上の壊れた矩形) なら
 /// `Err` (呼ぶ側は 8 にする。「窓が無い」(12) と混ぜない)。読みに失敗した後に `IsWindow` を見直し、その間に窓が
 /// 消えていたなら `Ok(None)` にする。読み取りだけで、メッセージを送らない。
@@ -868,12 +869,18 @@ fn read_geometry(h: HWND) -> Result<WindowGeometry, String> {
         rect_of(&c).ok_or_else(|| format!("中身の矩形が壊れている ({})", rect_text(&c)))?;
     // SAFETY: ハンドルの値を渡すだけ。無効なハンドルや最大化していない窓なら 0 が返る。
     let maximized = unsafe { IsZoomed(h) } != 0;
+    // SAFETY: ハンドルの値を渡すだけ。無効なハンドルや最小化していない窓なら 0 が返る。
+    let minimized = unsafe { IsIconic(h) } != 0;
+    // SAFETY: ハンドルの値を渡すだけ。メッセージは送らず、窓のスレッドが一定時間メッセージを汲んでいないかを読む。
+    let hung = unsafe { IsHungAppWindow(h) } != 0;
     Ok(WindowGeometry {
         outer,
         frame,
         client,
         maximized,
         dpi: monitor_dpi(h),
+        minimized,
+        hung,
     })
 }
 
@@ -886,7 +893,9 @@ fn rect_text(r: &RECT) -> String {
 }
 
 /// 窓が主に載っている画面の有効 DPI (D-150)。`GetDpiForWindow` は DPI 非対応の窓に 96 を返すので使わない。
-/// 読めなければ None。
+/// 読めなければ None。GetDpiForMonitor の Remarks の一文 (per-monitor の DPI 認識のスレッドで使うべきでない) と、
+/// 同じ頁の表 (PROCESS_PER_MONITOR_DPI_AWARE なら実の値を返す) が食い違う。ai-cu は Per-Monitor V2 を宣言していて
+/// 実の値が要るので、表に従う。
 fn monitor_dpi(h: HWND) -> Option<u32> {
     // SAFETY: ハンドルの値と旗を渡すだけ。MONITOR_DEFAULTTONEAREST なので、窓が有効なら必ずどれかのモニターを返す。
     // 無効なハンドルなら null が返りうる (下で見る)。
@@ -905,11 +914,21 @@ fn monitor_dpi(h: HWND) -> Option<u32> {
 /// スレッドの入力の列が別なら、要求を窓のスレッドに置くだけで戻る (Microsoft Learn の SetWindowPos の uFlags) ので、
 /// 応答しないアプリで ai-cu が止まらない (close が SendMessage を避けたのと同じ。D-062)。戻り値は OS が受け付けたかで、
 /// 大きさが届いたかは呼ぶ側が `geometry` で読み直す。入力は送らない。
-pub fn set_size(hwnd: usize, w: i32, h: i32) -> bool {
+/// 失敗なら `Err(GetLastError の値)` (SetWindowPos は失敗時に最後のエラーを設定する。Microsoft Learn の Return value)。
+/// 呼ぶ前に最後のエラーを 0 にしておき、前の呼び出しの残りの値 (たとえば 1400) を失敗の理由と取り違えない。
+/// 応答しない窓へは要求が列に残って後から効くので、呼ぶ側が `geometry` の `hung` を見てから呼ぶ。
+pub fn set_size(hwnd: usize, w: i32, h: i32) -> Result<(), u32> {
     let flags = SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_ASYNCWINDOWPOS;
-    // SAFETY: ハンドルの値と整数を渡すだけ。hWndInsertAfter の null は SWP_NOZORDER で無視される。無効なハンドルなら
-    // 0 が返り、メモリは参照しない。
-    unsafe { SetWindowPos(hwnd as HWND, std::ptr::null_mut(), 0, 0, w, h, flags) != 0 }
+    // SAFETY: 引数を持たず、呼んだスレッドの最後のエラーの値を書き換えるだけ。
+    unsafe { SetLastError(0) };
+    // SAFETY: ハンドルの値と整数を渡すだけ。hWndInsertAfter の null は HWND_TOP と同じ値で、SWP_NOZORDER で無視される。
+    // 無効なハンドルなら 0 が返り、メモリは参照しない。
+    let ok = unsafe { SetWindowPos(hwnd as HWND, std::ptr::null_mut(), 0, 0, w, h, flags) } != 0;
+    if ok {
+        return Ok(());
+    }
+    // SAFETY: 引数を持たず、呼んだスレッドの最後のエラーの値を読むだけ。
+    Err(unsafe { GetLastError() })
 }
 
 /// ウィンドウが入力を受け付ける (無効になっていない) か (D-062)。モーダルのダイアログ (保存の確認など) を開いている

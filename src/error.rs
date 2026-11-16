@@ -189,6 +189,8 @@ pub mod reason {
     pub const MINIMIZED: &str = "minimized";
     /// resize (7): 対象が最大化されている (D-150)。ai-cu は復元しない
     pub const MAXIMIZED: &str = "maximized";
+    /// resize (7): 対象が応答していない (`IsHungAppWindow`。D-150)。要求が後から効いて重なるので送らない
+    pub const NOT_RESPONDING: &str = "not_responding";
     /// focus: 呼んだ後に対象が閉じられた (または題名が変わった)
     pub const CLOSED: &str = "closed";
     /// focus: 前面は ai-cu を起動した側なのに断られた

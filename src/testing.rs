@@ -217,11 +217,12 @@ pub struct World {
     pub lock_err: Option<BackendError>,
     /// 錠への呼び出しの記録 (呼ばれた順。D-113)。Err を返した `try_acquire` は記録しない
     pub lock_events: Vec<LockEvent>,
-    /// 窓の大きさの読み (`window_geometry` が返す。D-150)。無い hwnd は `Ok(None)` (窓が無い)。既定は空
+    /// 窓の大きさの読み (`window_geometry` が返す。D-150)。無い hwnd は `Ok(None)` (窓が無い)。既定は空。
+    /// 値の `minimized` / `hung` を立てると、送る直前の最小化・応答しない窓を模擬できる
     pub geometry: HashMap<usize, WindowGeometry>,
     /// `set_window_size` に渡された (hwnd, 外側の幅, 外側の高さ) (呼ばれた順。D-150)
     pub resize_calls: Vec<(usize, u32, u32)>,
-    /// `set_window_size` が要求を置けなかった (false) と返す (D-150)
+    /// `set_window_size` が要求を置けなかった (false。実装置では無効なハンドルの 1400) と返す (D-150)
     pub resize_fails: bool,
     /// アプリの最小の外側の大きさ (幅, 高さ) の模擬 (D-150)。要求がこれより小さければ、この大きさで止まる
     pub resize_clamp: Option<(u32, u32)>,

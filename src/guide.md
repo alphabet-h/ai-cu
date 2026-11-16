@@ -157,10 +157,10 @@ ai-cu pixel 2546,965 2600,965    # 2 点の色を読む (点は X,Y の形。オ
 - 既定は物理ピクセルで、中身 (client area) の大きさ。`--logical` (`logical: true`) なら論理の大きさで、窓が載っている画面の有効 DPI / 96 で物理に換算する (125% の画面で 1280x720 は 1600x900)。`--frame` (`area: "frame"`) なら見えている枠の大きさ
 - `--title` を省くと、そのプロセスの最前の窓に効く。出力の `resized[]` の `hwnd` と `title` で、狙いの窓かを確かめる
 - 出力の `resized[]` に、実際の `frame` と `client` (物理の矩形)、物理の狙いの `requested`、`dpi`、`exact` が入る。`exact` が false ならアプリの最小・最大の大きさなどで狙いに届いていない (失敗ではない)。`frame` と `client` の実際の大きさを見る
-- 最小化・最大化の窓は 7 (`reason` が `minimized` / `maximized`) で、ai-cu は元に戻さない。人間に戻してもらう。対象がダイアログを開いていれば 7 (`target_disabled`)、対象が前面で人が操作中なら 10、見つからなければ 12
+- 最小化・最大化の窓は 7 (`reason` が `minimized` / `maximized`) で、ai-cu は元に戻さない。人間に戻してもらう。応答しない窓は 7 (`not_responding`。要求が後から効いて重なるので送らない。数秒待って `windows` と撮影で確かめてから 1 回だけやり直す)。対象がダイアログを開いていれば 7 (`target_disabled`)、対象が前面で人が操作中なら 10、見つからなければ 12
 - `--logical` で換算後が 16384 を超えたときの 3 (値を下げるか物理で書く) と、DPI を読めないときと窓の大きさの読みが壊れているとき (中身か枠が外側より大きい) の 8 (何も送っていない) は、窓を見つけた後に分かるので `validate` と `--dry-run` では見えない
 - 12 で `partial` が true なら、大きさの要求を置いた後に窓が消えた。打ち直さず `windows` で確かめる
-- `error.detail` は `close` と同じ形: 設定などに断られた 7 は対象の `window` (`minimized` / `maximized` / `target_disabled` の 7 には detail が無い)、10 は `idle_ms` と `min_idle_ms`
+- `error.detail` は `close` と同じ形: 設定などに断られた 7 は対象の `window` (`minimized` / `maximized` / `not_responding` / `target_disabled` の 7 には detail が無い)、10 は `idle_ms` と `min_idle_ms`
 
 ## 終わり方の例 (保存せずに閉じる)
 

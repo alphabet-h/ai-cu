@@ -105,10 +105,12 @@ pub enum Hint {
     ResizeWindowState,
     /// resize: logical の大きさを物理に換算すると上限を超える (3。D-150)。窓を見つけた後に分かるので実行時に出る
     ResizeTooLarge,
+    /// resize: 対象が応答していない (7。`reason: not_responding`。D-150)。要求を置くと後から効いて重なるので送らない
+    ResizeNotResponding,
 }
 
 impl Hint {
-    pub const ALL: [Hint; 39] = [
+    pub const ALL: [Hint; 40] = [
         Hint::MouseGuard,
         Hint::KeyboardGuard,
         Hint::Elevated,
@@ -148,8 +150,14 @@ impl Hint {
         Hint::ResizeWindowState,
         Hint::ResizeTooLarge,
         Hint::ResizeGoneAfterRequest,
+        Hint::ResizeNotResponding,
     ];
 }
+
+/// resize: 対象が応答していない (CLI。D-150)
+pub const RESIZE_NOT_RESPONDING_HINT: &str = "窓の大きさは変えていない。対象のウィンドウが応答していない (メッセージを処理していない) ので、要求を置くと後から効いて重なりうるため送らなかった。数秒待って `ai-cu windows` と撮影で応答を確かめてから 1 回だけ再試行し、だめなら人間に確かめる";
+/// resize: 対象が応答していない (MCP。D-150)
+const MCP_RESIZE_NOT_RESPONDING_HINT: &str = "窓の大きさは変えていない。対象のウィンドウが応答していない (メッセージを処理していない) ので、要求を置くと後から効いて重なりうるため送らなかった。数秒待って windows の道具と撮影で応答を確かめてから 1 回だけ再試行し、だめなら人間に確かめる";
 
 /// resize: 見つからないか、要求を置けなかった (CLI。D-150)
 pub const RESIZE_NOT_FOUND_HINT: &str = "窓の大きさは変えていない。その実行ファイル名 (と題名) の見えているウィンドウが無い (大きさの要求を置く前に消えた場合を含む)。`ai-cu windows` で名前と題名を確かめる";
@@ -330,6 +338,8 @@ pub fn hint(kind: Hint, surface: Surface) -> &'static str {
         // コマンドの書き方を含まない文なので、CLI と MCP で同じ
         Hint::ResizeWindowState => RESIZE_WINDOW_STATE_HINT,
         Hint::ResizeTooLarge => RESIZE_TOO_LARGE_HINT,
+        Hint::ResizeNotResponding if mcp => MCP_RESIZE_NOT_RESPONDING_HINT,
+        Hint::ResizeNotResponding => RESIZE_NOT_RESPONDING_HINT,
     }
 }
 
@@ -650,6 +660,7 @@ mod tests {
                 Hint::ResizeWindowState => 36,
                 Hint::ResizeTooLarge => 37,
                 Hint::ResizeGoneAfterRequest => 38,
+                Hint::ResizeNotResponding => 39,
             }
         }
         let mut seen: Vec<usize> = Hint::ALL.iter().map(|h| index(*h)).collect();
@@ -697,6 +708,7 @@ mod tests {
             Hint::ResizeGoneAfterRequest,
             Hint::ResizeDisabled,
             Hint::ResizeUserActive,
+            Hint::ResizeNotResponding,
         ] {
             assert_ne!(hint(h, Surface::Cli), hint(h, Surface::Mcp), "{h:?}");
         }
@@ -842,11 +854,17 @@ mod tests {
                 Hint::ResizeUserActive,
                 Hint::ResizeWindowState,
                 Hint::ResizeTooLarge,
+                Hint::ResizeNotResponding,
             ] {
                 assert!(
                     hint(h, s).starts_with("窓の大きさは変えていない。"),
                     "{h:?}"
                 );
+            }
+            // 応答しない窓: 送らなかった理由 (後から効いて重なる) と、待って確かめてから 1 回だけ再試行することを書く
+            let hung = hint(Hint::ResizeNotResponding, s);
+            for word in ["応答していない", "重なり", "windows", "1 回だけ", "人間"] {
+                assert!(hung.contains(word), "{word}: {hung}");
             }
             let state = hint(Hint::ResizeWindowState, s);
             for word in ["error.reason", "元に戻さない", "人間"] {

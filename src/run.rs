@@ -2480,12 +2480,28 @@ impl Executor<'_> {
                 "対象 ({describe}) の大きさを読む前に窓が消えた"
             )));
         };
+        // 探した後に最小化された窓へは送らない (上の `TopWindow::minimized` と 2 重の確認)
+        if g.minimized {
+            return Err(window_state(
+                format!("対象 ({describe}) は最小化されている。ai-cu は元に戻さない"),
+                reason::MINIMIZED,
+            ));
+        }
         // 最大化の窓に送ると、最大化の印のまま大きさだけ変わる。人も縁を掴めないので断る
         if g.maximized {
             return Err(window_state(
                 format!("対象 ({describe}) は最大化されている。ai-cu は元に戻さない"),
                 reason::MAXIMIZED,
             ));
+        }
+        // 応答しない窓へ置いた要求は列に残り、`exact: false` で戻った後に効く。送り直しと重なるので送らない
+        if g.hung {
+            return Err(AppError::new(
+                ErrorKind::ForegroundGuard,
+                format!("対象 ({describe}) は応答していない。大きさの要求を送っていない"),
+            )
+            .with_reason(reason::NOT_RESPONDING)
+            .with_hint(hint(Hint::ResizeNotResponding, surface)));
         }
         // 読みの正気の検査: 中身と枠は外側に収まる。収まらない読みは壊れているので、逆算に使わない
         // (差の割合では判定しない。D-150)
@@ -2546,7 +2562,7 @@ impl Executor<'_> {
             .map_err(backend_error)?
         {
             return Err(not_found(format!(
-                "対象 ({describe}) に大きさの要求を置けなかった (閉じられたか、置けない相手)"
+                "対象 ({describe}) に大きさの要求を置けなかった (窓が閉じられた)"
             )));
         }
         // 要求を置いた (この後の待ちで止まっても、大きさの要求は届いている。D-065)
@@ -4605,6 +4621,8 @@ mod tests {
             client: Rect::new(outer.x + 8, outer.y + 31, outer.w - 16, outer.h - 39),
             maximized: false,
             dpi,
+            minimized: false,
+            hung: false,
         }
     }
 
@@ -4863,6 +4881,44 @@ mod tests {
         }
         assert_eq!(reason::MAXIMIZED, "maximized");
         assert_eq!(reason::MINIMIZED, "minimized");
+    }
+
+    /// resize (D-150、win32-reviewer の指摘): 応答しない窓 (geometry の hung) には要求を置かず 7 (`not_responding`)。
+    /// 置いた要求は列に残って後から効き、送り直しと重なるため
+    #[test]
+    fn resize_refuses_hung_window_without_sending() {
+        let s = resize_json(r#","width":800,"height":600"#);
+        let mut w = resize_world(Some(96));
+        w.geometry.get_mut(&0x20).unwrap().hung = true;
+        let world = w.shared();
+        let (r, _) = exec(&world, &policy(ENABLED), &mut StopSet::new(), &s);
+        let e = r.unwrap_err();
+        assert_eq!(e.kind, ErrorKind::ForegroundGuard);
+        assert_eq!(e.kind.exit_code(), 7);
+        assert_eq!(e.reason, Some(reason::NOT_RESPONDING));
+        assert_eq!(reason::NOT_RESPONDING, "not_responding");
+        assert_eq!(e.hint.as_deref(), resize_hint(Hint::ResizeNotResponding));
+        assert_eq!(progress(&e)["executed"], 0);
+        assert_eq!(progress(&e)["partial"], false);
+        assert!(world.borrow().resize_calls.is_empty());
+    }
+
+    /// resize (D-150、win32-reviewer の指摘): 探した時点 (`TopWindow`) では最小化でなくても、送る直前の geometry の
+    /// 読みで最小化なら 7 (`minimized`) で断り、何も送らない (2 重の確認)
+    #[test]
+    fn resize_refuses_window_minimized_after_lookup_without_sending() {
+        let s = resize_json(r#","width":800,"height":600"#);
+        let mut w = resize_world(Some(96));
+        assert!(!w.top[0].minimized);
+        w.geometry.get_mut(&0x20).unwrap().minimized = true;
+        let world = w.shared();
+        let (r, _) = exec(&world, &policy(ENABLED), &mut StopSet::new(), &s);
+        let e = r.unwrap_err();
+        assert_eq!(e.kind.exit_code(), 7);
+        assert_eq!(e.reason, Some(reason::MINIMIZED));
+        assert_eq!(e.hint.as_deref(), resize_hint(Hint::ResizeWindowState));
+        assert_eq!(progress(&e)["executed"], 0);
+        assert!(world.borrow().resize_calls.is_empty());
     }
 
     /// resize (D-150): close と同じ守り。見つからない・設定の deny (クラス)・自分の端末・起動した側は 12
