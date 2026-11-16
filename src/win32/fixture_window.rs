@@ -36,7 +36,10 @@ use windows_sys::Win32::Graphics::Gdi::{
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Threading::GetCurrentProcessId;
-use windows_sys::Win32::UI::HiDpi::{DPI_AWARENESS_CONTEXT_UNAWARE, SetThreadDpiAwarenessContext};
+use windows_sys::Win32::UI::HiDpi::{
+    DPI_AWARENESS_CONTEXT_UNAWARE, DPI_AWARENESS_UNAWARE, GetAwarenessFromDpiAwarenessContext,
+    GetWindowDpiAwarenessContext, SetThreadDpiAwarenessContext,
+};
 use windows_sys::Win32::UI::Input::Ime::{
     GCS_COMPSTR, GCS_RESULTSTR, ImmAssociateContextEx, ImmGetContext, ImmGetOpenStatus,
     ImmReleaseContext, ImmSetOpenStatus,
@@ -47,8 +50,8 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     BS_PUSHBUTTON, CS_DBLCLKS, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
     ES_AUTOHSCROLL, ES_MULTILINE, ES_PASSWORD, ES_READONLY, GetClientRect, GetDlgItem, GetMessageW,
-    GetWindowRect, GetWindowThreadProcessId, HMENU, HTCAPTION, IDC_ARROW, IsWindowVisible,
-    LoadCursorW, MSG, PostMessageW, PostQuitMessage, RegisterClassExW, SC_KEYMENU,
+    GetWindowRect, GetWindowThreadProcessId, HMENU, HTCAPTION, IDC_ARROW, IsHungAppWindow,
+    IsWindowVisible, LoadCursorW, MSG, PostMessageW, PostQuitMessage, RegisterClassExW, SC_KEYMENU,
     SMTO_ABORTIFHUNG, SW_HIDE, SendMessageTimeoutW, SendMessageW, SetForegroundWindow,
     SetWindowDisplayAffinity, ShowWindow, ShowWindowAsync, TranslateMessage, WINDOW_STYLE, WM_APP,
     WM_CHAR, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND, WM_GETTEXT, WM_GETTEXTLENGTH, WM_IME_COMPOSITION,
@@ -646,10 +649,10 @@ fn window_thread(
         //         (このフィクスチャの窓の専用スレッド) の文脈だけを変え、前の文脈を返す。失敗なら null。
         let prev = unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_UNAWARE) };
         if prev.is_null() {
-            let _ = tx.send(Err(format!(
-                "SetThreadDpiAwarenessContext(UNAWARE) が失敗 (GetLastError={})",
-                super::last_error()
-            )));
+            // 文書は失敗時に最後のエラーを設定すると書いていないので、GetLastError を文に載せない
+            let _ = tx.send(Err(
+                "SetThreadDpiAwarenessContext(UNAWARE) が失敗 (null が返った)".to_string(),
+            ));
             return;
         }
         Some(prev)
@@ -682,7 +685,9 @@ fn window_thread(
     if let Some(prev) = prev_dpi_context {
         // SAFETY: prev は上の SetThreadDpiAwarenessContext が返した、このスレッドの前の文脈 (null でない)。
         //         呼び出したスレッドの文脈だけを戻す。作った窓の DPI 認識は作ったときの文脈のまま変わらない。
-        unsafe { SetThreadDpiAwarenessContext(prev) };
+        let restored = unsafe { SetThreadDpiAwarenessContext(prev) };
+        // 戻す呼び出しは、上で非対応にできた同じスレッドで有効な前の文脈を渡すので、失敗は想定しない
+        debug_assert!(!restored.is_null(), "スレッドの DPI の文脈を戻せない");
     }
     if hwnd.is_null() {
         let _ = tx.send(Err(format!(
@@ -824,6 +829,26 @@ impl FixtureWindow {
     /// ウィンドウ全体の矩形 (スクリーン座標)。
     pub fn window_rect(&self) -> Result<Rect, String> {
         screen_rect_of(self.handle())
+    }
+
+    /// 窓が DPI 非対応で作られたか (D-150)。`GetWindowDpiAwarenessContext` の文脈を
+    /// `GetAwarenessFromDpiAwarenessContext` で読み、`DPI_AWARENESS_UNAWARE` と比べる。大きさの読み (GetClientRect
+    /// など) に頼らずに前提を確かめるための口。読み取りだけ。
+    pub fn is_dpi_unaware(&self) -> bool {
+        // SAFETY: このフィクスチャのウィンドウのハンドルを渡すだけ。返る文脈はハンドルの値で、参照も解放もしない。
+        let ctx = unsafe { GetWindowDpiAwarenessContext(self.handle()) };
+        if ctx.is_null() {
+            return false;
+        }
+        // SAFETY: 上で得た null でない DPI の文脈の値を渡すだけ。無効なら DPI_AWARENESS_INVALID が返る。
+        unsafe { GetAwarenessFromDpiAwarenessContext(ctx) == DPI_AWARENESS_UNAWARE }
+    }
+
+    /// 窓が応答していないと OS が見ているか (`IsHungAppWindow`。D-150)。メッセージは送らず、読み取りだけ。
+    /// `stall` で眠らせたフィクスチャが、resize の `not_responding` の閾値 (約 5 秒) を越えていないかを見るため
+    pub fn is_hung(&self) -> bool {
+        // SAFETY: このフィクスチャのウィンドウのハンドルを渡すだけ。無効なハンドルなら 0 が返り、メモリは参照しない。
+        unsafe { IsHungAppWindow(self.handle()) != 0 }
     }
 
     /// 子つきのフィクスチャ (`open_with_controls`) の子の窓の矩形 (スクリーン座標、`GetWindowRect`)。

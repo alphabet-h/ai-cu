@@ -1170,7 +1170,10 @@ fn fixture_real_resize_changes_fixture_size_keeping_top_left() {
 
 /// 応答しない窓への `resize` で ai-cu が止まらないこと (`SWP_ASYNCWINDOWPOS`。D-150): フィクスチャの窓のスレッドを
 /// `stall` で 3 秒眠らせて resize を打つと、読み直しの上限 (`RESIZE_SETTLE_MS`) 付近で、`exact: false` の成功で返る。
-/// 返った時点でまだ眠っていること (眠りが resize より先に明けると空振り) も見る。眠りが明けた後の大きさは印字だけ
+/// 返った時点でまだ眠っていること (眠りが resize より先に明けると空振り) も見る。眠りが明けた後の大きさは印字だけ。
+/// 眠りは `IsHungAppWindow` の閾値 (約 5 秒。OS の内部の値で変わりうる) 未満に保つ。超えると resize は
+/// `not_responding` の 7 で送る前に断られ、`SWP_ASYNCWINDOWPOS` の経路を撃てない。そのため resize の直前と直後に
+/// フィクスチャが hung でないかを印字し、結果が `not_responding` なら専用の文で落とす
 #[test]
 #[ignore = "実機のフィクスチャ限定。cargo test -- --ignored --test-threads=1"]
 fn fixture_real_resize_on_stalled_fixture_returns_within_settle() {
@@ -1180,10 +1183,20 @@ fn fixture_real_resize_on_stalled_fixture_returns_within_settle() {
         f.win.stall(Duration::from_secs(3)),
         "resize の前に眠りの印が立たない"
     );
+    let hung_before = f.win.is_hung();
     let start = Instant::now();
     let r = f.execute(&resize_action("resize-stall", 500, 300, ""));
     let elapsed = start.elapsed();
     let stalled_after = f.win.is_stalled();
+    let hung_after = f.win.is_hung();
+    println!("FIXTURE resize stalled hung_before={hung_before} hung_after={hung_after}");
+    if let Err(e) = &r {
+        assert_ne!(
+            e.reason,
+            Some(ai_cu::error::reason::NOT_RESPONDING),
+            "眠らせたフィクスチャが IsHungAppWindow の閾値を越えて not_responding で断られた (ASYNC の経路を撃てていない。眠りを短くする): {e:?}"
+        );
+    }
     // 眠りが明けるのを待ってから断言する (眠ったまま窓を壊さない)
     let woke = wait_until(Duration::from_secs(5), || !f.win.is_stalled());
     std::thread::sleep(Duration::from_millis(200));
@@ -1220,14 +1233,22 @@ fn fixture_real_resize_on_stalled_fixture_returns_within_settle() {
 }
 
 /// DPI 非対応の窓の中身の読みが物理か (D-150 の限界の推定を測る): DPI 非対応のフィクスチャに中身の resize
-/// (物理 500x300) を打ち、結果の `client` と `exact` に加えて、独立の物理の読みとして結果の `frame` (DWM の枠) が
-/// 500x300 から縁の分 (8 px 以内) しか違わないことを見る。中身の読みと SetWindowPos が同じ倍率で仮想化されていれば、
-/// client は 500x300 に見えても frame は倍率の分だけ大きくなり、ここで落ちる
+/// (物理 500x300) を打ち、独立の物理の読みとして結果の `frame` (DWM の枠) が 500x300 から縁と丸めの分しか
+/// 違わないことを主に見る。中身の読みと SetWindowPos が同じ倍率で仮想化されていれば、client は 500x300 に見えても
+/// frame は倍率の分だけ大きくなり、ここで落ちる。非対応の窓の大きさは論理の単位で保たれ、物理の中身は論理の外枠を
+/// 丸めた結果でしか作れないので、中身は丸めの分 (ceil(dpi / 96) px) の違いを許し、`exact` は印字だけにする。
+/// 前提 (窓が非対応で作られた) は、確かめたい中身の読みに頼らず、窓の DPI 認識の文脈と、PMv2 からは物理で返る
+/// `GetWindowRect` の引き伸ばしで見る
 #[test]
 #[ignore = "実機のフィクスチャ限定。cargo test -- --ignored --test-threads=1"]
 fn fixture_real_resize_dpi_unaware_fixture_client() {
     let f = Fixture::open_dpi_unaware("resize-unaware");
-    let opened = f.client;
+    assert!(
+        f.win.is_dpi_unaware(),
+        "フィクスチャが DPI 非対応で作られていない (GetWindowDpiAwarenessContext の認識が UNAWARE でない)"
+    );
+    // 開いた直後の外側 (GetWindowRect。PMv2 の ai-cu からは物理)。論理の 640x400 で作った WS_POPUP の外側
+    let opened = f.win.window_rect().expect("窓の矩形");
     let r = f
         .execute(&resize_action("resize-unaware", 500, 300, ""))
         .expect("DPI 非対応の窓の resize");
@@ -1245,30 +1266,36 @@ fn fixture_real_resize_dpi_unaware_fixture_client() {
         fixture_client.w,
         fixture_client.h
     );
-    // 空振りを防ぐ: 窓が本当に DPI 非対応で作られたなら、論理として読まれた 640x400 の矩形が倍率の分だけ
-    // 物理で引き伸ばされている。640x400 との不一致だけでは、WS_BORDER の縁の分 (対応の窓でも 638x398) で
-    // 素通りするので、倍率をかけた大きさとの中間を超えたことを見る
-    match info.dpi {
-        Some(d) if d > 96 => {
-            let mid = |v: u32| (v + v * d / 96) / 2;
-            assert!(
-                opened.w > mid(640) && opened.h > mid(400),
-                "フィクスチャが DPI 非対応で作られていない (開いた直後の物理の中身 {}x{}、dpi={d})",
-                opened.w,
-                opened.h
-            );
-        }
-        other => println!(
-            "FIXTURE resize unaware: dpi={other:?} では非対応の窓かを区別できない (開いた直後 {}x{})",
-            opened.w, opened.h
-        ),
-    }
-    assert!(info.exact, "中身は狙いに届く: {info:?}");
-    assert_eq!((info.client.w, info.client.h), (500, 300), "{info:?}");
-    let near = |v: u32, want: u32| v.abs_diff(want) <= 8;
+    // 画面の DPI が 96 なら、論理と物理が同じなので、下の断言は何も区別しない (素通りの成功を測定と読まない)
+    let Some(d) = info.dpi.filter(|d| *d > 96) else {
+        println!(
+            "FIXTURE resize unaware: 測定は成立していない (画面の DPI が {:?}。96 では論理と物理が同じ)。開いた直後の外側 {}x{}",
+            info.dpi, opened.w, opened.h
+        );
+        return;
+    };
+    // 引き伸ばしの確認: 非対応の窓の論理の外側 640x400 は、物理では倍率の分だけ大きい。倍率をかけた大きさとの
+    // 中間を超えたことを見る (外側は WS_POPUP なので論理の大きさそのもの)
+    let mid = |v: u32| (v + v * d / 96) / 2;
     assert!(
-        near(info.frame.w, 500) && near(info.frame.h, 300),
-        "枠 (物理の読み) が中身の 500x300 から縁の分を超えて違う (中身の読みが物理でない): {info:?}"
+        opened.w > mid(640) && opened.h > mid(400),
+        "非対応の窓の外側が物理で引き伸ばされていない (開いた直後の外側 {}x{}、dpi={d})",
+        opened.w,
+        opened.h
+    );
+    // 丸めの分: 論理の 1 px は物理の ceil(dpi / 96) px までずれうる
+    let round = d.div_ceil(96);
+    // 主の断言: 独立の物理の読みの枠 (DWM の枠) が、中身 500x300 から縁 (8 px 以内) と丸めの分しか違わない
+    let near_frame = |v: u32, want: u32| v.abs_diff(want) <= 8 + round;
+    assert!(
+        near_frame(info.frame.w, 500) && near_frame(info.frame.h, 300),
+        "枠 (物理の読み) が中身の 500x300 から縁と丸めの分を超えて違う (中身の読みが物理でない): {info:?}"
+    );
+    // 中身の読みは丸めの分の違いを許す (exact は丸めの向きで偽になりうるので断言しない)
+    let near_client = |v: u32, want: u32| v.abs_diff(want) <= round;
+    assert!(
+        near_client(info.client.w, 500) && near_client(info.client.h, 300),
+        "中身が 500x300 から丸めの分 ({round} px) を超えて違う: {info:?}"
     );
 }
 
