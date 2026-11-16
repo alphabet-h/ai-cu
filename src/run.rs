@@ -15,11 +15,11 @@ use crate::estop::{StopReason, StopSet};
 use crate::geometry::{Point, Rect, bounding, visible_parts};
 use crate::hint::{Hint, Surface, hint};
 use crate::plan::{
-    CLOSE_SETTLE_MS, FOCUS_SETTLE_MS, OCCLUDED_GRACE_MS, Step, Target, Until, WAIT_FOR_POLL_MS,
-    WAIT_SCREEN_POLL_MS,
+    CLOSE_SETTLE_MS, FOCUS_SETTLE_MS, OCCLUDED_GRACE_MS, RESIZE_SETTLE_MS, Step, Target, Until,
+    WAIT_FOR_POLL_MS, WAIT_SCREEN_POLL_MS,
 };
 use crate::policy::Policy;
-use crate::script::{Button, ElementFilter, Script, Settle, WindowTarget};
+use crate::script::{Button, ElementFilter, RESIZE_MAX, ResizeArea, Script, Settle, WindowTarget};
 use crate::validate::validate;
 
 /// フォアグラウンドガードの次の手 (マウス): 何も送っていない
@@ -675,7 +675,40 @@ pub struct RunReport {
     /// `wait_for` が満たされた記録 (操作の順。D-068)。無ければ出力に出さない
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub waited: Vec<WaitInfo>,
+    /// `resize` で大きさを変えたウィンドウ (操作の順。D-150)。無ければ出力に出さない
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub resized: Vec<ResizeInfo>,
     pub elapsed_ms: u64,
+}
+
+/// 幅と高さ (物理ピクセル)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct Size {
+    pub width: u32,
+    pub height: u32,
+}
+
+/// `resize` で大きさを変えたウィンドウ (D-150)。`frame` と `client` は読み直しの最後の読み (物理ピクセル)
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ResizeInfo {
+    pub action_index: usize,
+    pub hwnd: usize,
+    pub process: String,
+    pub title: String,
+    /// 大きさの基準 (`client` か `frame`)
+    pub area: &'static str,
+    /// 論理の大きさで指定したか
+    pub logical: bool,
+    /// 窓が載っている画面の有効 DPI。読めなければ null (物理の指定はそれでも通す)
+    pub dpi: Option<u32>,
+    /// 狙いの大きさ (物理。論理の指定は換算した後)
+    pub requested: Size,
+    /// DWM の見えている枠
+    pub frame: Rect,
+    /// 中身 (client area) を画面座標に直したもの
+    pub client: Rect,
+    /// 基準の大きさが狙いと一致したか。偽なら `frame` / `client` が実際の大きさ (アプリの最小の大きさなど)
+    pub exact: bool,
 }
 
 /// 検証の問題を 1 つのエラーにまとめる (問題が無ければ None)。種類は形の誤りを優先し、添字と次の手は最初の問題のもの。
@@ -1224,6 +1257,7 @@ struct Ctx<'h> {
     focused: Vec<FocusInfo>,
     closed: Vec<CloseInfo>,
     waited: Vec<WaitInfo>,
+    resized: Vec<ResizeInfo>,
 }
 
 impl Ctx<'_> {
@@ -1235,8 +1269,32 @@ impl Ctx<'_> {
             focused: std::mem::take(&mut self.focused),
             closed: std::mem::take(&mut self.closed),
             waited: std::mem::take(&mut self.waited),
+            resized: std::mem::take(&mut self.resized),
             elapsed_ms: now_ms.saturating_sub(self.start_ms),
         }
+    }
+}
+
+/// `resize` の指定 (`Step::Resize` のフィールドの借用。D-150)
+struct ResizeSpec<'a> {
+    process: &'a str,
+    title: Option<&'a str>,
+    width: u32,
+    height: u32,
+    logical: bool,
+    area: ResizeArea,
+}
+
+/// 論理の大きさを物理に換算する (D-150)。四捨五入 `(v * dpi + 48) / 96`。u64 で計算するので溢れない
+fn logical_to_physical(v: u32, dpi: u32) -> u64 {
+    (u64::from(v) * u64::from(dpi) + 48) / 96
+}
+
+/// `resize` の基準の矩形 (`client` は中身、`frame` は DWM の枠。D-150)
+fn resize_basis(g: &crate::device::WindowGeometry, area: ResizeArea) -> Rect {
+    match area {
+        ResizeArea::Client => g.client,
+        ResizeArea::Frame => g.frame,
     }
 }
 
@@ -1386,7 +1444,7 @@ impl Executor<'_> {
         let changes_screen = v.plans.iter().flatten().any(|s| {
             matches!(
                 s,
-                Step::Batch { .. } | Step::Focus { .. } | Step::Close { .. }
+                Step::Batch { .. } | Step::Focus { .. } | Step::Close { .. } | Step::Resize { .. }
             )
         });
         // 内側が枠を出して自分で解いたか (枠の解放を 1 回にする)
@@ -1546,6 +1604,7 @@ impl Executor<'_> {
             focused: Vec::new(),
             closed: Vec::new(),
             waited: Vec::new(),
+            resized: Vec::new(),
         };
         let result = self.run_plans(&v.plans, &mut state, &mut ctx);
         // 失敗や停止の後でも、押したままのキーとボタンを必ず離す
@@ -1686,6 +1745,25 @@ impl Executor<'_> {
                     Step::Close { process, title } => self
                         .close(i, process, title, state, ctx)
                         .map_err(|e| e.at(i))?,
+                    // close と同じく入力を送らないので、入力デスクトップの判定は通さない (D-150)
+                    Step::Resize {
+                        process,
+                        title,
+                        width,
+                        height,
+                        logical,
+                        area,
+                    } => {
+                        let spec = ResizeSpec {
+                            process,
+                            title: title.as_deref(),
+                            width: *width,
+                            height: *height,
+                            logical: *logical,
+                            area: *area,
+                        };
+                        self.resize(i, &spec, state, ctx).map_err(|e| e.at(i))?
+                    }
                     // 読むだけなので、入力デスクトップの判定は通さない (ロック中も読める。D-068)
                     Step::WaitFor {
                         process,
@@ -2243,45 +2321,15 @@ impl Executor<'_> {
             "process={:?}, title={:?}, hwnd={:#x}",
             w.info.process, w.info.title, w.info.hwnd
         );
-        // モーダルのダイアログを開いている (無効な) ウィンドウは、閉じるボタンも押せない。click と同じ範囲に留める
-        if !self
-            .desktop
-            .window_enabled(w.info.hwnd)
-            .map_err(backend_error)?
-        {
-            return Err(AppError::new(
-                ErrorKind::ForegroundGuard,
-                format!("対象 ({describe}) は無効 (多くはダイアログを開いている) なので閉じない"),
-            )
-            .with_reason(reason::TARGET_DISABLED)
-            .with_hint(hint(Hint::CloseDisabled, ctx.surface)));
-        }
-        let min_idle = self.policy.capture_min_idle_ms();
-        if min_idle > 0 {
-            let in_front = self
-                .desktop
-                .foreground_window()
-                .map_err(backend_error)?
-                .is_some_and(|fg| {
-                    fg.pid != 0
-                        && fg.pid == w.info.pid
-                        && (fg.hwnd == w.info.hwnd
-                            || self.desktop.owner_root(fg.hwnd) == w.info.hwnd)
-                });
-            if in_front {
-                let idle = self.desktop.idle_ms().map_err(backend_error)?;
-                if user_active(idle, min_idle) {
-                    return Err(AppError::new(
-                        ErrorKind::UserActive,
-                        format!(
-                            "対象 ({describe}) が前面にあり、人が操作中なので閉じない (最後の入力から {idle} ms。{min_idle} ms 以上の無操作が要る: capture.min_idle_ms)"
-                        ),
-                    )
-                    .with_detail(idle_detail(idle, min_idle))
-                    .with_hint(hint(Hint::CloseUserActive, ctx.surface)));
-                }
-            }
-        }
+        // モーダルのダイアログを開いている (無効な) ウィンドウは、閉じるボタンも押せない。click と同じ範囲に留める。
+        // 対象 (か所有されたダイアログ) が前面で人が操作中なら取り上げない
+        self.refuse_if_disabled_or_active(
+            &w.info,
+            &describe,
+            "閉じない",
+            (Hint::CloseDisabled, Hint::CloseUserActive),
+            ctx.surface,
+        )?;
         if !self
             .desktop
             .post_close(w.info.hwnd)
@@ -2320,6 +2368,227 @@ impl Executor<'_> {
             title: w.info.title.clone(),
             gone,
             hidden,
+        });
+        Ok(())
+    }
+
+    /// 窓に触れる操作 (close、resize) の前の 2 つの判定 (D-062、D-150)。無効な窓 (モーダルのダイアログを開いている。
+    /// 人も閉じるボタンや縁を押せない) は 7 (`target_disabled`)。対象か、対象に所有されたダイアログが前面で、人が
+    /// 操作中 (`capture.min_idle_ms`) なら 10。`refusal` は文の結び (「閉じない」など)、`hints` は (無効, 操作中) の次の手
+    fn refuse_if_disabled_or_active(
+        &self,
+        w: &WindowInfo,
+        describe: &str,
+        refusal: &str,
+        hints: (Hint, Hint),
+        surface: Surface,
+    ) -> Result<(), AppError> {
+        let (disabled, active) = hints;
+        if !self.desktop.window_enabled(w.hwnd).map_err(backend_error)? {
+            return Err(AppError::new(
+                ErrorKind::ForegroundGuard,
+                format!("対象 ({describe}) は無効 (多くはダイアログを開いている) なので{refusal}"),
+            )
+            .with_reason(reason::TARGET_DISABLED)
+            .with_hint(hint(disabled, surface)));
+        }
+        let min_idle = self.policy.capture_min_idle_ms();
+        if min_idle == 0 {
+            return Ok(());
+        }
+        let in_front = self
+            .desktop
+            .foreground_window()
+            .map_err(backend_error)?
+            .is_some_and(|fg| {
+                fg.pid != 0
+                    && fg.pid == w.pid
+                    && (fg.hwnd == w.hwnd || self.desktop.owner_root(fg.hwnd) == w.hwnd)
+            });
+        if in_front {
+            let idle = self.desktop.idle_ms().map_err(backend_error)?;
+            if user_active(idle, min_idle) {
+                return Err(AppError::new(
+                    ErrorKind::UserActive,
+                    format!(
+                        "対象 ({describe}) が前面にあり、人が操作中なので{refusal} (最後の入力から {idle} ms。{min_idle} ms 以上の無操作が要る: capture.min_idle_ms)"
+                    ),
+                )
+                .with_detail(idle_detail(idle, min_idle))
+                .with_hint(hint(active, surface)));
+            }
+        }
+        Ok(())
+    }
+
+    /// 許可されたウィンドウの大きさを変える (D-150)。入力は送らず、前面も Z 順も変えないので、前面のガードは掛けない。
+    /// close と同じ順で探して判定し (名指しの候補、`check_window`、無効、無操作)、最小化・最大化の窓は 7 で断る
+    /// (ai-cu は元に戻さない)。大きさの読みが壊れている (中身か枠が外側より大きい) か、論理の指定で画面の DPI が
+    /// 読めなければ 8、換算後が上限を超えれば 3 で、どれも何も送らない。外側の大きさは今の実測の差
+    /// (外側 − 基準) を狙いに足して逆算する。要求を置いた後は `RESIZE_SETTLE_MS` まで `STOP_POLL_MS` ごとに読み直し、
+    /// 基準が狙いに届けば抜ける。届かなくても成功のまま `exact: false` で、最後の読みを `resized` に残す
+    fn resize(
+        &mut self,
+        i: usize,
+        spec: &ResizeSpec<'_>,
+        state: &mut State,
+        ctx: &mut Ctx<'_>,
+    ) -> Result<(), AppError> {
+        let surface = ctx.surface;
+        let not_found = |message: String| {
+            AppError::new(ErrorKind::WindowNotFound, message)
+                .with_hint(hint(Hint::ResizeNotFound, surface))
+        };
+        let (process, title) = (spec.process, spec.title);
+        // 名指しの候補は `windows` に出る窓と TUI の端末を除いた窓だけ (D-139)
+        let (policy, host_pids, self_hwnd) = (self.policy, ctx.host_pids, ctx.self_hwnd);
+        let Some(w) = self
+            .desktop
+            .find_window(process, title, &|w| {
+                named_window_admitted(policy, w, host_pids, self_hwnd)
+            })
+            .map_err(backend_error)?
+        else {
+            return Err(not_found(format!(
+                "大きさを変える対象が見つからない (process={process:?}, title={title:?})。{NAMED_WINDOW_SCOPE_NOTE}"
+            )));
+        };
+        // 大きさを変えてよい相手か。close と同じ判定 (設定、自分の端末、起動した側、管理者権限)
+        self.check_window(&w.info, ctx, "大きさを変える対象", Hint::ResizeDenied)?;
+        let describe = format!(
+            "process={:?}, title={:?}, hwnd={:#x}",
+            w.info.process, w.info.title, w.info.hwnd
+        );
+        let window_state = |message: String, why: &'static str| {
+            AppError::new(ErrorKind::ForegroundGuard, message)
+                .with_reason(why)
+                .with_hint(hint(Hint::ResizeWindowState, surface))
+        };
+        // 最小化の判定は focus と同じ場所 (`TopWindow::minimized`)
+        if w.minimized {
+            return Err(window_state(
+                format!("対象 ({describe}) は最小化されている。ai-cu は元に戻さない"),
+                reason::MINIMIZED,
+            ));
+        }
+        let Some(g) = self
+            .desktop
+            .window_geometry(w.info.hwnd)
+            .map_err(backend_error)?
+        else {
+            return Err(not_found(format!(
+                "対象 ({describe}) の大きさを読む前に窓が消えた"
+            )));
+        };
+        // 最大化の窓に送ると、最大化の印のまま大きさだけ変わる。人も縁を掴めないので断る
+        if g.maximized {
+            return Err(window_state(
+                format!("対象 ({describe}) は最大化されている。ai-cu は元に戻さない"),
+                reason::MAXIMIZED,
+            ));
+        }
+        // 読みの正気の検査: 中身と枠は外側に収まる。収まらない読みは壊れているので、逆算に使わない
+        // (差の割合では判定しない。D-150)
+        let fits = |r: Rect| r.w <= g.outer.w && r.h <= g.outer.h;
+        if !fits(g.client) || !fits(g.frame) {
+            return Err(AppError::new(
+                ErrorKind::OsError,
+                format!(
+                    "対象 ({describe}) の大きさの読みが壊れている (外側 {}x{}、枠 {}x{}、中身 {}x{})。何も送っていない",
+                    g.outer.w, g.outer.h, g.frame.w, g.frame.h, g.client.w, g.client.h
+                ),
+            ));
+        }
+        self.refuse_if_disabled_or_active(
+            &w.info,
+            &describe,
+            "大きさを変えない",
+            (Hint::ResizeDisabled, Hint::ResizeUserActive),
+            surface,
+        )?;
+        // 狙いを物理にする。論理なら画面の有効 DPI で換算する (読めなければ 96 に倒さず 8)
+        let (want_w, want_h) = if spec.logical {
+            let Some(dpi) = g.dpi else {
+                return Err(AppError::new(
+                    ErrorKind::OsError,
+                    format!(
+                        "対象 ({describe}) の画面の DPI を読めないので、論理の大きさを物理に換算できない。何も送っていない"
+                    ),
+                ));
+            };
+            let (pw, ph) = (
+                logical_to_physical(spec.width, dpi),
+                logical_to_physical(spec.height, dpi),
+            );
+            let max = u64::from(RESIZE_MAX);
+            if pw > max || ph > max {
+                return Err(AppError::new(
+                    ErrorKind::InvalidScript,
+                    format!(
+                        "resize の論理の大きさ {}x{} は、画面の DPI {dpi} で物理に換算すると {pw}x{ph} になり、上限 {RESIZE_MAX} を超える",
+                        spec.width, spec.height
+                    ),
+                )
+                .with_hint(hint(Hint::ResizeTooLarge, surface)));
+            }
+            // 上の検査で RESIZE_MAX 以下なので u32 に収まる
+            (pw as u32, ph as u32)
+        } else {
+            (spec.width, spec.height)
+        };
+        // 外側の大きさを逆算する: 狙い + (今の外側 − 今の基準)
+        let basis = resize_basis(&g, spec.area);
+        let outer_w = want_w.saturating_add(g.outer.w.saturating_sub(basis.w));
+        let outer_h = want_h.saturating_add(g.outer.h.saturating_sub(basis.h));
+        if !self
+            .desktop
+            .set_window_size(w.info.hwnd, outer_w, outer_h)
+            .map_err(backend_error)?
+        {
+            return Err(not_found(format!(
+                "対象 ({describe}) に大きさの要求を置けなかった (閉じられたか、置けない相手)"
+            )));
+        }
+        // 要求を置いた (この後の待ちで止まっても、大きさの要求は届いている。D-065)
+        ctx.partial = true;
+        let mut waited = 0;
+        let last = loop {
+            let Some(now) = self
+                .desktop
+                .window_geometry(w.info.hwnd)
+                .map_err(backend_error)?
+            else {
+                // 要求は置いてあるので、「変えていない」で始まる ResizeNotFound の文は使わない
+                return Err(AppError::new(
+                    ErrorKind::WindowNotFound,
+                    format!("対象 ({describe}) は、大きさの要求を置いた後に窓が消えた"),
+                )
+                .with_hint(hint(Hint::ResizeGoneAfterRequest, surface)));
+            };
+            let b = resize_basis(&now, spec.area);
+            if (b.w == want_w && b.h == want_h) || waited >= RESIZE_SETTLE_MS {
+                break now;
+            }
+            self.clock.sleep_ms(STOP_POLL_MS);
+            waited += STOP_POLL_MS;
+            self.check_stop(state, ctx)?;
+        };
+        let b = resize_basis(&last, spec.area);
+        ctx.resized.push(ResizeInfo {
+            action_index: i,
+            hwnd: w.info.hwnd,
+            process: w.info.process.clone(),
+            title: w.info.title.clone(),
+            area: spec.area.as_str(),
+            logical: spec.logical,
+            dpi: g.dpi,
+            requested: Size {
+                width: want_w,
+                height: want_h,
+            },
+            frame: last.frame,
+            client: last.client,
+            exact: b.w == want_w && b.h == want_h,
         });
         Ok(())
     }
@@ -4323,6 +4592,468 @@ mod tests {
         let report = r.unwrap();
         assert!(!report.closed[0].gone);
         assert!(!report.closed[0].hidden);
+    }
+
+    // ---- resize (D-150) ----
+
+    /// 外側 `outer` の窓の大きさの読み。枠は外側から左右と下に 7 px 内側 (差 14x7)、中身は左右 8 px、上 31 px、
+    /// 下 8 px 内側 (差 16x39)
+    fn geometry(outer: Rect, dpi: Option<u32>) -> crate::device::WindowGeometry {
+        crate::device::WindowGeometry {
+            outer,
+            frame: Rect::new(outer.x + 7, outer.y, outer.w - 14, outer.h - 7),
+            client: Rect::new(outer.x + 8, outer.y + 31, outer.w - 16, outer.h - 39),
+            maximized: false,
+            dpi,
+        }
+    }
+
+    /// 大きさを変える対象のメモ帳 (0x20、外側 1000x700、画面の DPI 120) がある world。前面は端末
+    fn resize_world(dpi: Option<u32>) -> World {
+        let mut w = World::new();
+        w.foreground = Some(terminal());
+        w.top = vec![top(0x20, "notepad.exe", "a.txt - メモ帳")];
+        w.geometry
+            .insert(0x20, geometry(Rect::new(100, 100, 1000, 700), dpi));
+        w
+    }
+
+    fn resize_json(extra: &str) -> Script {
+        script(&format!(
+            r#"{{"type":"resize","process":"notepad.exe","title":"a.txt"{extra}}}"#
+        ))
+    }
+
+    fn resize_hint(h: Hint) -> Option<&'static str> {
+        Some(hint(h, Surface::Cli))
+    }
+
+    /// resize (D-150): 中身の大きさの指定は、今の外側との差 (16x39) を足した外側の大きさで送る。前面は変えず、
+    /// 入力も送らない。左上は動かない。結果の resized に実際の矩形と exact が入る (無ければ出力に出ない)
+    #[test]
+    fn resize_sets_client_size_without_focus_or_input() {
+        let world = resize_world(Some(120)).shared();
+        let (r, _) = exec(
+            &world,
+            &policy(ENABLED),
+            &mut StopSet::new(),
+            &resize_json(r#","width":1600,"height":900"#),
+        );
+        let report = r.unwrap();
+        let info = &report.resized[0];
+        assert_eq!(info.action_index, 0);
+        assert_eq!(info.hwnd, 0x20);
+        assert_eq!(info.process, "notepad.exe");
+        assert_eq!(info.area, "client");
+        assert!(!info.logical);
+        assert_eq!(info.dpi, Some(120));
+        assert_eq!(
+            info.requested,
+            Size {
+                width: 1600,
+                height: 900
+            }
+        );
+        assert!(info.exact);
+        assert_eq!(
+            info.client,
+            Rect::new(108, 131, 1600, 900),
+            "左上は動かない"
+        );
+        assert_eq!(info.frame, Rect::new(107, 100, 1602, 932));
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(json["resized"][0]["requested"]["width"], 1600);
+        assert_eq!(json["resized"][0]["client"]["w"], 1600);
+        assert_eq!(json["resized"][0]["exact"], true);
+        let w = world.borrow();
+        assert_eq!(w.resize_calls, vec![(0x20, 1616, 939)]);
+        assert!(w.focus_calls.is_empty(), "前面にしない");
+        assert!(w.sent.is_empty(), "入力を送らない: {:?}", w.sent);
+        assert_eq!(
+            w.foreground.as_ref().unwrap().hwnd,
+            0x10,
+            "前面は端末のまま"
+        );
+        assert_eq!(w.now_ms, 0, "届いていれば待たない");
+        drop(w);
+        // resize の無い操作列の出力には resized を出さない (今までの出力を変えない)
+        let (r, _) = exec(
+            &world,
+            &policy(ENABLED),
+            &mut StopSet::new(),
+            &script(r#"{"type":"wait","ms":1}"#),
+        );
+        assert!(
+            serde_json::to_value(r.unwrap())
+                .unwrap()
+                .get("resized")
+                .is_none()
+        );
+    }
+
+    /// resize (D-150): area frame は、外側と枠の差 (14x7) を足して送る
+    #[test]
+    fn resize_frame_area_uses_frame_difference() {
+        let world = resize_world(Some(120)).shared();
+        let (r, _) = exec(
+            &world,
+            &policy(ENABLED),
+            &mut StopSet::new(),
+            &resize_json(r#","width":1280,"height":720,"area":"frame""#),
+        );
+        let report = r.unwrap();
+        assert_eq!(world.borrow().resize_calls, vec![(0x20, 1294, 727)]);
+        let info = &report.resized[0];
+        assert_eq!(info.area, "frame");
+        assert!(info.exact);
+        assert_eq!((info.frame.w, info.frame.h), (1280, 720));
+    }
+
+    /// resize (D-150): logical は画面の有効 DPI (120 = 125%) で物理に換算する。1280x720 → 1600x900
+    #[test]
+    fn resize_logical_scales_by_monitor_dpi() {
+        let world = resize_world(Some(120)).shared();
+        let (r, _) = exec(
+            &world,
+            &policy(ENABLED),
+            &mut StopSet::new(),
+            &resize_json(r#","width":1280,"height":720,"logical":true"#),
+        );
+        let report = r.unwrap();
+        let info = &report.resized[0];
+        assert!(info.logical);
+        assert_eq!(info.dpi, Some(120));
+        assert_eq!(
+            info.requested,
+            Size {
+                width: 1600,
+                height: 900
+            }
+        );
+        assert!(info.exact);
+        assert_eq!(world.borrow().resize_calls, vec![(0x20, 1616, 939)]);
+        // 四捨五入: 101 * 120 / 96 = 126.25 → 126、103 * 120 / 96 = 128.75 → 129
+        assert_eq!(logical_to_physical(101, 120), 126);
+        assert_eq!(logical_to_physical(103, 120), 129);
+        assert_eq!(logical_to_physical(RESIZE_MAX, 96), u64::from(RESIZE_MAX));
+    }
+
+    /// resize (D-150): 換算後が上限 16384 を超えれば 3 (専用の hint) で何も送らない。形の検査 (validate) は通る
+    #[test]
+    fn resize_logical_over_max_refused_without_sending() {
+        let world = resize_world(Some(120)).shared();
+        let s = resize_json(r#","width":16000,"height":100,"logical":true"#);
+        assert!(
+            validate(&s, &policy(ENABLED), None).ok(),
+            "倍率は窓を見つけるまで分からない"
+        );
+        let (r, _) = exec(&world, &policy(ENABLED), &mut StopSet::new(), &s);
+        let e = r.unwrap_err();
+        assert_eq!(e.kind, ErrorKind::InvalidScript);
+        assert_eq!(e.kind.exit_code(), 3);
+        assert_eq!(e.action_index, Some(0));
+        assert_eq!(e.hint.as_deref(), resize_hint(Hint::ResizeTooLarge));
+        assert!(e.message.contains("20000"), "{}", e.message);
+        assert!(world.borrow().resize_calls.is_empty());
+    }
+
+    /// resize (D-150): logical で画面の DPI が読めなければ 8 で何も送らない (96 に倒さない)。
+    /// 同じ窓でも物理の指定なら DPI を使わずに通り、結果の dpi は null
+    #[test]
+    fn resize_logical_without_dpi_refused_without_sending() {
+        let world = resize_world(None).shared();
+        let (r, _) = exec(
+            &world,
+            &policy(ENABLED),
+            &mut StopSet::new(),
+            &resize_json(r#","width":1280,"height":720,"logical":true"#),
+        );
+        let e = r.unwrap_err();
+        assert_eq!(e.kind, ErrorKind::OsError);
+        assert_eq!(e.kind.exit_code(), 8);
+        assert!(world.borrow().resize_calls.is_empty());
+        let (r, _) = exec(
+            &world,
+            &policy(ENABLED),
+            &mut StopSet::new(),
+            &resize_json(r#","width":1280,"height":720"#),
+        );
+        let report = r.unwrap();
+        assert_eq!(report.resized[0].dpi, None);
+        assert!(report.resized[0].exact);
+        assert_eq!(
+            serde_json::to_value(&report).unwrap()["resized"][0]["dpi"],
+            serde_json::Value::Null
+        );
+        assert_eq!(world.borrow().resize_calls, vec![(0x20, 1296, 759)]);
+    }
+
+    /// resize (D-150): 大きさの読みが壊れている (中身か枠が外側より大きい)、または読めない (8) なら、何も送らない
+    #[test]
+    fn resize_refuses_implausible_geometry_without_sending() {
+        let s = resize_json(r#","width":800,"height":600"#);
+        let bad = |f: &dyn Fn(&mut crate::device::WindowGeometry)| {
+            let mut w = resize_world(Some(96));
+            f(w.geometry.get_mut(&0x20).unwrap());
+            w.shared()
+        };
+        for (why, world) in [
+            ("中身が広い", bad(&|g| g.client.w = g.outer.w + 1)),
+            ("中身が高い", bad(&|g| g.client.h = g.outer.h + 1)),
+            ("枠が広い", bad(&|g| g.frame.w = g.outer.w + 1)),
+        ] {
+            let (r, _) = exec(&world, &policy(ENABLED), &mut StopSet::new(), &s);
+            let e = r.unwrap_err();
+            assert_eq!(e.kind, ErrorKind::OsError, "{why}");
+            assert!(world.borrow().resize_calls.is_empty(), "{why}");
+        }
+        let mut w = resize_world(Some(96));
+        w.geometry_broken = true;
+        let world = w.shared();
+        let (r, _) = exec(&world, &policy(ENABLED), &mut StopSet::new(), &s);
+        assert_eq!(r.unwrap_err().kind, ErrorKind::OsError);
+        assert!(world.borrow().resize_calls.is_empty());
+    }
+
+    /// resize (D-150): 題名の帯のある小さな窓 (外側の高さ 69、中身の高さ 30) の正しい読みを、正気の検査が断らない
+    #[test]
+    fn resize_small_captioned_window_is_not_refused() {
+        let mut w = resize_world(Some(96));
+        w.geometry
+            .insert(0x20, geometry(Rect::new(100, 100, 200, 69), Some(96)));
+        assert_eq!(w.geometry[&0x20].client.h, 30);
+        let world = w.shared();
+        let (r, _) = exec(
+            &world,
+            &policy(ENABLED),
+            &mut StopSet::new(),
+            &resize_json(r#","width":300,"height":40"#),
+        );
+        assert!(r.unwrap().resized[0].exact);
+        assert_eq!(world.borrow().resize_calls, vec![(0x20, 316, 79)]);
+    }
+
+    /// resize (D-150): 最小化 (focus と同じ判定の場所) と最大化の窓は 7 で断り、元に戻さず何も送らない
+    #[test]
+    fn resize_refuses_minimized_and_maximized_without_sending() {
+        let s = resize_json(r#","width":800,"height":600"#);
+        let mut minimized = resize_world(Some(96));
+        minimized.top[0].minimized = true;
+        let mut maximized = resize_world(Some(96));
+        maximized.geometry.get_mut(&0x20).unwrap().maximized = true;
+        for (want, w) in [
+            (reason::MINIMIZED, minimized),
+            (reason::MAXIMIZED, maximized),
+        ] {
+            let world = w.shared();
+            let (r, _) = exec(&world, &policy(ENABLED), &mut StopSet::new(), &s);
+            let e = r.unwrap_err();
+            assert_eq!(e.kind, ErrorKind::ForegroundGuard, "{want}");
+            assert_eq!(e.kind.exit_code(), 7);
+            assert_eq!(e.reason, Some(want));
+            assert_eq!(e.hint.as_deref(), resize_hint(Hint::ResizeWindowState));
+            assert_eq!(progress(&e)["executed"], 0, "{want}");
+            assert_eq!(progress(&e)["partial"], false, "{want}");
+            let w = world.borrow();
+            assert!(w.resize_calls.is_empty(), "{want}");
+            assert!(
+                w.focus_calls.is_empty(),
+                "元に戻すために前面にしない: {want}"
+            );
+        }
+        assert_eq!(reason::MAXIMIZED, "maximized");
+        assert_eq!(reason::MINIMIZED, "minimized");
+    }
+
+    /// resize (D-150): close と同じ守り。見つからない・設定の deny (クラス)・自分の端末・起動した側は 12
+    /// (名指しの候補に入らない。D-139)、管理者権限は 7、無効な窓は 7 (target_disabled)、前面で人が操作中は 10。
+    /// どれも大きさの要求を置かない
+    #[test]
+    fn resize_refuses_missing_denied_disabled_and_active_targets() {
+        let s = resize_json(r#","width":800,"height":600"#);
+        let world = resize_world(Some(96)).shared();
+        let not_found = |e: AppError| {
+            assert_eq!(e.kind, ErrorKind::WindowNotFound, "{e}");
+            assert_eq!(e.kind.exit_code(), 12);
+            assert_eq!(e.hint.as_deref(), resize_hint(Hint::ResizeNotFound));
+            assert!(
+                e.message.ends_with(NAMED_WINDOW_SCOPE_NOTE),
+                "{}",
+                e.message
+            );
+        };
+        let (r, _) = exec(
+            &world,
+            &policy(ENABLED),
+            &mut StopSet::new(),
+            &script(
+                r#"{"type":"resize","process":"notepad.exe","title":"b.txt","width":800,"height":600}"#,
+            ),
+        );
+        not_found(r.unwrap_err());
+        let p = policy(&format!("{ENABLED}[deny]\nclasses=[\"TargetClass\"]\n"));
+        let (r, _) = exec(&world, &p, &mut StopSet::new(), &s);
+        not_found(r.unwrap_err());
+        let me = world.borrow().top[0].info.clone();
+        let (r, _) = exec_excluding(&world, &policy(ENABLED), &mut StopSet::new(), &s, Some(&me));
+        not_found(r.unwrap_err());
+        let (r, _) = exec_with(
+            &world,
+            &policy(ENABLED),
+            &mut StopSet::new(),
+            &s,
+            None,
+            &[me.pid],
+        );
+        not_found(r.unwrap_err());
+        // ダイアログを開いていて無効なウィンドウは、人も縁を掴めないので変えない
+        world.borrow_mut().disabled = vec![0x20];
+        let (r, _) = exec(&world, &policy(ENABLED), &mut StopSet::new(), &s);
+        let e = r.unwrap_err();
+        assert_eq!(e.kind, ErrorKind::ForegroundGuard);
+        assert_eq!(e.reason, Some(reason::TARGET_DISABLED));
+        assert_eq!(e.hint.as_deref(), resize_hint(Hint::ResizeDisabled));
+        assert!(
+            e.message.ends_with("なので大きさを変えない"),
+            "{}",
+            e.message
+        );
+        world.borrow_mut().disabled.clear();
+        // 対象が前面で人が操作中なら 10 (close と同じ判定)
+        world.borrow_mut().foreground = Some(me.clone());
+        world.borrow_mut().idle_ms = 1000;
+        let (r, _) = exec(&world, &policy(ENABLED), &mut StopSet::new(), &s);
+        let e = r.unwrap_err();
+        assert_eq!(e.kind, ErrorKind::UserActive);
+        assert_eq!(e.hint.as_deref(), resize_hint(Hint::ResizeUserActive));
+        assert_eq!(
+            e.detail.as_deref(),
+            Some(&serde_json::json!({"idle_ms": 1000, "min_idle_ms": 3000}))
+        );
+        world.borrow_mut().foreground = Some(terminal());
+        world.borrow_mut().top[0].info.elevated = Some(true);
+        let (r, _) = exec(&world, &policy(ENABLED), &mut StopSet::new(), &s);
+        let e = r.unwrap_err();
+        assert_eq!(e.kind.exit_code(), 7);
+        assert_eq!(e.hint.as_deref(), Some(ELEVATED_HINT));
+        assert!(
+            world.borrow().resize_calls.is_empty(),
+            "どの拒否でも要求を置かない"
+        );
+    }
+
+    /// resize (D-150): 要求を置いた後の読み直しで窓が消えたら、partial を立てたまま 12
+    #[test]
+    fn resize_window_gone_after_request_is_12_with_partial() {
+        let mut w = resize_world(Some(96));
+        w.resize_gone = true;
+        let world = w.shared();
+        let (r, _) = exec(
+            &world,
+            &policy(ENABLED),
+            &mut StopSet::new(),
+            &resize_json(r#","width":800,"height":600"#),
+        );
+        let e = r.unwrap_err();
+        assert_eq!(e.kind, ErrorKind::WindowNotFound);
+        assert_eq!(
+            e.hint
+                .as_deref()
+                .map(|h| h.ends_with(hint(Hint::ResizeGoneAfterRequest, Surface::Cli))),
+            Some(true)
+        );
+        // partial の前置きと食い違う「変えていない」を含まない
+        let h = e.hint.as_deref().unwrap_or_default();
+        assert!(!h.contains("変えていない"), "{h}");
+        assert!(
+            e.message.contains("要求を置いた後に窓が消えた"),
+            "{}",
+            e.message
+        );
+        assert_eq!(progress(&e)["partial"], true);
+        assert_eq!(world.borrow().resize_calls.len(), 1);
+    }
+
+    /// resize (D-150): アプリが最小の大きさで止めたら、上限まで読み直して成功のまま exact: false で実際の大きさを返す
+    #[test]
+    fn resize_reports_not_exact_when_app_clamps() {
+        let mut w = resize_world(Some(96));
+        w.resize_clamp = Some((1200, 800));
+        let world = w.shared();
+        let (r, _) = exec(
+            &world,
+            &policy(ENABLED),
+            &mut StopSet::new(),
+            &resize_json(r#","width":500,"height":300"#),
+        );
+        let report = r.unwrap();
+        let info = &report.resized[0];
+        assert!(!info.exact);
+        assert_eq!(
+            info.requested,
+            Size {
+                width: 500,
+                height: 300
+            }
+        );
+        assert_eq!((info.client.w, info.client.h), (1184, 761), "実際の大きさ");
+        assert_eq!(
+            serde_json::to_value(&report).unwrap()["resized"][0]["exact"],
+            false
+        );
+        assert_eq!(world.borrow().resize_calls, vec![(0x20, 516, 339)]);
+        let waited = world.borrow().now_ms;
+        assert!(
+            (RESIZE_SETTLE_MS..RESIZE_SETTLE_MS + 200).contains(&waited),
+            "上限まで読み直す: {waited}"
+        );
+    }
+
+    /// resize (D-150): 届くのを待つ間も停止要因を見る。要求は置いてあるので partial
+    #[test]
+    fn resize_wait_honors_stop_sources() {
+        let mut w = resize_world(Some(96));
+        w.resize_ignored = true;
+        let world = w.shared();
+        let mut stops = StopSet::new();
+        stops.push(Box::new(StopAfterPolls(3)));
+        let (r, _) = exec(
+            &world,
+            &policy(ENABLED),
+            &mut stops,
+            &resize_json(r#","width":800,"height":600"#),
+        );
+        let e = r.unwrap_err();
+        assert_eq!(e.kind, ErrorKind::Stopped);
+        assert_eq!(
+            world.borrow().resize_calls.len(),
+            1,
+            "置いた後の待ちで止まった"
+        );
+        assert_eq!(progress(&e)["partial"], true);
+        assert!(
+            world.borrow().now_ms < RESIZE_SETTLE_MS,
+            "上限より前に止まる"
+        );
+    }
+
+    /// resize (D-150): 要求を置けなければ 12 (何も変えていない)
+    #[test]
+    fn resize_fails_with_12_when_request_not_posted() {
+        let mut w = resize_world(Some(96));
+        w.resize_fails = true;
+        let world = w.shared();
+        let (r, _) = exec(
+            &world,
+            &policy(ENABLED),
+            &mut StopSet::new(),
+            &resize_json(r#","width":800,"height":600"#),
+        );
+        let e = r.unwrap_err();
+        assert_eq!(e.kind, ErrorKind::WindowNotFound);
+        assert_eq!(e.hint.as_deref(), resize_hint(Hint::ResizeNotFound));
+        assert_eq!(progress(&e)["partial"], false);
+        assert_eq!(world.borrow().resize_calls.len(), 1);
     }
 
     fn exec_on(
@@ -10229,6 +10960,25 @@ mod tests {
         assert_eq!(r.unwrap().closed.len(), 1);
         assert_eq!(world.borrow().lock_try_calls, 1, "close だけ");
         assert_eq!(lock_releases(&world.borrow()), 1);
+    }
+
+    /// resize だけの操作列も、入力を送らないが画面を変えるので、入力の錠を取り枠を出す (D-150)
+    #[test]
+    fn input_lock_and_overlay_taken_for_resize_only() {
+        let world = resize_world(Some(96)).shared();
+        let (r, _) = exec(
+            &world,
+            &notepad_policy(),
+            &mut StopSet::new(),
+            &resize_json(r#","width":800,"height":600"#),
+        );
+        assert_eq!(r.unwrap().resized.len(), 1);
+        let w = world.borrow();
+        assert_eq!(w.lock_try_calls, 1, "resize だけ");
+        assert_eq!(lock_releases(&w), 1);
+        assert_eq!(w.shows.len(), 1, "枠を出す");
+        assert_eq!(w.releases, vec![0]);
+        assert!(w.sent.is_empty());
     }
 
     /// 撮影だけ、待ちだけ、wait_for だけの操作列は画面を変えないので錠を取らない

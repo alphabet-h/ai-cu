@@ -5,7 +5,9 @@ use serde::Serialize;
 use crate::device::InputEvent;
 use crate::geometry::{Point, Rect};
 use crate::keys::KeyCombo;
-use crate::script::{Action, Button, ClickModifier, ElementFilter, Settle, WindowTarget};
+use crate::script::{
+    Action, Button, ClickModifier, ElementFilter, ResizeArea, Settle, WindowTarget,
+};
 
 const VK_RETURN: u16 = 0x0D;
 const VK_TAB: u16 = 0x09;
@@ -22,6 +24,8 @@ pub const FOCUS_SETTLE_MS: u64 = 500;
 pub const SCROLL_NOTCH_INTERVAL_MS: u64 = 20;
 /// `close` で `WM_CLOSE` を置いた後、ウィンドウが消えるのを待つ上限 (D-062)。時間の予算にも数える
 pub const CLOSE_SETTLE_MS: u64 = 1000;
+/// `resize` で大きさの要求を置いた後、狙いの大きさに届くのを読み直して待つ上限 (D-150)。時間の予算にも数える
+pub const RESIZE_SETTLE_MS: u64 = 1000;
 /// `wait_for` が条件を確かめる間隔 (D-068)。UIA の FindAll は重いので 50 ms では回さない。
 /// 最初の判定は待たずに行い、間の待ちは 50 ms ごとに停止要因と期限を見る
 pub const WAIT_FOR_POLL_MS: u64 = 250;
@@ -107,6 +111,17 @@ pub enum Step {
         until: Until,
         threshold: f64,
         timeout_ms: u64,
+    },
+    /// 許可されたアプリのウィンドウの大きさを変える (D-150)。入力は送らず、前面も Z 順も変えない。
+    /// `logical` の換算は窓を見つけてから (画面の DPI が要る)
+    Resize {
+        process: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        width: u32,
+        height: u32,
+        logical: bool,
+        area: ResizeArea,
     },
 }
 
@@ -429,6 +444,21 @@ pub fn plan(action: &Action) -> Result<Vec<Step>, String> {
             threshold: *threshold,
             timeout_ms: *timeout_ms,
         }],
+        Action::Resize {
+            process,
+            title,
+            width,
+            height,
+            logical,
+            area,
+        } => vec![Step::Resize {
+            process: process.clone(),
+            title: title.clone(),
+            width: *width,
+            height: *height,
+            logical: *logical,
+            area: *area,
+        }],
     })
 }
 
@@ -468,6 +498,7 @@ pub fn total_sleep_ms(steps: &[Step]) -> u64 {
 }
 
 /// 時間の予算 (ミリ秒): 待ちの合計に、`focus` が前面になるのを待つ上限、`close` で消えるのを待つ上限、
+/// `resize` で狙いの大きさに届くのを待つ上限、
 /// `wait_for`、`wait_stable`、`wait_change` と screenshot の `settle` の `timeout_ms` (全額) を足したもの。実行時の期限の検証に使う。
 pub fn time_budget_ms(steps: &[Step]) -> u64 {
     steps
@@ -476,6 +507,7 @@ pub fn time_budget_ms(steps: &[Step]) -> u64 {
             Step::Sleep { ms } => *ms,
             Step::Focus { .. } => FOCUS_SETTLE_MS,
             Step::Close { .. } => CLOSE_SETTLE_MS,
+            Step::Resize { .. } => RESIZE_SETTLE_MS,
             Step::WaitFor { timeout_ms, .. } | Step::WaitScreen { timeout_ms, .. } => *timeout_ms,
             Step::Capture {
                 settle: Some(s), ..
@@ -919,6 +951,34 @@ mod tests {
         assert!(mouse_points(&steps).is_empty());
         assert_eq!(total_sleep_ms(&steps), 0, "待ちではない");
         assert_eq!(time_budget_ms(&steps), CLOSE_SETTLE_MS);
+    }
+
+    /// resize は入力のバッチにならず、点も待ちも持たない。予算には読み直しの上限を数える (D-150)
+    #[test]
+    fn plan_resize_is_single_step_without_input() {
+        let steps = plan(&Action::Resize {
+            process: "notepad.exe".into(),
+            title: Some("メモ".into()),
+            width: 1280,
+            height: 720,
+            logical: true,
+            area: ResizeArea::Frame,
+        })
+        .unwrap();
+        assert_eq!(
+            steps,
+            vec![Step::Resize {
+                process: "notepad.exe".into(),
+                title: Some("メモ".into()),
+                width: 1280,
+                height: 720,
+                logical: true,
+                area: ResizeArea::Frame,
+            }]
+        );
+        assert!(mouse_points(&steps).is_empty());
+        assert_eq!(total_sleep_ms(&steps), 0, "待ちではない");
+        assert_eq!(time_budget_ms(&steps), RESIZE_SETTLE_MS);
     }
 
     /// wait_for (D-068) は 1 ステップで、入力のバッチにならず、点も固定の待ちも持たない。

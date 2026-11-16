@@ -228,6 +228,8 @@ pub enum FirstBatch {
     Focus,
     /// 先頭が `close` (前面は変えず、対象に WM_CLOSE を置く。D-062)
     Close,
+    /// 先頭が `resize` (前面は変えず、対象の窓の大きさを変える。D-150)
+    Resize,
 }
 
 /// 事前検査の結果 (TUI の確認の画面の材料)。装置には触れていない。
@@ -244,6 +246,8 @@ pub struct PreflightReport {
     pub screenshots: usize,
     /// `close` の数 (ウィンドウを閉じる。D-062)
     pub closes: usize,
+    /// `resize` の数 (窓の大きさを変える。D-150)
+    pub resizes: usize,
     /// 判定に使った層の出所 (床と追加の層)
     pub layer_sources: Vec<String>,
     pub max_duration_ms: u64,
@@ -264,12 +268,10 @@ impl PreflightReport {
     ) -> PreflightReport {
         let validation = validate(&script, policy, screen);
         let (batches, first_batch, wait_total_ms, screenshots) = summarize(&validation);
-        let closes = validation
-            .plans
-            .iter()
-            .flatten()
-            .filter(|s| matches!(s, Step::Close { .. }))
-            .count();
+        let count =
+            |is: fn(&Step) -> bool| validation.plans.iter().flatten().filter(|s| is(s)).count();
+        let closes = count(|s| matches!(s, Step::Close { .. }));
+        let resizes = count(|s| matches!(s, Step::Resize { .. }));
         PreflightReport {
             path: path.to_path_buf(),
             script,
@@ -279,6 +281,7 @@ impl PreflightReport {
             wait_total_ms,
             screenshots,
             closes,
+            resizes,
             layer_sources: policy.layers.iter().map(|l| l.source.clone()).collect(),
             max_duration_ms: policy.max_duration_ms(),
             mouse_threshold_px: policy.mouse_threshold_px(),
@@ -344,6 +347,7 @@ fn summarize(v: &Validation) -> (usize, Option<FirstBatch>, u64, usize) {
         } => Some(FirstBatch::Keyboard),
         Step::Focus { .. } => Some(FirstBatch::Focus),
         Step::Close { .. } => Some(FirstBatch::Close),
+        Step::Resize { .. } => Some(FirstBatch::Resize),
         _ => None,
     });
     let wait: u64 = v.plans.iter().map(|p| crate::plan::total_sleep_ms(p)).sum();

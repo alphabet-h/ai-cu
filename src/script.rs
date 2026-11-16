@@ -126,6 +126,27 @@ pub struct WindowTarget {
     pub title: Option<String>,
 }
 
+/// `resize` の幅と高さの上限 (D-150)。論理の指定は物理に換算した後もこれ以下。SetWindowPos の int で桁あふれしない
+pub const RESIZE_MAX: u32 = 16384;
+
+/// `resize` の大きさの基準 (D-150)。`client` は中身 (client area)、`frame` は DWM の見えている枠
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResizeArea {
+    #[default]
+    Client,
+    Frame,
+}
+
+impl ResizeArea {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ResizeArea::Client => "client",
+            ResizeArea::Frame => "frame",
+        }
+    }
+}
+
 fn default_type_interval() -> u64 {
     DEFAULT_TYPE_INTERVAL_MS
 }
@@ -345,6 +366,25 @@ pub enum Action {
         #[serde(default = "default_wait_for_timeout")]
         timeout_ms: u64,
     },
+    /// 許可されたアプリのウィンドウの大きさを変える (D-150)。左上は動かさず、前面も Z 順も変えず、入力も送らない。
+    /// 最小化・最大化の窓は断る (復元しない)
+    Resize {
+        /// 実行ファイル名 (`focus` と同じ探し方)
+        process: String,
+        /// 題名に含む文字列 (大文字小文字を無視)。省略すると、そのプロセスの最前のウィンドウ
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        /// 幅 (1 以上 16384 以下)。`logical` なら論理の値
+        width: u32,
+        /// 高さ (1 以上 16384 以下)。`logical` なら論理の値
+        height: u32,
+        /// true なら論理の大きさ (窓が載っている画面の有効 DPI / 96 で物理に換算する)。既定は物理
+        #[serde(default)]
+        logical: bool,
+        /// 大きさの基準 (既定 `client` = 中身、`frame` = 見えている枠)
+        #[serde(default)]
+        area: ResizeArea,
+    },
 }
 
 /// 操作の種類。設定の `actions` リストで使う名前 (D-028)。
@@ -364,10 +404,11 @@ pub enum ActionKind {
     WaitFor,
     WaitStable,
     WaitChange,
+    Resize,
 }
 
 impl ActionKind {
-    pub const ALL: [ActionKind; 14] = [
+    pub const ALL: [ActionKind; 15] = [
         ActionKind::Click,
         ActionKind::DoubleClick,
         ActionKind::Drag,
@@ -382,6 +423,7 @@ impl ActionKind {
         ActionKind::WaitFor,
         ActionKind::WaitStable,
         ActionKind::WaitChange,
+        ActionKind::Resize,
     ];
 
     pub fn name(self) -> &'static str {
@@ -400,6 +442,7 @@ impl ActionKind {
             ActionKind::WaitFor => "wait_for",
             ActionKind::WaitStable => "wait_stable",
             ActionKind::WaitChange => "wait_change",
+            ActionKind::Resize => "resize",
         }
     }
 
@@ -414,8 +457,8 @@ impl ActionKind {
         ActionKind::ALL.into_iter().find(|k| k.name() == norm)
     }
 
-    /// 本物のマウスかキーボードを動かすか (`focus` は前面を変え、`close` はウィンドウを閉じるが、入力は送らない。
-    /// `wait_for` は読むだけ。`wait_stable` と `wait_change` は撮るだけ)。
+    /// 本物のマウスかキーボードを動かすか (`focus` は前面を変え、`close` はウィンドウを閉じ、`resize` は窓の大きさを
+    /// 変えるが、入力は送らない。`wait_for` は読むだけ。`wait_stable` と `wait_change` は撮るだけ)。
     pub fn is_input(self) -> bool {
         !matches!(
             self,
@@ -423,6 +466,7 @@ impl ActionKind {
                 | ActionKind::Screenshot
                 | ActionKind::Focus
                 | ActionKind::Close
+                | ActionKind::Resize
                 | ActionKind::WaitFor
                 | ActionKind::WaitStable
                 | ActionKind::WaitChange
@@ -447,6 +491,7 @@ impl Action {
             Action::WaitFor { .. } => ActionKind::WaitFor,
             Action::WaitStable { .. } => ActionKind::WaitStable,
             Action::WaitChange { .. } => ActionKind::WaitChange,
+            Action::Resize { .. } => ActionKind::Resize,
         }
     }
 
@@ -657,6 +702,26 @@ pub fn shape_issue(action: &Action) -> Option<String> {
             timeout_ms,
         } => capture_target_issue("wait_change", region.as_ref(), window.as_ref())
             .or_else(|| screen_wait_issue("wait_change", None, *threshold, *timeout_ms)),
+        Action::Resize {
+            process,
+            title,
+            width,
+            height,
+            ..
+        } => {
+            if process.trim().is_empty() {
+                return Some("resize の process が空".into());
+            }
+            if title.as_deref().is_some_and(|t| t.trim().is_empty()) {
+                return Some("resize の title は省略するか、空でない文字列にする".into());
+            }
+            if !(1..=RESIZE_MAX).contains(width) || !(1..=RESIZE_MAX).contains(height) {
+                return Some(format!(
+                    "resize の width と height は 1 以上 {RESIZE_MAX} 以下"
+                ));
+            }
+            None
+        }
         _ => None,
     }
 }
@@ -969,6 +1034,109 @@ mod tests {
         );
     }
 
+    /// resize (D-150): area の既定は client、logical の既定は偽。幅と高さは 1〜16384、title は空にできない。
+    /// 未知のフィールドと未知の area は読めない
+    #[test]
+    fn script_parses_resize_with_defaults_and_rejects_bad_shapes() {
+        let a =
+            one_action(r#"{"type":"resize","process":"notepad.exe","width":1280,"height":720}"#)
+                .unwrap();
+        assert_eq!(
+            a,
+            Action::Resize {
+                process: "notepad.exe".into(),
+                title: None,
+                width: 1280,
+                height: 720,
+                logical: false,
+                area: ResizeArea::Client,
+            }
+        );
+        assert!(shape_issue(&a).is_none());
+        assert_eq!(a.kind(), ActionKind::Resize);
+        assert!(a.mouse_points().is_empty());
+        assert_eq!(ActionKind::Resize.name(), "resize");
+        assert_eq!(ActionKind::parse("Resize"), Some(ActionKind::Resize));
+        assert!(!ActionKind::Resize.is_input(), "入力は送らない");
+        assert_eq!(ActionKind::ALL.len(), 15);
+        assert_eq!(ActionKind::ALL.last(), Some(&ActionKind::Resize));
+        let full = one_action(
+            r#"{"type":"resize","process":"a","title":"メモ","width":1,"height":16384,"logical":true,"area":"frame"}"#,
+        )
+        .unwrap();
+        assert!(shape_issue(&full).is_none(), "{full:?}");
+        assert!(matches!(
+            full,
+            Action::Resize {
+                logical: true,
+                area: ResizeArea::Frame,
+                ..
+            }
+        ));
+        assert_eq!(ResizeArea::Frame.as_str(), "frame");
+        assert_eq!(ResizeArea::default().as_str(), "client");
+        let base = Action::Resize {
+            process: "a".into(),
+            title: None,
+            width: 100,
+            height: 100,
+            logical: false,
+            area: ResizeArea::Client,
+        };
+        let with = |f: &dyn Fn(&mut Action)| {
+            let mut a = base.clone();
+            f(&mut a);
+            a
+        };
+        for bad in [
+            with(&|a| {
+                if let Action::Resize { width, .. } = a {
+                    *width = 0;
+                }
+            }),
+            with(&|a| {
+                if let Action::Resize { height, .. } = a {
+                    *height = 0;
+                }
+            }),
+            with(&|a| {
+                if let Action::Resize { width, .. } = a {
+                    *width = RESIZE_MAX + 1;
+                }
+            }),
+            with(&|a| {
+                if let Action::Resize { height, .. } = a {
+                    *height = RESIZE_MAX + 1;
+                }
+            }),
+            with(&|a| {
+                if let Action::Resize { title, .. } = a {
+                    *title = Some(" ".into());
+                }
+            }),
+            with(&|a| {
+                if let Action::Resize { title, .. } = a {
+                    *title = Some(String::new());
+                }
+            }),
+            with(&|a| {
+                if let Action::Resize { process, .. } = a {
+                    *process = " ".into();
+                }
+            }),
+        ] {
+            assert!(shape_issue(&bad).is_some(), "{bad:?}");
+        }
+        for json in [
+            r#"{"type":"resize","process":"a","width":1,"height":1,"hwnd":3}"#,
+            r#"{"type":"resize","process":"a","width":1,"height":1,"area":"outer"}"#,
+            r#"{"type":"resize","process":"a","height":1}"#,
+            r#"{"type":"resize","process":"a","width":-1,"height":1}"#,
+        ] {
+            assert!(one_action(json).is_err(), "{json}");
+        }
+    }
+
     /// screenshot の window (D-053): region と排他。process は必須、title は省略可。scale は 0 より大きく 1 以下
     #[test]
     fn script_parses_screenshot_window_and_scale_and_rejects_bad_shapes() {
@@ -1119,7 +1287,7 @@ mod tests {
         assert_eq!(ActionKind::parse("wait-for"), Some(ActionKind::WaitFor));
         assert_eq!(ActionKind::parse("WAIT_FOR"), Some(ActionKind::WaitFor));
         assert!(!ActionKind::WaitFor.is_input(), "読むだけで何も送らない");
-        assert_eq!(ActionKind::ALL.len(), 14);
+        assert_eq!(ActionKind::ALL.len(), 15);
         // 出力 (serialize) では省いた項目を出さず、名前が type に戻る
         let v = serde_json::to_value(&s.actions[0]).unwrap();
         assert_eq!(

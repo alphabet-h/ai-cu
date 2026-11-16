@@ -459,6 +459,21 @@ fn schema_close_title() -> Value {
     json!({ "type": "string", "minLength": 1, "description": "閉じる対象の題名に含む文字列 (大文字小文字を無視)。取り違えを防ぐため必須。windows で確かめる" })
 }
 
+/// resize の幅と高さ (D-150)。`what` は「幅」か「高さ」
+fn schema_resize_size(what: &str) -> Value {
+    json!({ "type": "integer", "minimum": 1, "maximum": crate::script::RESIZE_MAX, "description": format!("{what} (既定は物理ピクセル。logical なら論理。1〜{})", crate::script::RESIZE_MAX) })
+}
+
+/// resize の logical (D-150)
+fn schema_resize_logical() -> Value {
+    json!({ "type": "boolean", "description": "true なら論理の大きさ (窓が載っている画面の有効 DPI / 96 で物理に換算。四捨五入)。既定 false (物理)" })
+}
+
+/// resize の area (D-150)
+fn schema_resize_area() -> Value {
+    json!({ "type": "string", "enum": ["client", "frame"], "description": "大きさの基準。client (既定) は中身、frame は見えている枠" })
+}
+
 fn schema_inline() -> Value {
     json!({ "type": "boolean", "description": "撮った画像を結果の image に入れる (既定 true)。false なら path が要り、ファイルにだけ保存する" })
 }
@@ -599,7 +614,8 @@ fn schema_action() -> Value {
             { "type": "object", "additionalProperties": false, "properties": { "type": t("close"), "process": schema_window(), "title": schema_close_title() }, "required": ["type", "process", "title"] },
             { "type": "object", "additionalProperties": false, "properties": { "type": t("wait_for"), "process": schema_window(), "title": schema_window_title(), "element": schema_element_filter(), "text": schema_wait_text(), "absent": schema_wait_absent(), "timeout_ms": schema_wait_timeout() }, "required": ["type", "process"] },
             { "type": "object", "additionalProperties": false, "description": "画面が落ち着くまで待つ (直前のフレームとの差が threshold 以下の比較が stable_ms 続けば満たす)", "properties": { "type": t("wait_stable"), "region": schema_region(), "window": schema_capture_window(), "stable_ms": schema_stable_ms(), "threshold": schema_threshold("直前のフレームとの差 (変わった点の割合) の許容 (既定 0)"), "timeout_ms": schema_screen_timeout(MIN_STABLE_MS, DEFAULT_WAIT_FOR_TIMEOUT_MS) }, "required": ["type"] },
-            { "type": "object", "additionalProperties": false, "description": "画面が変わるまで待つ (待ち始めの画像との差が threshold を超えれば満たす)", "properties": { "type": t("wait_change"), "region": schema_region(), "window": schema_capture_window(), "threshold": schema_threshold("待ち始めの画像 (基準) との差 (変わった点の割合) の下限 (既定 0.001)。狭い region ではキャレットの点滅でも超えうる"), "timeout_ms": schema_screen_timeout(1, DEFAULT_WAIT_FOR_TIMEOUT_MS) }, "required": ["type"] }
+            { "type": "object", "additionalProperties": false, "description": "画面が変わるまで待つ (待ち始めの画像との差が threshold を超えれば満たす)", "properties": { "type": t("wait_change"), "region": schema_region(), "window": schema_capture_window(), "threshold": schema_threshold("待ち始めの画像 (基準) との差 (変わった点の割合) の下限 (既定 0.001)。狭い region ではキャレットの点滅でも超えうる"), "timeout_ms": schema_screen_timeout(1, DEFAULT_WAIT_FOR_TIMEOUT_MS) }, "required": ["type"] },
+            { "type": "object", "additionalProperties": false, "description": "窓の大きさを変える (左上は動かさない。前面は変えず入力も送らない。最小化・最大化の窓は断る)。結果の resized[] に実際の frame と client、exact (狙いに届いたか)", "properties": { "type": t("resize"), "process": schema_window(), "title": schema_window_title(), "width": schema_resize_size("幅"), "height": schema_resize_size("高さ"), "logical": schema_resize_logical(), "area": schema_resize_area() }, "required": ["type", "process", "width", "height"] }
         ]
     })
 }

@@ -509,7 +509,7 @@ impl Policy {
                 "limits.max_duration_ms",
                 format!("を {need} 以上にする"),
                 format!(
-                    "待ちの合計 {total_sleep_ms} ms (focus、close、wait_for、wait_stable、wait_change、screenshot の settle の待ちの上限を含む) と実行の余裕 {margin_ms} ms が limits.max_duration_ms ({limit}) を超える"
+                    "待ちの合計 {total_sleep_ms} ms (focus、close、resize、wait_for、wait_stable、wait_change、screenshot の settle の待ちの上限を含む) と実行の余裕 {margin_ms} ms が limits.max_duration_ms ({limit}) を超える"
                 ),
             ));
         }

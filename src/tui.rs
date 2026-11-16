@@ -2425,6 +2425,16 @@ pub fn action_summary(a: &Action) -> String {
             "{kind} {} threshold={threshold}",
             capture_target_summary(region.as_ref(), window.as_ref())
         ),
+        Action::Resize {
+            process,
+            title,
+            width,
+            height,
+            ..
+        } => match title {
+            Some(t) => format!("{kind} {process} \"{t}\" {width}x{height}"),
+            None => format!("{kind} {process} {width}x{height}"),
+        },
     }
 }
 
@@ -2534,12 +2544,21 @@ fn confirm_lines(r: &PreflightReport) -> Vec<String> {
         Some(FirstBatch::Close) => {
             "最初の操作は close: 前面は変えず、対象のウィンドウに WM_CLOSE を置く (前面で人が使っていれば 10、見つからなければ 12 で止まる)".into()
         }
+        Some(FirstBatch::Resize) => {
+            "最初の操作は resize: 前面は変えず、対象の窓の大きさを変える (最小化・最大化なら 7、前面で人が使っていれば 10、見つからなければ 12 で止まる)".into()
+        }
         None => "入力のバッチは無い (待ちと撮影だけ)".into(),
     });
     if r.closes > 0 {
         lines.push(format!(
             "⚠ close が {} 件: 対象のウィンドウを閉じる (タブのあるアプリはタブをすべて閉じる。保存の確認が出ることがある)",
             r.closes
+        ));
+    }
+    if r.resizes > 0 {
+        lines.push(format!(
+            "⚠ resize が {} 件: 窓の大きさを変える (前面は変えない)",
+            r.resizes
         ));
     }
     if r.unrestricted {
@@ -6031,6 +6050,7 @@ mod tests {
                 focused: Vec::new(),
                 closed: Vec::new(),
                 waited: Vec::new(),
+                resized: Vec::new(),
                 elapsed_ms: 1,
             })
         }
@@ -6103,6 +6123,7 @@ mod tests {
                 focused: Vec::new(),
                 closed: vec![c],
                 waited: Vec::new(),
+                resized: Vec::new(),
                 elapsed_ms: 1000,
             }));
             draw(a, 120, 32)
@@ -6147,6 +6168,7 @@ mod tests {
             focused: Vec::new(),
             closed: Vec::new(),
             waited: Vec::new(),
+            resized: Vec::new(),
             elapsed_ms: 1234,
         }));
         assert!(matches!(a.overlay, Overlay::RunResult { ok: true, .. }));

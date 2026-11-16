@@ -33,7 +33,7 @@ use crate::script::{
     Action, ActionKind, Button, ClickModifier, DEFAULT_DRAG_MS, DEFAULT_DRAG_STEPS,
     DEFAULT_SETTLE_TIMEOUT_MS, DEFAULT_SHOT_SCALE, DEFAULT_STABLE_MS, DEFAULT_TYPE_INTERVAL_MS,
     DEFAULT_WAIT_FOR_TIMEOUT_MS, ElementFilter, MAX_SINGLE_WAIT_MS, MAX_STABLE_MS, MIN_STABLE_MS,
-    Pos, Region, SCRIPT_VERSION, Script, Settle, WindowTarget,
+    Pos, RESIZE_MAX, Region, SCRIPT_VERSION, Script, Settle, WindowTarget,
 };
 use crate::validate::{Validation, validate};
 
@@ -2054,7 +2054,8 @@ pub fn schema() -> Value {
             "close": { "process": "実行ファイル名 (focus と同じ探し方)", "title": "必須。題名に含む文字列 (大文字小文字を無視)。許可を通る窓 (windows に出る窓) の中で前面から見て最初に一致したウィンドウ (ツールチップなどのポップアップは後に回すので、title がポップアップと本体の両方に当たると本体に届く。権限で断られれば 7) に WM_CLOSE を 1 回置く。前面は変えず、前面でなくても届く。対象が前面で人が操作中 (capture.min_idle_ms) なら 10。見つからなければ 12 (何もしない)。閉じるか (保存の確認を出すか) はアプリが決める。成功の出力の closed に、閉じようとしたウィンドウと gone (1 秒のうちに見える窓から消えたか。破棄とは限らない) と hidden (破棄されず隠れただけ。トレイに入るアプリで、プロセスは動いている) が入る。hidden が false でもプロセスが終わったとは限らない (exe の入れ替えや再起動の前に確かめるか人間に聞く)。gone が false なら撮って確かめる" },
             "wait_for": { "process": "対象のウィンドウの実行ファイル名 (focus と同じ探し方)", "title": "省略可。題名に含む文字列", "element": { "name": "省略可。要素の名前に含む文字列", "type": "省略可。要素の種類 (find --help の一覧)" }, "text": "省略可。要素の文字列に含む文字列 (改行は LF にそろえる。大文字小文字を区別。パスワードの要素は読まずに飛ばす)", "absent": "真偽 (既定 false)。true なら無くなるまで待つ", "timeout_ms": "上限 (既定 10000、最大 600000)。超えたら終了コード 15 (何も送らない)", "備考": "条件は一番細かい指定 (text > element > window)。250 ms ごとに確かめる。満たされると結果の waited[] に窓と要素 (center) が入る。absent が最初の確認で満たされると (timeout_ms 0 は除く) waited[].note に注意が付く" },
             "wait_stable": { "region": "省略可。撮る矩形 (screenshot と同じ。window と排他。両方省略は全画面で、既定の設定では拒否)", "window": { "process": "省略可。撮る対象のウィンドウ (screenshot と同じ探し方。撮るたびに矩形を解く)", "title": "省略可" }, "stable_ms": "静けさが続く長さ (既定 300、100 以上 60000 以下)", "threshold": "直前のフレームとの差 (変わった点の割合) の許容 (0 以上 1 未満。既定 0)", "timeout_ms": "上限 (既定 10000、stable_ms 以上 600000 以下)。超えたら終了コード 15 (unmet: stable。何も送らない)", "備考": "100 ms ごとに撮り、長辺 256 に縮めて比べる。窓が動けば変わったと数える。撮るたびに screenshot と同じ判定 (撮影の許可、deny の窓、ロック) を通す。満たされると結果の waited[] に rect が入る" },
-            "wait_change": { "region": "省略可 (wait_stable と同じ)", "window": "省略可 (wait_stable と同じ)", "threshold": "待ち始めの画像 (基準) との差がこれを超えたら変わった (0 以上 1 未満。既定 0.001)", "timeout_ms": "上限 (既定 10000、1 以上 600000 以下)。超えたら終了コード 15 (unmet: change。何も送らない)", "備考": "100 ms ごとに撮り、基準と比べる (直前ではない)。狭い region ではキャレットの点滅でも満たしうる。満たされると結果の waited[] に rect と changed_ratio が入る" }
+            "wait_change": { "region": "省略可 (wait_stable と同じ)", "window": "省略可 (wait_stable と同じ)", "threshold": "待ち始めの画像 (基準) との差がこれを超えたら変わった (0 以上 1 未満。既定 0.001)", "timeout_ms": "上限 (既定 10000、1 以上 600000 以下)。超えたら終了コード 15 (unmet: change。何も送らない)", "備考": "100 ms ごとに撮り、基準と比べる (直前ではない)。狭い region ではキャレットの点滅でも満たしうる。満たされると結果の waited[] に rect と changed_ratio が入る" },
+            "resize": { "process": "実行ファイル名 (focus と同じ探し方)", "title": "省略可。題名に含む文字列 (大文字小文字を無視)。省略するとそのプロセスの最前のウィンドウ", "width": format!("幅 (1 以上 {RESIZE_MAX} 以下)"), "height": format!("高さ (1 以上 {RESIZE_MAX} 以下)"), "logical": "真偽 (既定 false = 物理ピクセル)。true なら論理の大きさで、窓が載っている画面の有効 DPI / 96 で物理に換算する (四捨五入)。換算後が上限を超えれば実行時に 3 (validate と dry_run では見えない)。DPI を読めなければ 8", "area": "client | frame (既定 client = 中身。frame は見えている枠)", "備考": "左上は動かさず、前面も Z 順も変えず、入力も送らない。最小化・最大化の窓は 7 (reason minimized / maximized。元に戻さない)、無効な窓は 7 (target_disabled)、対象が前面で人が操作中なら 10、見つからなければ 12。成功の出力の resized[] に frame と client (物理の矩形)、requested (物理の狙い)、dpi、exact (1 秒のうちに基準が狙いに届いたか。false なら frame と client が実際の大きさ) が入る", "例": { "type": "resize", "process": "notepad.exe", "width": 1280, "height": 720, "logical": true } }
         },
         "key_names": format!("{}。修飾: {}", usable_key_names(), usable_modifier_names()),
         "exit_codes": crate::error::ErrorKind::ALL.iter().map(|k| json!({ "code": k.exit_code(), "name": k.code() })).collect::<Vec<_>>(),
@@ -4303,6 +4304,9 @@ mod tests {
         }
         // 例はそのまま操作列として読める
         assert!(Script::from_json(&s["example"].to_string()).is_ok());
+        // resize の項目の例も 1 操作として読める (D-150)
+        let resize = json!({ "version": 1, "actions": [s["actions"]["resize"]["例"].clone()] });
+        assert!(Script::from_json(&resize.to_string()).is_ok(), "{resize}");
     }
 
     /// 一手ずつの操作 (D-052): 操作ごとのサブコマンドは、1 操作の操作列に組み立てられる (JSON の書式と同じ意味)

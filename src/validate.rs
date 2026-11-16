@@ -204,7 +204,7 @@ pub fn validate(script: &Script, policy: &Policy, screen: Option<Rect>) -> Valid
         plans.push(steps);
     }
     // 実行には待ち以外の時間もかかる。検証を通った操作列が実行時の期限で必ず止まることのないよう、余裕を見る
-    // (focus が前面になるのを待つ上限、close で消えるのを待つ上限、wait_for、wait_stable、wait_change、
+    // (focus が前面になるのを待つ上限、close で消えるのを待つ上限、resize の読み直しの上限、wait_for、wait_stable、wait_change、
     // screenshot の settle の timeout_ms も数える)
     if let Err(d) = policy.check_duration(total_sleep, DEADLINE_MARGIN_MS) {
         issues.push(Issue::denied(None, d));
@@ -291,11 +291,13 @@ fn check_action_policy(
             Some(i),
             "領域の規則があるので、scroll には x と y を指定する",
         )),
-        // 前面にする対象のプロセス (D-050)、閉じる対象のプロセス (D-062)、待つ対象のプロセス (D-068)。
+        // 前面にする対象のプロセス (D-050)、閉じる対象のプロセス (D-062)、待つ対象のプロセス (D-068)、
+        // 大きさを変える対象のプロセス (D-150)。
         // クラスと起動した側は実行時に、探す候補を絞る述語で判定する (通らない窓は無いと数える。D-139)。権限は見つけた窓で判定する
         Action::Focus { process, .. }
         | Action::Close { process, .. }
-        | Action::WaitFor { process, .. } => {
+        | Action::WaitFor { process, .. }
+        | Action::Resize { process, .. } => {
             if let Err(d) = policy.check_process(process) {
                 issues.push(Issue::denied(Some(i), d));
             }
@@ -673,6 +675,48 @@ mod tests {
         let v = validate(&close, &tight, None);
         assert_eq!(v.error_kind(), Some(ErrorKind::PolicyDenied));
         assert!(v.issues[0].message.contains("close"), "{:?}", v.issues);
+    }
+
+    /// resize の対象 (D-150): close と同じく対象のプロセスを allow / deny に通し、deny.actions でも止められる。
+    /// 総スイッチは input_enabled の側。読み直しの上限 (1000 ms) は時間の予算に数える
+    #[test]
+    fn validate_resize_checks_process_actions_and_counts_budget() {
+        let resize =
+            script(r#"{"type":"resize","process":"Notepad.exe","width":800,"height":600}"#);
+        assert!(validate(&resize, &policy(ENABLED), None).ok());
+        let off = policy(&format!("{ENABLED}[deny]\nactions=[\"resize\"]\n"));
+        let v = validate(&resize, &off, None);
+        assert_eq!(v.error_kind(), Some(ErrorKind::PolicyDenied));
+        assert_eq!(v.issues[0].action_index, Some(0), "{:?}", v.issues);
+        let deny_proc = policy(&format!("{ENABLED}[deny]\nprocesses=[\"notepad\"]\n"));
+        assert_eq!(
+            validate(&resize, &deny_proc, None).error_kind(),
+            Some(ErrorKind::PolicyDenied)
+        );
+        let only_close = policy(&format!("{ENABLED}[allow]\nactions=[\"close\"]\n"));
+        assert_eq!(
+            validate(&resize, &only_close, None).error_kind(),
+            Some(ErrorKind::PolicyDenied),
+            "allow.actions を書いた設定では resize も書かないと通らない"
+        );
+        let capture_only = policy("[general]\ncapture_enabled = true\n");
+        assert_eq!(
+            validate(&resize, &capture_only, None).error_kind(),
+            Some(ErrorKind::PolicyDenied),
+            "撮影の総スイッチだけでは通らない (input_enabled の側)"
+        );
+        let zero = script(r#"{"type":"resize","process":"notepad.exe","width":0,"height":1}"#);
+        assert_eq!(
+            validate(&zero, &policy(ENABLED), None).error_kind(),
+            Some(ErrorKind::InvalidScript)
+        );
+        // 1000 + 余裕 1000 = 2000 は 2000 で通り、1999 では超える
+        let fits = policy(&format!("{ENABLED}[limits]\nmax_duration_ms = 2000\n"));
+        assert!(validate(&resize, &fits, None).ok());
+        let tight = policy(&format!("{ENABLED}[limits]\nmax_duration_ms = 1999\n"));
+        let v = validate(&resize, &tight, None);
+        assert_eq!(v.error_kind(), Some(ErrorKind::PolicyDenied));
+        assert!(v.issues[0].message.contains("resize"), "{:?}", v.issues);
     }
 
     /// wait_for の対象 (D-068): 撮影の総スイッチ (capture_enabled) だけで通り、input_enabled は要らない。
