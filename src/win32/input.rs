@@ -1,7 +1,7 @@
 //! `SendInput` とカーソル位置。ここは「送る」だけで、送ってよいかの判断はしない。
 //! 判断は呼び出し側 (`backend::RealSink` の実行時ガードとフィクスチャの範囲確認、`run` のガード) が行う。
 
-use windows_sys::Win32::Foundation::{ERROR_ACCESS_DENIED, POINT};
+use windows_sys::Win32::Foundation::{ERROR_ACCESS_DENIED, POINT, RECT};
 use windows_sys::Win32::System::SystemInformation::GetTickCount;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, GetLastInputInfo, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT,
@@ -11,7 +11,7 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_WHEEL, MOUSEINPUT, MapVirtualKeyW,
     SendInput, VK_LBUTTON, VK_MBUTTON, VK_RBUTTON, VK_RWIN, VK_XBUTTON1, VK_XBUTTON2,
 };
-use windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;
+use windows_sys::Win32::UI::WindowsAndMessaging::{GetClipCursor, GetCursorPos};
 
 use crate::device::{HeldInputs, InputEvent};
 use crate::geometry::{Point, Rect};
@@ -152,7 +152,7 @@ pub fn send(events: &[InputEvent], screen: Rect) -> Result<(), String> {
     Ok(())
 }
 
-/// `GetCursorPos` の失敗。5 (`ERROR_ACCESS_DENIED`) だけを分ける (D-066)。
+/// `GetCursorPos` と `GetClipCursor` の失敗。5 (`ERROR_ACCESS_DENIED`) だけを分ける (D-066、D-151)。
 /// Display はメッセージの文をそのまま出す
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CursorError {
@@ -172,16 +172,17 @@ impl std::fmt::Display for CursorError {
 
 impl std::error::Error for CursorError {}
 
-/// `GetLastError` の値から失敗を組み立てる (純関数。テストから使う)
-pub(crate) fn cursor_error(code: u32) -> CursorError {
+/// `GetLastError` の値から失敗を組み立てる (純関数。テストから使う)。`api` は失敗した関数の名前
+/// (`GetCursorPos` か `GetClipCursor`。D-151)
+pub(crate) fn cursor_error(api: &str, code: u32) -> CursorError {
     // 5 (ERROR_ACCESS_DENIED) は、画面のロックや別のデスクトップ (UAC など) が前面のことが多い。
     // 原因は言い切らない。再試行では直らないので、人に確かめてもらう (docs/design-notes.md)
     if code == ERROR_ACCESS_DENIED {
         CursorError::AccessDenied(format!(
-            "GetCursorPos が失敗 (GetLastError={code})。画面のロックや別のデスクトップ (UAC など) が前面のことが多い"
+            "{api} が失敗 (GetLastError={code})。画面のロックや別のデスクトップ (UAC など) が前面のことが多い"
         ))
     } else {
-        CursorError::Other(format!("GetCursorPos が失敗 (GetLastError={code})"))
+        CursorError::Other(format!("{api} が失敗 (GetLastError={code})"))
     }
 }
 
@@ -190,9 +191,41 @@ pub fn cursor_pos() -> Result<Point, CursorError> {
     // SAFETY: pt は書き込み可能な POINT で、呼び出しの間は生きている。
     let ok = unsafe { GetCursorPos(&mut pt) };
     if ok == 0 {
-        return Err(cursor_error(super::last_error()));
+        return Err(cursor_error("GetCursorPos", super::last_error()));
     }
     Ok(Point::new(pt.x, pt.y))
+}
+
+/// カーソルの動く範囲 (`GetClipCursor`。画面座標)。絞られていなければ画面全体が返る (Microsoft Learn。
+/// 仮想画面か主モニターかは書かれていないので、絞りの有無は呼ぶ側の `backend::confined_clip` が決める。D-151)。
+/// 失敗は `cursor_pos` と同じ写しにしておく (5 は `AccessDenied`。GetClipCursor が 5 を返すかは確かめていない)
+pub fn clip_cursor_rect() -> Result<Rect, CursorError> {
+    let mut r = RECT {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    };
+    // SAFETY: r は書き込み可能な RECT で、呼び出しの間は生きている。関数はそこへ書くだけ。
+    let ok = unsafe { GetClipCursor(&mut r) };
+    if ok == 0 {
+        return Err(cursor_error("GetClipCursor", super::last_error()));
+    }
+    clip_rect_from(r.left, r.top, r.right, r.bottom)
+}
+
+/// `GetClipCursor` の RECT (左, 上, 右, 下。右と下は含まない) を `Rect` に直す (純関数)。幅か高さが 0 以下なら失敗
+fn clip_rect_from(left: i32, top: i32, right: i32, bottom: i32) -> Result<Rect, CursorError> {
+    let (w, h) = (
+        i64::from(right) - i64::from(left),
+        i64::from(bottom) - i64::from(top),
+    );
+    if w <= 0 || h <= 0 {
+        return Err(CursorError::Other(format!(
+            "GetClipCursor の矩形が壊れている (left={left} top={top} right={right} bottom={bottom})"
+        )));
+    }
+    Ok(Rect::new(left, top, w as u32, h as u32))
 }
 
 /// `GetAsyncKeyState` の戻り値が「押されている」か。最上位ビットだけを見る (最下位ビットの
@@ -276,15 +309,50 @@ mod tests {
     /// GetCursorPos の 5 だけを AccessDenied に分け、原因は言い切らない (D-066)
     #[test]
     fn cursor_error_separates_access_denied_and_keeps_message() {
-        let denied = cursor_error(5);
+        let denied = cursor_error("GetCursorPos", 5);
         assert!(matches!(denied, CursorError::AccessDenied(_)), "{denied:?}");
         assert_eq!(
             denied.to_string(),
             "GetCursorPos が失敗 (GetLastError=5)。画面のロックや別のデスクトップ (UAC など) が前面のことが多い"
         );
-        let other = cursor_error(6);
+        let other = cursor_error("GetCursorPos", 6);
         assert!(matches!(other, CursorError::Other(_)), "{other:?}");
         assert_eq!(other.to_string(), "GetCursorPos が失敗 (GetLastError=6)");
+    }
+
+    /// GetClipCursor の失敗も GetCursorPos と同じ写しにしておく: 5 だけを AccessDenied に分け、文の頭は関数の名前
+    /// (GetClipCursor が 5 を返すかは確かめていない。D-151)
+    #[test]
+    fn clip_cursor_error_separates_access_denied() {
+        let denied = cursor_error("GetClipCursor", 5);
+        assert!(matches!(denied, CursorError::AccessDenied(_)), "{denied:?}");
+        assert_eq!(
+            denied.to_string(),
+            "GetClipCursor が失敗 (GetLastError=5)。画面のロックや別のデスクトップ (UAC など) が前面のことが多い"
+        );
+        let other = cursor_error("GetClipCursor", 87);
+        assert!(matches!(other, CursorError::Other(_)), "{other:?}");
+        assert_eq!(other.to_string(), "GetClipCursor が失敗 (GetLastError=87)");
+    }
+
+    /// GetClipCursor の RECT は右と下を含まない形で Rect に直り、幅か高さが 0 以下なら Other (D-151)
+    #[test]
+    fn clip_rect_from_converts_and_rejects_empty() {
+        assert_eq!(
+            clip_rect_from(-1920, 0, 3840, 2160),
+            Ok(Rect::new(-1920, 0, 5760, 2160))
+        );
+        assert_eq!(clip_rect_from(10, 20, 11, 21), Ok(Rect::new(10, 20, 1, 1)));
+        for (l, t, r, b) in [(10, 0, 10, 5), (0, 10, 5, 10), (5, 0, 0, 5), (0, 5, 5, 0)] {
+            assert!(
+                matches!(clip_rect_from(l, t, r, b), Err(CursorError::Other(_))),
+                "{l},{t},{r},{b}"
+            );
+        }
+        assert!(
+            clip_rect_from(i32::MIN, 0, i32::MAX, 1).is_ok(),
+            "差は i64 で取り、溢れない"
+        );
     }
 
     /// 押下の判定は最上位ビットだけを見る (最下位ビットの「前回から押された」は見ない。D-066)

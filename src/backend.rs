@@ -29,13 +29,26 @@ pub trait ScopeProbe {
     fn foreground(&self) -> usize;
 }
 
-/// `GetCursorPos` の失敗の写し (1 か所だけに置く。D-066): 5 は入力デスクトップが使えない (14)、ほかは OS の失敗 (8)
+/// `GetCursorPos` と GetClipCursor (D-151) の失敗の写し (1 か所だけに置く。D-066): 5 は入力デスクトップが使えない (14)、
+/// ほかは OS の失敗 (8)
 impl From<win32::input::CursorError> for BackendError {
     fn from(e: win32::input::CursorError) -> Self {
         match e {
             win32::input::CursorError::AccessDenied(m) => BackendError::DesktopUnavailable(m),
             win32::input::CursorError::Other(m) => BackendError::Os(m),
         }
+    }
+}
+
+/// `GetClipCursor` の矩形から、カーソルの動く範囲が絞られているかを決める (純関数。D-151)。
+/// 絞られていなければ画面全体が返る (Microsoft Learn)。仮想画面と同じときだけ絞りなし (`None`)。
+/// 主モニターちょうどの矩形は絞りとみなす (全画面のアプリの典型の形で、絞りなしとみなすと 2 枚目の点が
+/// ガードを素通りする。D-151)
+pub(crate) fn confined_clip(clip: Rect, virtual_screen: Rect) -> Option<Rect> {
+    if clip == virtual_screen {
+        None
+    } else {
+        Some(clip)
     }
 }
 
@@ -251,6 +264,16 @@ impl Desktop for Win32Desktop {
 
     fn cursor_pos(&self) -> Result<Point, BackendError> {
         win32::input::cursor_pos().map_err(BackendError::from)
+    }
+
+    fn on_monitor(&self, p: Point) -> Result<bool, BackendError> {
+        Ok(win32::screen::point_on_monitor(p))
+    }
+
+    fn cursor_clip(&self) -> Result<Option<Rect>, BackendError> {
+        let clip = win32::input::clip_cursor_rect().map_err(BackendError::from)?;
+        let virtual_screen = win32::screen::virtual_screen().map_err(BackendError::Os)?;
+        Ok(confined_clip(clip, virtual_screen))
     }
 
     fn foreground_window(&self) -> Result<Option<WindowInfo>, BackendError> {
@@ -1583,7 +1606,7 @@ mod tests {
     /// GetCursorPos の 5 は DesktopUnavailable、ほかは Os。文はそのまま運ぶ (D-066)
     #[test]
     fn cursor_error_maps_access_denied_to_desktop_unavailable() {
-        let denied = BackendError::from(win32::input::cursor_error(5));
+        let denied = BackendError::from(win32::input::cursor_error("GetCursorPos", 5));
         match &denied {
             BackendError::DesktopUnavailable(m) => {
                 assert!(m.starts_with("GetCursorPos が失敗 (GetLastError=5)"), "{m}")
@@ -1591,8 +1614,42 @@ mod tests {
             other => panic!("{other:?}"),
         }
         assert_eq!(
-            BackendError::from(win32::input::cursor_error(87)),
+            BackendError::from(win32::input::cursor_error("GetCursorPos", 87)),
             BackendError::Os("GetCursorPos が失敗 (GetLastError=87)".into())
+        );
+    }
+
+    /// GetClipCursor の矩形が仮想画面と同じときだけ絞りなし。主モニターちょうどは絞りとみなす (D-151)
+    #[test]
+    fn confined_clip_treats_only_virtual_screen_as_unconfined() {
+        let one = Rect::new(0, 0, 3840, 2160);
+        assert_eq!(confined_clip(one, one), None, "1 枚: 画面全体");
+        let small = Rect::new(0, 0, 100, 100);
+        assert_eq!(confined_clip(small, one), Some(small));
+
+        let vs = Rect::new(-1920, 0, 5760, 2160);
+        let primary = Rect::new(0, 0, 3840, 2160);
+        assert_eq!(confined_clip(vs, vs), None, "複数: 仮想画面");
+        assert_eq!(
+            confined_clip(primary, vs),
+            Some(primary),
+            "複数: 主モニターちょうどは絞り"
+        );
+        let part = Rect::new(0, 0, 1920, 1080);
+        assert_eq!(confined_clip(part, vs), Some(part));
+    }
+
+    /// GetClipCursor の失敗も GetCursorPos と同じ写しにしておく: 5 は DesktopUnavailable、ほかは Os
+    /// (GetClipCursor が 5 を返すかは確かめていない。D-151)
+    #[test]
+    fn clip_cursor_error_maps_like_cursor_pos() {
+        assert!(matches!(
+            BackendError::from(win32::input::cursor_error("GetClipCursor", 5)),
+            BackendError::DesktopUnavailable(m) if m.starts_with("GetClipCursor が失敗 (GetLastError=5)")
+        ));
+        assert_eq!(
+            BackendError::from(win32::input::cursor_error("GetClipCursor", 87)),
+            BackendError::Os("GetClipCursor が失敗 (GetLastError=87)".into())
         );
     }
 

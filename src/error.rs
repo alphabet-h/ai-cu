@@ -207,7 +207,7 @@ pub mod reason {
     pub const SCREENSAVER: &str = "screensaver";
     /// 14: セッションがロックされている (D-067)
     pub const LOCKED: &str = "locked";
-    /// 14: 入力デスクトップが自分のもの (Default) ではない、開けない、または GetCursorPos が 5 (D-066)。
+    /// 14: 入力デスクトップが自分のもの (Default) ではない、開けない、または GetCursorPos と GetClipCursor (D-151) が 5 (D-066)。
     /// WTS でロックと読めたときは `LOCKED` (D-067)。読めなかったロック、UAC、Ctrl+Alt+Del の画面はこちら
     pub const OTHER_DESKTOP: &str = "other_desktop";
     /// 10: キーかマウスのボタンが押されたまま (D-066)
