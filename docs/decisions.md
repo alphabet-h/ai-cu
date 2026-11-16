@@ -2213,3 +2213,24 @@
   - 変えた所: src/run.rs、src/hint.rs、src/policy.rs (`password_input_allowed` の doc)、src/config.rs (doc と雛形のコメント)、src/tui.rs (説明と有効化の確認の文、その文を見るテスト)。テストは src/run.rs のモックで `password_mouse_checks_right_click_and_drag_drop`、`password_point_*`、`held_after_counts_downs_and_ups`、src/hint.rs の `password_field_mouse_hint`。既存のキーの経路と D-132 のテストは直さずに通る。対照: 判定の呼び出しを外す、読んだ後のガードの取り直しを外す、ドロップの点のガードの試しを外す、取り直しを点のガードだけにする、ドロップの組の取り直しを省く (ガードと停止を別に)、点の判定を束のガードの前に動かす (右クリックの「ガード → 読む」の順。`password_point_not_read_when_right_click_point_not_allowed` が見る) で、それぞれ名指しのテストが落ちる (exit 101) ことを見て書き戻した
 - 追記 (2026-11-16、重い検査と実機の対照): `verify.py --ignored` が全段 ok (lib 993 passed、fixture_real 63 passed。HEAD cc712eb。ignored の段はメモリ不足で外から止められたので `--continue` で打ち直した)。フィクスチャの Win32 の `ES_PASSWORD` の EDIT では、`ElementFromPoint` が IsPassword 真の要素を返し、右クリックが 4 で断られた (`fixture_real_password_right_click_refused`)。実行器の判定の呼び出しを一時的に外すと、このテストが「右クリックが通った」で落ちる (exit 101) ことを見て戻した。win32-reviewer は must-fix 0。should-fix の 1 件 (パスワード欄が UIA に子の要素を出すアプリでは、点の下に子が返って IsPassword が偽になり、黙って通りうる。WPF・WinUI の PasswordBox とブラウザは測っていない) は、手動確認の節 36 (pw-probe の WPF の PasswordBox) で確かめてから扱う。外れたら、偽のときに親の要素をたどる形に広げる (覆る条件に足す)。nit のうち、フィクスチャ専用の装置で `root_at` と `ElementFromPoint` の間に窓が入れ替わりうる件 (返すのは真偽 1 つで、フィクスチャのテストの範囲だけ)、`ElementFromPoint` は提供側を複数回たどりうるので UIA の待ちの見積もりが楽観的な件 (超えれば 8 で安全側)、`UIA_E_ELEMENTNOTAVAILABLE` を 1 回だけ読み直す件は、親をたどる形と一緒に見直す
 - 追記 (2026-11-16、手動確認の節 36): release 0.2.0+g865e648682b5 で、確認専用のアプリ pw-probe (WPF の PasswordBox。D-092) の手順 36 の前提と (a)〜(c) がすべて期待どおり。右クリックは 4 (`detail.point` が押す点、`executed` 0)、同じ点の左クリックは 0、ふつうの欄からパスワード欄への drag は 4 (`detail.point` が離す点、`partial` は始点への移動のため真)、どちらの後もパスワード欄の長さは 12 のまま。WPF の PasswordBox では `ElementFromPoint` が IsPassword 真の要素を返したので、上の追記の「子の要素が返るアプリ」はこのアプリには当たらない (ブラウザは測っていない。親をたどる形は、通った事例が出るまで足さない)。メニューが出ていないことは、利用者の目ではなく直後の窓の一覧で確かめた
+
+### D-150 許可された窓の大きさを変える操作 `resize` を足す (大きさだけ。左上は動かさない。既定は中身の大きさ)
+- 日付: 2026-11-16
+- 場面: 別のプロジェクトで、最小の窓の大きさでボタンが窓に収まるかを ai-cu で確かめたかったが、窓の大きさを指定して変える手段が無かった。縁の drag は物理の点でしか動かせず、狙った論理の大きさ (倍率 1.25 で 1280×720 → 物理 1600×900) にならないので、対象のアプリに検証のための引数を足して回り道した
+- 本人 (利用者) が決めたこと: 新しい操作 `resize` を足す。大きさだけを変え、窓の左上は動かさない (位置の移動、最大化、復元は足さない)。close (D-062) と同じ層を通し、SendInput は送らず前面も変えない。既定の大きさの基準は中身 (client area) で、外枠も選べる。物理と論理を切り替えられる
+- 選択肢: A 大きさだけの `resize` / B 位置と大きさ (移動も) / C 足さない
+- 判断: A (本人の選択。推奨は A ◎)。細部は推奨で決めた (○)
+  - 操作列 `{"type":"resize","process","title"?,"width","height","logical"?,"area"?}`、一手ずつの `ai-cu resize PROCESS [--title T] --width W --height H [--logical] [--frame]`、MCP の道具 `resize` の 3 つ。意味は同じで、実行は `run` と同じ経路。`title` は任意 (focus と同じ。大きさは戻せるので close ほど取り違えの害が大きくない。結果に hwnd と題名を返す)
+  - 既定は物理 (`logical: false`) と中身 (`area: "client"`)。`area: "frame"` は DWM の見えている枠 (`windows` の rect と同じ基準)。幅と高さは 1〜16384 (論理なら換算後も)
+  - 論理の倍率は、窓が主に載っている画面の有効 DPI (`MonitorFromWindow` + `GetDpiForMonitor`) / 96。`GetDpiForWindow` は DPI 非対応の窓に 96 を返すが、そのアプリが見る論理の大きさは画面の DPI で引き伸ばされた値なので。換算は四捨五入。DPI が読めなければ 96 に倒さず 8 で何も送らない (倒すと物理のまま送って `exact: true` で取り違えを隠す)。換算後に上限を超えたら実行時に 3 (倍率は窓を見つけるまで分からないので validate と dry_run では見えない)
+  - 大きさの読みが壊れている (中身か枠が外側より大きい) なら 8 で何も送らない。DPI 非対応の窓の中身の読みが物理になるかは、DPI 非対応のフィクスチャの実機テストで測る (物理でなければ、窓の DPI 認識を見て断る形に替えて追記する)
+  - 送った後の読み直しで窓が消えたら、`partial` を立てたまま 12 で返す (要求は置いた後なので、成功として前の読みを返さない)
+  - SetWindowPos に渡す外側の大きさは、今の実測の差から逆算する (要る外側 = 狙い + (今の外側 − 今の基準の大きさ))。外側は `GetWindowRect` (見えない縁を含む)、中身は `GetClientRect` を `MapWindowPoints` で RECT として画面に写したもの (右から左のレイアウトの窓でも左右が入れ替わらない)
+  - `SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_ASYNCWINDOWPOS`。前面と Z 順を変えず、別のスレッドの窓には要求を置くだけにする (応答しないアプリで止まらない。close が SendMessage を避けたのと同じ)
+  - 送った後、狙いの大きさに届くか上限 (`RESIZE_SETTLE_MS` = 1000 ミリ秒、停止要因を見ながら) まで読み直し、最後の読みを出力の `resized[]` (`hwnd`、`process`、`title`、`area`、`logical`、`dpi`、`requested` (物理)、`frame`、`client`、`exact`) に入れる。アプリの最小・最大の大きさなどで届かなくても成功のまま `exact: false`
+  - 最小化と最大化の窓は 7 (`foreground_guard`、reason は最小化に focus と同じ `minimized`、最大化に新しい `maximized`) で断る (復元は D-050 で避けた。最大化の窓に大きさを送ると最大化の印のまま変わる)。無効な窓 (`target_disabled`) と無操作 (10) と見つからない (12) は close と同じ
+  - 設定は操作の種類 `resize` として `allow.actions` / `deny.actions` に従い、既定は `general.input_enabled` の側。画面領域は掛けない (close と同じ)。画面を変える操作として入力の錠 (D-113) と枠 (D-093) を掛け、ロック中の扱いは close と同じ
+  - 最下層: 開発シェル (D-022) では拒否、フィクスチャ専用の装置はフィクスチャの hwnd だけ
+- 根拠: 許可された窓の縁を人がドラッグするのと結果は同じで、許可の範囲は広がらない。入力を送らず前面も変えないので、人の操作を奪わない。物理の点の drag では論理の大きさを狙えないので、大きさを数で受ける道具が要る。B は窓を deny の領域や画面の外に動かせるので、決める守りが増える (案のまま残す)
+- 覆る条件: DPI 非対応の窓で中身の大きさが物理で読めない事例 (`GetClientRect` + `MapWindowPoints` の読みは測っていない、推定)。送った後に中身が狙いとずれる事例 (メニューの折り返しなど) が多いとき (1 回測り直して送り直す)。同じ process の別の窓を変えて困った報告 (title を必須にする)。System-aware のアプリをシステム DPI と違う画面に置いた事例 (倍率がずれる)
+- 状態: 採用
