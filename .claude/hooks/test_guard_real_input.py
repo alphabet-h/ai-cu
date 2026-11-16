@@ -46,6 +46,10 @@ class Denied(unittest.TestCase):
         "target/debug/ai-cu.exe mcp",
         "ai-cu --config t.toml mcp",
         "ai-cu focus notepad.exe",
+        # resize は窓の大きさを変える (D-150)。起動先を変数で渡す形は ACTIONS の語だけで見るので、ACTIONS に要る
+        "ai-cu resize notepad.exe --width 800 --height 600",
+        "& $exe resize notepad.exe --width 800 --height 600",
+        "python tools/client.py $cu resize notepad.exe --width 1 --height 1",
         # python の客 (docs/manual-check/mcp_client.py) の引数に ai-cu があれば、その起動として見る
         "python docs/manual-check/mcp_client.py target/debug/ai-cu.exe mcp -- docs/manual-check/mcp-requests.jsonl",
         "python docs/manual-check/mcp_client.py ai-cu mcp -- x.jsonl",
