@@ -168,11 +168,24 @@ pub struct World {
     pub focused_password: Result<Option<bool>, BackendError>,
     /// `focused_is_password` が呼ばれた回数 (失敗した読みも数える。D-090)
     pub focused_password_calls: usize,
-    /// Some なら `focused_is_password` を読んだときに前面をこの窓に差し替える (読む間に前面が変わるのを模す。D-090)
+    /// Some なら `focused_is_password` を読んだときに前面をこの窓に差し替える (読む間に前面が変わるのを模す。D-090)。
+    /// `point_is_password` を読んだときも同じく差し替える (D-149)
     pub foreground_after_password_read: Option<WindowInfo>,
     /// Some((n, r)) なら、n 回呼ばれた後の `focused_is_password` は `focused_password` の代わりに r を返す
     /// (途中でフォーカスがパスワード欄に移るのを模す。D-090)
     pub password_after_calls: Option<(usize, Result<Option<bool>, BackendError>)>,
+    /// `point_is_password` が返すもの (D-149)。既定は `Ok(None)` (読めなかった)
+    pub point_password: Result<Option<bool>, BackendError>,
+    /// `point_is_password` が呼ばれた回数 (失敗した読みも数える。D-149)
+    pub point_password_calls: usize,
+    /// `point_is_password` に渡された点 (呼ばれた順。D-149)
+    pub point_password_points: Vec<Point>,
+    /// Some((n, r)) なら、n 回呼ばれた後の `point_is_password` は `point_password` の代わりに r を返す
+    /// (右の drag で押す点と離す点の値を分けるのを模す。`password_after_calls` と同じ形。D-149)
+    pub point_password_after_calls: Option<(usize, Result<Option<bool>, BackendError>)>,
+    /// Some なら `point_is_password` を読んだときに `windows_at` をこれに置き換える (読む間に点の下の窓が
+    /// 変わるのを模す。D-149)。読んだときには `foreground_after_password_read` も効く (前面の差し替え)
+    pub windows_at_after_point_read: Option<Vec<(Rect, WindowInfo)>>,
     /// Some(t) なら、`idle_ms` は固定の `idle_ms` の代わりに `now_ms - t` を返す (最後の入力の時刻。D-093)
     pub last_input_at_ms: Option<u64>,
     /// Some(t) なら、時計が t を過ぎた後の `idle_ms` の読みで `last_input_at_ms` を t にする
@@ -303,6 +316,11 @@ impl World {
             focused_password_calls: 0,
             password_after_calls: None,
             foreground_after_password_read: None,
+            point_password: Ok(None),
+            point_password_calls: 0,
+            point_password_points: Vec::new(),
+            point_password_after_calls: None,
+            windows_at_after_point_read: None,
             last_input_at_ms: None,
             input_at_lead_ms: None,
             indicator_shown_for: Some(u64::MAX),
@@ -794,6 +812,24 @@ impl Desktop for MockDesktop {
         match &w.password_after_calls {
             Some((after, r)) if n >= *after => r.clone(),
             _ => w.focused_password.clone(),
+        }
+    }
+
+    fn point_is_password(&self, p: Point) -> Result<Option<bool>, BackendError> {
+        let mut w = self.0.borrow_mut();
+        let n = w.point_password_calls;
+        w.point_password_calls += 1;
+        w.point_password_points.push(p);
+        // 読む間に前面や点の下の窓が変わったことを模す (D-149。前面はキーの側と同じ欄)
+        if let Some(fg) = w.foreground_after_password_read.clone() {
+            w.foreground = Some(fg);
+        }
+        if let Some(list) = w.windows_at_after_point_read.clone() {
+            w.windows_at = list;
+        }
+        match &w.point_password_after_calls {
+            Some((after, r)) if n >= *after => r.clone(),
+            _ => w.point_password.clone(),
         }
     }
 }

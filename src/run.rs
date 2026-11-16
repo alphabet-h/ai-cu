@@ -972,19 +972,109 @@ struct State {
     expected: Option<Point>,
 }
 
+/// 束 `events` を送った後に押されたままのボタン。`held` は送る前に押されたままのボタン。
+/// 実行器の数え (`State::apply`) と、パスワード欄の判定の点を決める純関数 (`password_mouse_checks`。D-149) が共有する
+fn held_after(held: &[Button], events: &[InputEvent]) -> Vec<Button> {
+    let mut out = held.to_vec();
+    for e in events {
+        match *e {
+            InputEvent::Button { button, down: true } => out.push(button),
+            InputEvent::Button {
+                button,
+                down: false,
+            } => remove_one(&mut out, &button),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// 手順の添字 `step` の束を送る前に、点 `point` の下の要素がパスワードの要素かを読む (D-149)。
+/// `guard_first` は、読む前にその点のマウスのガードを別に試すか (束のガードがその点を見ないとき。ドロップの点)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MouseCheck {
+    step: usize,
+    point: Point,
+    guard_first: bool,
+}
+
+/// 1 つの操作の手順から、パスワード欄の判定 (D-149) で読む束と点を決める。
+/// - 右ボタンの押下を含むマウスの束 (右の click、double_click、修飾つき、右の drag の押下): その束の点 (押す点)。
+///   束のガードが同じ点を見るので `guard_first` は偽
+/// - 束の後に新しく押されたままになるボタン (drag の押下) があれば、それより後で最初にそのボタンを離すマウスの束の
+///   点 (離す点 = ドロップの点) を、押下の束の前に読む。押下の束のガードはこの点を見ないので `guard_first` は真
+/// - 同じ束に両方当たれば、右クリックの方を先に並べる。点の無い束 (今のカーソル位置) は読まない
+fn password_mouse_checks(steps: &[Step]) -> Vec<MouseCheck> {
+    fn mouse_batch(s: &Step) -> Option<(Option<Point>, &[InputEvent])> {
+        match s {
+            Step::Batch {
+                target: Target::Mouse { points },
+                events,
+            } => Some((points.first().copied(), events)),
+            _ => None,
+        }
+    }
+    let mut out = Vec::new();
+    let mut held: Vec<Button> = Vec::new();
+    for (j, s) in steps.iter().enumerate() {
+        let Some((first, events)) = mouse_batch(s) else {
+            continue;
+        };
+        let after = held_after(&held, events);
+        let right_down = events.iter().any(|e| {
+            matches!(
+                e,
+                InputEvent::Button {
+                    button: Button::Right,
+                    down: true
+                }
+            )
+        });
+        if right_down && let Some(point) = first {
+            out.push(MouseCheck {
+                step: j,
+                point,
+                guard_first: false,
+            });
+        }
+        // 新しく押されたままになったボタン (多重集合の差: after から held を 1 つずつ除く)
+        let mut new = after.clone();
+        for b in &held {
+            remove_one(&mut new, b);
+        }
+        for b in new {
+            let drop = steps[j + 1..].iter().find_map(|s| {
+                let (first, events) = mouse_batch(s)?;
+                events
+                    .iter()
+                    .any(
+                        |e| matches!(*e, InputEvent::Button { button, down: false } if button == b),
+                    )
+                    .then_some(first)
+            });
+            if let Some(Some(point)) = drop {
+                out.push(MouseCheck {
+                    step: j,
+                    point,
+                    guard_first: true,
+                });
+            }
+        }
+        held = after;
+    }
+    out
+}
+
 impl State {
     fn apply(&mut self, events: &[InputEvent]) {
+        self.held_buttons = held_after(&self.held_buttons, events);
         for e in events {
             match *e {
                 InputEvent::MoveTo { x, y } => {
                     self.prev = self.expected;
                     self.expected = Some(Point::new(x, y));
                 }
-                InputEvent::Button { button, down: true } => self.held_buttons.push(button),
-                InputEvent::Button {
-                    button,
-                    down: false,
-                } => remove_one(&mut self.held_buttons, &button),
+                InputEvent::Button { .. } => {}
                 InputEvent::Key {
                     vk,
                     down: true,
@@ -1524,28 +1614,16 @@ impl Executor<'_> {
             let mut password_checked = false;
             // キーの束の届く先は、操作の中では最初の束の前面のプロセスに固定する (D-100)
             let mut pinned_pid: Option<u32> = None;
-            for step in steps {
+            // 右クリックとドロップの点のパスワード欄の判定 (D-149)。手順の添字で引く
+            let mouse_checks = password_mouse_checks(steps);
+            for (j, step) in steps.iter().enumerate() {
                 self.check_stop(state, ctx).map_err(|e| e.at(i))?;
                 match step {
                     Step::Batch { target, events } => {
                         let mid_drag = !state.held_buttons.is_empty();
-                        // 修飾キーつきのクリック (D-137): マウスの束でもキーのイベントを含めば、修飾キーは前面の
-                        // 窓に届くため、座標の下の窓より先に前面の窓も確かめる (D-033 の届く先の判定を広げる)。
-                        // 前面の窓は捨てる (文字を送らないので、pinned_pid とパスワード欄の判定には使わない)
-                        if matches!(target, Target::Mouse { .. })
-                            && crate::plan::has_key_events(events)
-                        {
-                            self.guard(&Target::Keyboard, ctx).map_err(|mut e| {
-                                e.message = format!(
-                                    "修飾キーつきのクリックは前面の窓にも修飾キーが届くので前面も確かめる: {}",
-                                    e.message
-                                );
-                                mid_drag_hint(e, mid_drag, target, ctx.surface).at(i)
-                            })?;
-                        }
                         let fg = self
-                            .guard(target, ctx)
-                            .map_err(|e| mid_drag_hint(e, mid_drag, target, ctx.surface).at(i))?;
+                            .batch_guard(target, events, mid_drag, ctx)
+                            .map_err(|e| e.at(i))?;
                         if let Some(fg) = &fg {
                             match pinned_pid {
                                 None => pinned_pid = Some(fg.pid),
@@ -1560,6 +1638,10 @@ impl Executor<'_> {
                         {
                             password_checked = true;
                             self.recheck_after_password_read(&fg, target, state, ctx)
+                                .map_err(|e| e.at(i))?;
+                        }
+                        for c in mouse_checks.iter().filter(|c| c.step == j) {
+                            self.check_password_point(c, target, events, mid_drag, state, ctx)
                                 .map_err(|e| e.at(i))?;
                         }
                         if let Err(e) = self.sink.send(events) {
@@ -1752,10 +1834,17 @@ impl Executor<'_> {
         state: &mut State,
         ctx: &Ctx<'_>,
     ) -> Result<(), AppError> {
-        if !self.check_password_focus(fg, ctx)? {
+        let read = self.check_password(
+            |me| Some(me.desktop.focused_is_password()),
+            Hint::PasswordField,
+            serde_json::json!({ "window": window_detail(fg) }),
+            "ここから先を送らずに",
+            state,
+            ctx,
+        )?;
+        if !read {
             return Ok(());
         }
-        self.check_stop(state, ctx)?;
         if let Some(now) = self.guard(target, ctx)?
             && now.hwnd != fg.hwnd
         {
@@ -1772,30 +1861,115 @@ impl Executor<'_> {
         Ok(())
     }
 
-    /// フォーカスの要素がパスワード欄なら 4 で断る (D-090)。戻り値は UIA を読んだか。全層が
-    /// `general.password_input` を許していれば読まない。時間切れ (`TimedOut`。UIA 自身の時間切れ、上限の待ち、
-    /// 返らない判定の上限) は何も送らずに 8 で断る (D-104、本人の決定)。他の読めないとき (`Ok(None)` と他の `Err`)
-    /// は通す (fail-open)。
-    /// `fg` は最初のガードが読んだ前面の窓で、断るときの `error.detail.window` に使う (D-065)
-    fn check_password_focus(&self, fg: &WindowInfo, ctx: &Ctx<'_>) -> Result<bool, AppError> {
+    /// 右クリックとドロップの点のパスワード欄の判定 (D-149)。束のガード (`batch_guard`) が通った後・送る前に呼ぶ。
+    /// ドロップの点 (`guard_first`) は、読む前にその点だけのマウスのガードを (送らずに) 試し、断られたら読まずに
+    /// 飛ばす (許可の外の窓の要素を読まない。断りは今どおり離す束のガードが返す。D-132)。読んで通すときは、共有の
+    /// 判定が停止を確かめ直した後に、この束のガードの組を取り直す (修飾キーの前面のガードを含む。drag なら押す点)。
+    /// ドロップの点のガードは取り直さない (通すなら離す束のガードが離す前に見る)
+    fn check_password_point(
+        &mut self,
+        c: &MouseCheck,
+        target: &Target,
+        events: &[InputEvent],
+        mid_drag: bool,
+        state: &mut State,
+        ctx: &Ctx<'_>,
+    ) -> Result<(), AppError> {
+        let point = c.point;
+        let read = self.check_password(
+            |me| {
+                if c.guard_first
+                    && me
+                        .guard(
+                            &Target::Mouse {
+                                points: vec![point],
+                            },
+                            ctx,
+                        )
+                        .is_err()
+                {
+                    return None;
+                }
+                Some(me.desktop.point_is_password(point))
+            },
+            Hint::PasswordFieldMouse,
+            serde_json::json!({ "point": { "x": point.x, "y": point.y } }),
+            "押さずに",
+            state,
+            ctx,
+        )?;
+        if read {
+            self.batch_guard(target, events, mid_drag, ctx)?;
+        }
+        Ok(())
+    }
+
+    /// パスワード欄の判定の振り分け (D-090、D-149。キーの経路とマウスの経路が共有する)。戻り値は UIA を読んだか。
+    /// 全層が `general.password_input` を許していれば読まない (`read` も呼ばない)。`read` が `None` を返せば読まずに
+    /// 飛ばす (ドロップの点が許可の外。D-149)。パスワードの要素なら 4 (`refuse_hint` と `detail`)。時間切れ
+    /// (`TimedOut`。UIA 自身の時間切れ、上限の待ち、返らない判定の上限) は送らずに 8 で断る (D-104、本人の決定)。
+    /// 他の読めないとき (`Ok(None)` と他の `Err`) は通す (fail-open)。読んで通すときは、読む間に止まりうるので
+    /// 停止を確かめ直す。ガードの取り直しは呼び手が行う (キーは前面の窓の比較、マウスは束のガードの組)
+    fn check_password(
+        &mut self,
+        read: impl FnOnce(&Self) -> Option<Result<Option<bool>, BackendError>>,
+        refuse_hint: Hint,
+        detail: serde_json::Value,
+        refused: &str,
+        state: &mut State,
+        ctx: &Ctx<'_>,
+    ) -> Result<bool, AppError> {
         let Err(denied) = self.policy.password_input_allowed() else {
             return Ok(false);
         };
-        match self.desktop.focused_is_password() {
-            Ok(Some(true)) => Err(denied
-                .into_error(ErrorKind::PolicyDenied)
-                .with_hint(hint(Hint::PasswordField, ctx.surface))
-                .with_detail(serde_json::json!({ "window": window_detail(fg) }))),
+        let Some(result) = read(self) else {
+            return Ok(false);
+        };
+        match result {
+            Ok(Some(true)) => {
+                return Err(denied
+                    .into_error(ErrorKind::PolicyDenied)
+                    .with_hint(hint(refuse_hint, ctx.surface))
+                    .with_detail(detail));
+            }
             // 読み取りを頼んでいない呼び手にも、入力を断った理由が分かる文にする。Tab や Enter の後の 2 回目の
             // 判定では前の束を送り済みなので、「何も送らずに」とは書かない (進み具合は error の partial で分かる)
-            Err(e @ BackendError::TimedOut(_)) => Err(AppError::new(
-                ErrorKind::OsError,
-                format!(
-                    "パスワード欄かの判定 (UIA) が時間切れのため、ここから先を送らずに断った: {e}"
-                ),
-            )),
-            _ => Ok(true),
+            Err(e @ BackendError::TimedOut(_)) => {
+                return Err(AppError::new(
+                    ErrorKind::OsError,
+                    format!("パスワード欄かの判定 (UIA) が時間切れのため、{refused}断った: {e}"),
+                ));
+            }
+            _ => {}
         }
+        self.check_stop(state, ctx)?;
+        Ok(true)
+    }
+
+    /// 1 つの束のガードの組 (D-033、D-137)。キーのイベントを含むマウスの束 (修飾キーつきのクリック) なら、先に
+    /// 前面の窓を確かめ (修飾キーは前面の窓に届く。前面の窓は捨てる)、続いて束の `guard`。ドラッグの途中の 7 は
+    /// 次の手を置き換える (D-132)。束の最初のガードと、パスワード欄の判定 (D-149) で読んだ後の取り直しが共有する
+    fn batch_guard(
+        &self,
+        target: &Target,
+        events: &[InputEvent],
+        mid_drag: bool,
+        ctx: &Ctx<'_>,
+    ) -> Result<Option<WindowInfo>, AppError> {
+        // 修飾キーつきのクリック (D-137): マウスの束でもキーのイベントを含めば、修飾キーは前面の
+        // 窓に届くため、座標の下の窓より先に前面の窓も確かめる (D-033 の届く先の判定を広げる)。
+        // 前面の窓は捨てる (文字を送らないので、pinned_pid とパスワード欄の判定には使わない)
+        if matches!(target, Target::Mouse { .. }) && crate::plan::has_key_events(events) {
+            self.guard(&Target::Keyboard, ctx).map_err(|mut e| {
+                e.message = format!(
+                    "修飾キーつきのクリックは前面の窓にも修飾キーが届くので前面も確かめる: {}",
+                    e.message
+                );
+                mid_drag_hint(e, mid_drag, target, ctx.surface)
+            })?;
+        }
+        self.guard(target, ctx)
+            .map_err(|e| mid_drag_hint(e, mid_drag, target, ctx.surface))
     }
 
     /// フォアグラウンドガード (D-020、D-033)。送る直前に、届く先のウィンドウを取り直して確かめる。
@@ -7377,6 +7551,426 @@ mod tests {
         let w = world.borrow();
         assert!(w.sent.is_empty(), "{:?}", w.sent);
         assert_eq!(w.focused_password_calls, 1);
+    }
+
+    // --- 右クリックとドロップの点のパスワード欄 (D-149) ---
+
+    const RIGHT_CLICK: &str = r#"{"type":"click","x":10,"y":10,"button":"right"}"#;
+    const RIGHT_DRAG_4: &str = r#"{"type":"drag","from":{"x":10,"y":10},"to":{"x":200,"y":10},"steps":4,"duration_ms":40,"button":"right"}"#;
+
+    fn pt_world(r: Result<Option<bool>, BackendError>) -> Rc<RefCell<World>> {
+        let mut w = World::new();
+        w.point_password = r;
+        w.shared()
+    }
+
+    fn sent_button_down(w: &World) -> bool {
+        w.all_events()
+            .iter()
+            .any(|e| matches!(e, InputEvent::Button { down: true, .. }))
+    }
+
+    fn checks_of(action: &str) -> Vec<MouseCheck> {
+        let s = script(action);
+        password_mouse_checks(&crate::plan::plan(&s.actions[0]).unwrap())
+    }
+
+    /// 束の後に押されたままのボタンの数え (`State::apply` と共有)
+    #[test]
+    fn held_after_counts_downs_and_ups() {
+        let b = |button, down| InputEvent::Button { button, down };
+        assert_eq!(
+            held_after(&[], &[b(Button::Left, true)]),
+            vec![Button::Left]
+        );
+        assert_eq!(
+            held_after(&[Button::Left], &[b(Button::Left, false)]),
+            Vec::<Button>::new()
+        );
+        assert_eq!(
+            held_after(&[], &[b(Button::Right, true), b(Button::Right, false)]),
+            Vec::<Button>::new()
+        );
+    }
+
+    /// 読む束と点: 左の click は無し、右の click は押す点、drag は押下の束で離す点 (ガードを先に試す)、
+    /// 右の drag は同じ束に押す点と離す点の順
+    #[test]
+    fn password_mouse_checks_right_click_and_drag_drop() {
+        let from = Point::new(10, 10);
+        let to = Point::new(200, 10);
+        assert!(checks_of(r#"{"type":"click","x":10,"y":10}"#).is_empty());
+        assert!(checks_of(r#"{"type":"click","x":10,"y":10,"modifiers":["ctrl"]}"#).is_empty());
+        assert!(checks_of(r#"{"type":"move","x":10,"y":10}"#).is_empty());
+        assert!(checks_of(r#"{"type":"scroll","x":10,"y":10,"clicks":-2}"#).is_empty());
+        assert_eq!(
+            checks_of(RIGHT_CLICK),
+            vec![MouseCheck {
+                step: 0,
+                point: from,
+                guard_first: false
+            }]
+        );
+        assert_eq!(
+            checks_of(r#"{"type":"double_click","x":10,"y":10,"button":"right"}"#),
+            vec![MouseCheck {
+                step: 0,
+                point: from,
+                guard_first: false
+            }]
+        );
+        // drag の手順は 移動の束 → Sleep → 押下の束 (添字 2) → 補間 → 離す束
+        let steps = crate::plan::plan(&script(DRAG_4).actions[0]).unwrap();
+        assert!(matches!(
+            &steps[2],
+            Step::Batch { events, .. } if is_button(events, true)
+        ));
+        assert_eq!(
+            checks_of(DRAG_4),
+            vec![MouseCheck {
+                step: 2,
+                point: to,
+                guard_first: true
+            }]
+        );
+        assert_eq!(
+            checks_of(RIGHT_DRAG_4),
+            vec![
+                MouseCheck {
+                    step: 2,
+                    point: from,
+                    guard_first: false
+                },
+                MouseCheck {
+                    step: 2,
+                    point: to,
+                    guard_first: true
+                }
+            ]
+        );
+    }
+
+    /// 既定の設定で右クリックの点がパスワード欄なら、何も押さずに 4 (`detail.point` は押す点)
+    #[test]
+    fn password_point_refuses_right_click_by_default() {
+        let world = pt_world(Ok(Some(true)));
+        let (r, _) = exec(
+            &world,
+            &policy(ENABLED),
+            &mut StopSet::new(),
+            &script(RIGHT_CLICK),
+        );
+        let e = r.unwrap_err();
+        assert_eq!(e.kind, ErrorKind::PolicyDenied, "{e}");
+        assert_eq!(
+            e.deny.as_ref().map(|d| d.rule),
+            Some("general.password_input")
+        );
+        assert!(e.deny.as_ref().and_then(|d| d.fix.as_deref()).is_some());
+        assert_eq!(
+            e.hint.as_deref(),
+            Some(hint(Hint::PasswordFieldMouse, Surface::Cli))
+        );
+        assert_eq!(detail(&e)["point"]["x"], 10);
+        assert_eq!(detail(&e)["point"]["y"], 10);
+        assert!(detail(&e).get("window").is_none(), "{:?}", e.detail);
+        assert_eq!(progress(&e)["executed"], 0);
+        assert_eq!(progress(&e)["partial"], false);
+        let w = world.borrow();
+        assert!(w.sent.is_empty(), "{:?}", w.sent);
+        assert_eq!(w.point_password_calls, 1);
+        assert_eq!(w.point_password_points, vec![Point::new(10, 10)]);
+        assert_eq!(w.focused_password_calls, 0);
+    }
+
+    /// 2 つ目の操作の右クリック: 誤りの添字は操作の添字 (手順の添字ではない)
+    #[test]
+    fn password_point_uses_action_index_for_second_action() {
+        let world = pt_world(Ok(Some(true)));
+        let (r, _) = exec(
+            &world,
+            &policy(ENABLED),
+            &mut StopSet::new(),
+            &script(&format!(r#"{{"type":"move","x":5,"y":5}},{RIGHT_CLICK}"#)),
+        );
+        let e = r.unwrap_err();
+        assert_eq!(e.kind, ErrorKind::PolicyDenied, "{e}");
+        assert_eq!(e.action_index, Some(1));
+        let w = world.borrow();
+        assert_eq!(w.point_password_calls, 1);
+        assert!(!sent_button_down(&w), "{:?}", w.sent);
+        assert_eq!(w.sent.len(), 1, "move だけ: {:?}", w.sent);
+    }
+
+    /// 左クリック (修飾つきも)、移動、スクロールでは点を読まずに送る
+    #[test]
+    fn password_point_not_read_for_left_click_move_scroll() {
+        for action in [
+            r#"{"type":"click","x":10,"y":10}"#,
+            r#"{"type":"click","x":10,"y":10,"modifiers":["ctrl"]}"#,
+            r#"{"type":"double_click","x":10,"y":10}"#,
+            r#"{"type":"move","x":10,"y":10}"#,
+            r#"{"type":"scroll","x":10,"y":10,"clicks":-1}"#,
+        ] {
+            let world = pt_world(Ok(Some(true)));
+            let (r, _) = exec(
+                &world,
+                &policy(ENABLED),
+                &mut StopSet::new(),
+                &script(action),
+            );
+            r.unwrap_or_else(|e| panic!("{action}: {e}"));
+            let w = world.borrow();
+            assert!(!w.sent.is_empty(), "{action}");
+            assert_eq!(w.point_password_calls, 0, "{action}");
+        }
+    }
+
+    /// drag の離す点がパスワード欄なら、押す前に 4 (ボタンを押していないので、押されたままにならない)
+    #[test]
+    fn password_point_refuses_drop_before_pressing() {
+        let world = pt_world(Ok(Some(true)));
+        let (r, _) = exec(
+            &world,
+            &policy(ENABLED),
+            &mut StopSet::new(),
+            &script(DRAG_4),
+        );
+        let e = r.unwrap_err();
+        assert_eq!(e.kind, ErrorKind::PolicyDenied, "{e}");
+        assert_eq!(
+            e.deny.as_ref().map(|d| d.rule),
+            Some("general.password_input")
+        );
+        assert_eq!(detail(&e)["point"]["x"], 200);
+        assert_eq!(detail(&e)["point"]["y"], 10);
+        let w = world.borrow();
+        assert_eq!(w.point_password_points, vec![Point::new(200, 10)]);
+        assert!(!sent_button_down(&w), "{:?}", w.sent);
+        assert!(
+            !w.all_events()
+                .iter()
+                .any(|e| matches!(e, InputEvent::Button { .. })),
+            "離しも送らない: {:?}",
+            w.sent
+        );
+    }
+
+    /// 右の drag は押す点と離す点の両方を読む。離す点がパスワード欄なら 4 で何も押さない
+    #[test]
+    fn password_point_right_drag_reads_both_points() {
+        let world = pt_world(Ok(Some(false)));
+        world.borrow_mut().point_password_after_calls = Some((1, Ok(Some(true))));
+        let (r, _) = exec(
+            &world,
+            &policy(ENABLED),
+            &mut StopSet::new(),
+            &script(RIGHT_DRAG_4),
+        );
+        let e = r.unwrap_err();
+        assert_eq!(e.kind, ErrorKind::PolicyDenied, "{e}");
+        assert_eq!(detail(&e)["point"]["x"], 200);
+        let w = world.borrow();
+        assert_eq!(
+            w.point_password_points,
+            vec![Point::new(10, 10), Point::new(200, 10)]
+        );
+        assert!(!sent_button_down(&w), "{:?}", w.sent);
+    }
+
+    /// 離す点が許可の外なら読まずに飛ばし、結果は今と同じ (途中の点で 7、押してあり、離してある。D-132)
+    #[test]
+    fn password_point_not_read_when_drop_point_not_allowed() {
+        let world = drag_world(chrome());
+        world.borrow_mut().point_password = Ok(Some(true));
+        let (r, _) = exec(
+            &world,
+            &policy(&format!("{ENABLED}{ALLOW_TARGET}")),
+            &mut StopSet::new(),
+            &script(DRAG_4),
+        );
+        let e = r.unwrap_err();
+        assert_eq!(e.kind, ErrorKind::ForegroundGuard, "{e}");
+        assert_eq!(detail(&e)["point"]["x"], 105);
+        let h = e.hint.as_deref().unwrap();
+        assert!(
+            h.ends_with(hint(Hint::DragGuardMidway, Surface::Cli)),
+            "{h}"
+        );
+        let w = world.borrow();
+        assert_eq!(w.point_password_calls, 0);
+        assert!(w.sent.iter().any(|b| is_button(b, true)), "{:?}", w.sent);
+        assert!(is_button(w.sent.last().unwrap(), false), "{:?}", w.sent);
+    }
+
+    /// ガード → 読む の順: 右クリックの点の下が許可の外の窓なら、読まずに束のガードの 7 で何も送らない
+    #[test]
+    fn password_point_not_read_when_right_click_point_not_allowed() {
+        let world = pt_world(Ok(Some(true)));
+        world.borrow_mut().windows_at = vec![(Rect::new(0, 0, 3000, 2000), chrome())];
+        let (r, _) = exec(
+            &world,
+            &policy(&format!("{ENABLED}{ALLOW_TARGET}")),
+            &mut StopSet::new(),
+            &script(RIGHT_CLICK),
+        );
+        let e = r.unwrap_err();
+        assert_eq!(e.kind, ErrorKind::ForegroundGuard, "{e}");
+        assert_eq!(
+            e.hint.as_deref(),
+            Some(hint(Hint::MouseGuard, Surface::Cli))
+        );
+        let w = world.borrow();
+        assert!(w.sent.is_empty(), "{:?}", w.sent);
+        assert_eq!(w.point_password_calls, 0);
+    }
+
+    /// 読む間に右クリックの点の下が許可の外の窓になれば、取り直したガードの 7 で何も送らない
+    #[test]
+    fn password_point_rechecks_guard_after_read() {
+        let world = pt_world(Ok(Some(false)));
+        world.borrow_mut().windows_at_after_point_read =
+            Some(vec![(Rect::new(0, 0, 3000, 2000), chrome())]);
+        let (r, _) = exec(
+            &world,
+            &policy(&format!("{ENABLED}{ALLOW_TARGET}")),
+            &mut StopSet::new(),
+            &script(RIGHT_CLICK),
+        );
+        let e = r.unwrap_err();
+        assert_eq!(e.kind, ErrorKind::ForegroundGuard, "{e}");
+        assert_eq!(
+            e.hint.as_deref(),
+            Some(hint(Hint::MouseGuard, Surface::Cli))
+        );
+        let w = world.borrow();
+        assert!(w.sent.is_empty(), "{:?}", w.sent);
+        assert_eq!(w.point_password_calls, 1);
+    }
+
+    /// ドロップの点を読む間に押す点 (from) の下が許可の外の窓になれば、押す束のガードの取り直しで 7、押さない
+    #[test]
+    fn password_point_drop_read_rechecks_press_guard() {
+        let world = pt_world(Ok(Some(false)));
+        world.borrow_mut().windows_at_after_point_read =
+            Some(vec![(Rect::new(0, 0, 50, 50), chrome())]);
+        let (r, _) = exec(
+            &world,
+            &policy(&format!("{ENABLED}{ALLOW_TARGET}")),
+            &mut StopSet::new(),
+            &script(DRAG_4),
+        );
+        let e = r.unwrap_err();
+        assert_eq!(e.kind, ErrorKind::ForegroundGuard, "{e}");
+        assert_eq!(detail(&e)["point"]["x"], 10);
+        let w = world.borrow();
+        assert_eq!(w.point_password_points, vec![Point::new(200, 10)]);
+        assert!(!sent_button_down(&w), "{:?}", w.sent);
+    }
+
+    /// ドロップの点を読んだ後に停止を確かめ直す: 読んだ後の確認で止まれば押さない
+    #[test]
+    fn password_point_drop_read_rechecks_stop() {
+        let world = pt_world(Ok(Some(false)));
+        let mut stops = StopSet::new();
+        // 停止の確認は、移動の束の頭 (1)、Sleep の頭 (2)、Sleep の中で STOP_POLL_MS ごとに 1 回ずつ、押下の束の
+        // 頭で 1 回。その次 (読んだ後の取り直し) で止める。Sleep の長さは plan の drag の手順 (添字 1) から読む
+        let steps = crate::plan::plan(&script(DRAG_4).actions[0]).unwrap();
+        let Step::Sleep { ms: settle } = steps[1] else {
+            panic!("drag の 2 つ目の手順は Sleep: {steps:?}");
+        };
+        let polls = 2 + settle.div_ceil(STOP_POLL_MS) + 1;
+        stops.push(Box::new(StopAfterPolls(polls as u32)));
+        let (r, _) = exec(&world, &policy(ENABLED), &mut stops, &script(DRAG_4));
+        let e = r.unwrap_err();
+        assert_eq!(e.kind, ErrorKind::Stopped, "{e}");
+        let w = world.borrow();
+        assert_eq!(w.point_password_calls, 1);
+        assert!(!sent_button_down(&w), "{:?}", w.sent);
+    }
+
+    /// ctrl つきの右クリック: 読む間に前面が許可の外の窓になれば、取り直した前面のガード (D-137) の 7 で何も送らない
+    #[test]
+    fn password_point_rechecks_foreground_for_modifier_right_click() {
+        let world = pt_world(Ok(Some(false)));
+        world.borrow_mut().foreground_after_password_read = Some(chrome());
+        let (r, _) = exec(
+            &world,
+            &policy(&format!("{ENABLED}{ALLOW_TARGET}")),
+            &mut StopSet::new(),
+            &script(r#"{"type":"click","x":10,"y":10,"button":"right","modifiers":["ctrl"]}"#),
+        );
+        let e = r.unwrap_err();
+        assert_eq!(e.kind, ErrorKind::ForegroundGuard, "{e}");
+        assert!(e.message.contains("修飾キーつきのクリック"), "{e}");
+        let w = world.borrow();
+        assert!(w.sent.is_empty(), "{:?}", w.sent);
+        assert_eq!(w.point_password_calls, 1);
+    }
+
+    /// 全層が password_input 真なら、点を読まずに送る
+    #[test]
+    fn password_point_allowed_by_config_does_not_read() {
+        let p = policy("[general]\ninput_enabled = true\npassword_input = true\n");
+        for action in [RIGHT_CLICK, DRAG_4] {
+            let world = pt_world(Ok(Some(true)));
+            let (r, _) = exec(&world, &p, &mut StopSet::new(), &script(action));
+            r.unwrap_or_else(|e| panic!("{action}: {e}"));
+            let w = world.borrow();
+            assert!(sent_button_down(&w), "{action}");
+            assert_eq!(w.point_password_calls, 0, "{action}");
+        }
+    }
+
+    /// 時間切れは 8 で何も押さない。読めない (`Ok(None)`、時間切れでない `Err`) なら送る (fail-open)
+    #[test]
+    fn password_point_timeout_refuses_and_unknown_passes() {
+        let world = pt_world(Err(BackendError::TimedOut("時間切れ".into())));
+        let (r, _) = exec(
+            &world,
+            &policy(ENABLED),
+            &mut StopSet::new(),
+            &script(RIGHT_CLICK),
+        );
+        let e = r.unwrap_err();
+        assert_eq!(e.kind, ErrorKind::OsError, "{e}");
+        assert!(
+            e.message.contains("パスワード欄かの判定") && e.message.contains("押さずに断った"),
+            "{}",
+            e.message
+        );
+        assert!(world.borrow().sent.is_empty());
+        for r in [
+            Ok(None),
+            Err(BackendError::Os("UIA の失敗".into())),
+            Err(BackendError::OutOfScope("フィクスチャの外".into())),
+        ] {
+            let world = pt_world(r.clone());
+            let (res, _) = exec(
+                &world,
+                &policy(ENABLED),
+                &mut StopSet::new(),
+                &script(RIGHT_CLICK),
+            );
+            res.unwrap_or_else(|e| panic!("{r:?}: {e}"));
+            let w = world.borrow();
+            assert!(sent_button_down(&w), "{r:?}");
+            assert_eq!(w.point_password_calls, 1, "{r:?}");
+        }
+    }
+
+    /// 右クリックの点を読んだ後に停止を確かめ直す: 手順の頭の check_stop の次 (読んだ後) で止まれば何も送らない
+    #[test]
+    fn password_point_rechecks_stop_after_read() {
+        let world = pt_world(Ok(Some(false)));
+        let mut stops = StopSet::new();
+        stops.push(Box::new(StopAfterPolls(1)));
+        let (r, _) = exec(&world, &policy(ENABLED), &mut stops, &script(RIGHT_CLICK));
+        let e = r.unwrap_err();
+        assert_eq!(e.kind, ErrorKind::Stopped, "{e}");
+        let w = world.borrow();
+        assert!(w.sent.is_empty(), "{:?}", w.sent);
+        assert_eq!(w.point_password_calls, 1);
     }
 
     // --- 操作に入る前の読み取りの判定 (D-066) ---

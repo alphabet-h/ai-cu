@@ -291,7 +291,8 @@ impl Field {
             ],
             Field::PasswordInput => vec![
                 "有効にすると、パスワード欄 (UIA の IsPassword) にフォーカスがあるときも type と key を送れる。",
-                "既定はオフで、パスワードは人が打つ (AI の type / key は終了コード 4 で断る)。",
+                "パスワード欄の上での右クリックとドロップ (drag の離す点) も許す。",
+                "既定はオフで、パスワードは人が打つ (AI の type / key と、右クリックとドロップは終了コード 4 で断る)。",
             ],
             Field::List(Side::Allow, _) => vec![
                 "空なら、この次元は制限しない。",
@@ -1649,7 +1650,7 @@ impl App {
                             "region を省略した撮影で、作業中の画面が丸ごと写るようになる。".into(),
                         ),
                         Field::PasswordInput => lines.push(
-                            "パスワード欄にフォーカスがあっても type / key を送るようになる。パスワードを AI に打たせてよいときだけ有効にする。".into(),
+                            "パスワード欄にフォーカスがあっても type / key を送り、パスワード欄の上でも右クリックとドロップをするようになる。パスワードを AI に打たせてよいときだけ有効にする。".into(),
                         ),
                         _ => lines.push("画面上の個人情報が写りうる。".into()),
                     }
@@ -4763,6 +4764,11 @@ mod tests {
                     lines
                         .iter()
                         .any(|l| l.contains("パスワードを AI に打たせてよいときだけ")),
+                    "{lines:?}"
+                );
+                // 右クリックとドロップにも効く (D-149)
+                assert!(
+                    lines.iter().any(|l| l.contains("右クリックとドロップ")),
                     "{lines:?}"
                 );
                 assert!(
