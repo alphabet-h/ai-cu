@@ -135,6 +135,23 @@ pub enum WindowPresence {
     Destroyed,
 }
 
+/// 窓の大きさの読み (`Desktop::window_geometry`。`resize` が使う。D-150)。矩形は物理ピクセルのスクリーン座標
+/// の前提 (DPI 非対応の窓の `client` が物理になるかは未測定で推定。D-150、ステップ 5 の実機テストで測り、違えばここを直す)。
+/// 最小化は持たない (判定は `find_window` の `TopWindow::minimized` の 1 か所。focus と同じ場所)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WindowGeometry {
+    /// `GetWindowRect` の外側の矩形 (見えない縁を含む)。`SetWindowPos` に渡す大きさはこれの基準
+    pub outer: Rect,
+    /// DWM の見えている枠 (`describe` と同じ読み)。取れなければ `outer`
+    pub frame: Rect,
+    /// 中身 (client area) を画面座標に直したもの (`GetClientRect` を `MapWindowPoints` で RECT として写す)
+    pub client: Rect,
+    /// 最大化しているか (`IsZoomed`)
+    pub maximized: bool,
+    /// 窓が主に載っている画面の有効 DPI (`MonitorFromWindow` + `GetDpiForMonitor(MDT_EFFECTIVE_DPI)`)。読めなければ None
+    pub dpi: Option<u32>,
+}
+
 /// RGBA 8 ビットの画像。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Image {
@@ -337,6 +354,17 @@ pub trait Desktop {
     fn set_foreground_by_helper(&self, hwnd: usize) -> Result<HelperOutcome, BackendError>;
     /// `WM_CLOSE` を 1 回置く (D-062)。戻り値は置けたか。入力は送らず、前面も変えない
     fn post_close(&self, hwnd: usize) -> Result<bool, BackendError>;
+    /// 窓の大きさの読み (外側、DWM の枠、中身、最大化、画面の DPI。D-150)。窓が無ければ `Ok(None)` (呼ぶ側は 12)。
+    /// 窓はあるのに読めない (API の失敗や壊れた矩形) なら `Err(BackendError::Os)` (8。「窓が無い」と混ぜない)。読み取りだけ
+    fn window_geometry(&self, hwnd: usize) -> Result<Option<WindowGeometry>, BackendError>;
+    /// 窓の外側 (`GetWindowRect` の基準) の大きさを `outer_w` x `outer_h` にする要求を 1 回置く (D-150)。左上は動かさない。
+    /// 戻り値は要求を置けたか (届いたかは `window_geometry` で読み直す)。入力は送らず、前面も Z 順も変えない
+    fn set_window_size(
+        &self,
+        hwnd: usize,
+        outer_w: u32,
+        outer_h: u32,
+    ) -> Result<bool, BackendError>;
     /// ハンドルのウィンドウの状態 (`close` の後に消えたかを見る)。`Destroyed` はハンドルが無効か、持ち主の pid が
     /// 違う (再利用された)。`Hidden` は同じ pid のまま見えない (トレイに隠したアプリ)。読み取りだけ。D-062、D-096
     fn window_presence(&self, hwnd: usize, pid: u32) -> Result<WindowPresence, BackendError>;

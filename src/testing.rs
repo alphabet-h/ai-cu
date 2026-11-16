@@ -2,6 +2,7 @@
 //! 結合テストからも使えるように公開している。
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
 
@@ -9,7 +10,7 @@ use crate::config::EnvLookup;
 use crate::device::{
     BackendError, Clock, CoverTraits, Desktop, FrameState, HeldInputs, HelperOutcome, HiddenWindow,
     Image, Indicator, InputDesktop, InputEvent, InputLock, InputSink, StackWindow, TopWindow,
-    WindowInfo, WindowOwner, WindowPresence,
+    WindowGeometry, WindowInfo, WindowOwner, WindowPresence,
 };
 use crate::geometry::{Point, Rect};
 use crate::run::ImageWriter;
@@ -216,6 +217,20 @@ pub struct World {
     pub lock_err: Option<BackendError>,
     /// 錠への呼び出しの記録 (呼ばれた順。D-113)。Err を返した `try_acquire` は記録しない
     pub lock_events: Vec<LockEvent>,
+    /// 窓の大きさの読み (`window_geometry` が返す。D-150)。無い hwnd は `Ok(None)` (窓が無い)。既定は空
+    pub geometry: HashMap<usize, WindowGeometry>,
+    /// `set_window_size` に渡された (hwnd, 外側の幅, 外側の高さ) (呼ばれた順。D-150)
+    pub resize_calls: Vec<(usize, u32, u32)>,
+    /// `set_window_size` が要求を置けなかった (false) と返す (D-150)
+    pub resize_fails: bool,
+    /// アプリの最小の外側の大きさ (幅, 高さ) の模擬 (D-150)。要求がこれより小さければ、この大きさで止まる
+    pub resize_clamp: Option<(u32, u32)>,
+    /// 要求は置けた (true) と返すが、大きさは変わらない (D-150)
+    pub resize_ignored: bool,
+    /// 要求を置いた (true) ときに、その hwnd の `geometry` を消す (要求の後に窓が消えた模擬。D-150)
+    pub resize_gone: bool,
+    /// `window_geometry` が、窓はあるのに読めない (`Err(BackendError::Os)`、8) を返す (D-150)
+    pub geometry_broken: bool,
 }
 
 /// `MockInputLock` への呼び出しの記録 (D-113)。呼ばれた時点のモックの時計の `now_ms`、送ったバッチの数 (`sent.len()`)、
@@ -335,6 +350,13 @@ impl World {
             lock_try_calls: 0,
             lock_err: None,
             lock_events: Vec::new(),
+            geometry: HashMap::new(),
+            resize_calls: Vec::new(),
+            resize_fails: false,
+            resize_clamp: None,
+            resize_ignored: false,
+            resize_gone: false,
+            geometry_broken: false,
         }
     }
 
@@ -656,6 +678,52 @@ impl Desktop for MockDesktop {
             if w.foreground.as_ref().is_some_and(|f| f.hwnd == hwnd) {
                 w.foreground = None;
             }
+        }
+        Ok(true)
+    }
+
+    fn window_geometry(&self, hwnd: usize) -> Result<Option<WindowGeometry>, BackendError> {
+        let w = self.0.borrow();
+        if w.geometry_broken {
+            return Err(BackendError::Os("模擬: 窓の大きさを読めない".to_string()));
+        }
+        Ok(w.geometry.get(&hwnd).copied())
+    }
+
+    /// 呼びを記録し、`geometry` の外側を新しい大きさ (`resize_clamp` を当てた後) にする。枠と中身は、外側との差
+    /// (outer − frame、outer − client) を保って書き換える。左上はどれも動かさない (D-150)
+    fn set_window_size(
+        &self,
+        hwnd: usize,
+        outer_w: u32,
+        outer_h: u32,
+    ) -> Result<bool, BackendError> {
+        let mut w = self.0.borrow_mut();
+        w.resize_calls.push((hwnd, outer_w, outer_h));
+        if w.resize_fails {
+            return Ok(false);
+        }
+        if w.resize_gone {
+            w.geometry.remove(&hwnd);
+            return Ok(true);
+        }
+        if w.resize_ignored {
+            return Ok(true);
+        }
+        let (nw, nh) = match w.resize_clamp {
+            Some((mw, mh)) => (outer_w.max(mw), outer_h.max(mh)),
+            None => (outer_w, outer_h),
+        };
+        if let Some(g) = w.geometry.get_mut(&hwnd) {
+            let keep = |r: Rect| {
+                let dw = g.outer.w.saturating_sub(r.w);
+                let dh = g.outer.h.saturating_sub(r.h);
+                Rect::new(r.x, r.y, nw.saturating_sub(dw), nh.saturating_sub(dh))
+            };
+            let (frame, client) = (keep(g.frame), keep(g.client));
+            g.outer = Rect::new(g.outer.x, g.outer.y, nw, nh);
+            g.frame = frame;
+            g.client = client;
         }
         Ok(true)
     }
