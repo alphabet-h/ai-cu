@@ -107,10 +107,15 @@ pub enum Hint {
     ResizeTooLarge,
     /// resize: 対象が応答していない (7。`reason: not_responding`。D-150)。要求を置くと後から効いて重なるので送らない
     ResizeNotResponding,
+    /// マウスの点がどのモニターの上にも無い (7。`reason: off_monitor`。D-151)。CLI と MCP で同じ文
+    OffMonitor,
+    /// 点がカーソルの動く範囲 (ClipCursor) の外 (7 は送る前、6 は送った後。`reason: cursor_clipped`。D-151)。
+    /// CLI と MCP で同じ文
+    CursorClipped,
 }
 
 impl Hint {
-    pub const ALL: [Hint; 40] = [
+    pub const ALL: [Hint; 42] = [
         Hint::MouseGuard,
         Hint::KeyboardGuard,
         Hint::Elevated,
@@ -151,8 +156,15 @@ impl Hint {
         Hint::ResizeTooLarge,
         Hint::ResizeGoneAfterRequest,
         Hint::ResizeNotResponding,
+        Hint::OffMonitor,
+        Hint::CursorClipped,
     ];
 }
+
+/// マウスの点がモニターの隙間にある (CLI と MCP で同じ文。道具やサブコマンドの名前を含まない。D-151)
+pub const OFF_MONITOR_HINT: &str = "何も送っていない。点がモニターの間の隙間 (どのモニターにも映らない所) にある。OS がカーソルを近いモニターへ寄せるので、見えている窓の中の点を選び直す";
+/// 点がカーソルの動く範囲 (ClipCursor) の外 (CLI と MCP で同じ文。7 と 6 が共有する。D-151)
+pub const CURSOR_CLIPPED_HINT: &str = "別のアプリ (ゲーム、リモートデスクトップなど) がカーソルの動く範囲を絞っている (detail.clip)。範囲の中の点を使うか、範囲を絞っているアプリを人間に確かめてもらう。7 なら何も送っていない";
 
 /// resize: 対象が応答していない (CLI。D-150)
 pub const RESIZE_NOT_RESPONDING_HINT: &str = "窓の大きさは変えていない。対象のウィンドウが応答していない (メッセージを処理していない) ので、要求を置くと後から効いて重なりうるため送らなかった。数秒待って `ai-cu windows` と撮影で応答を確かめてから 1 回だけ再試行し、だめなら人間に確かめる";
@@ -192,9 +204,9 @@ pub const PIXEL_USER_ACTIVE_HINT: &str = "何も読んでいない。人がマ�
 const MCP_PIXEL_USER_ACTIVE_HINT: &str = "何も読んでいない。人がマウスやキーボードを使っている最中 (ai-cu 自身の run の直後も含む)。status の道具の retry_after_ms だけ待って 1 回だけ再試行し、だめなら人間に確かめる";
 
 /// ドラッグの途中でガードに断られた (CLI。D-132)。D-065 の前置き (「操作ごと打ち直さない」) の後に読まれる
-pub const DRAG_GUARD_MIDWAY_HINT: &str = "途中まで送った。ドラッグの途中の点の下に許可された窓が無かったので、残りの点を送らず、押したボタンを離して止めた (断った点は error.detail.point)。窓を動かす drag (タイトルバーを掴むなど) なら、窓が途中まで動いていることがあるので `ai-cu windows` で rect を読み直す。窓はカーソルの後から動くので、1 歩を、掴んだ点から進む向きの窓の端までの距離の半分以下にする (`--steps` を増やし、`--duration-ms` も 1 歩 50 ms ほどに。操作列なら `steps` と `duration_ms`)。同じ始点と終点で送り直さず、読み直した rect から新しい始点で作る。窓の外へ運ぶ drag なら、途中の点と終点の下が許可された窓になる経路にするか、人間に頼む (設定は書き換えない)。組み直しは各点が同じガードを通すもので、ガードの回避ではない。組み直しは 1 回だけで、また断られたら繰り返さず人間に頼む";
+pub const DRAG_GUARD_MIDWAY_HINT: &str = "途中まで送った。ドラッグの途中の点の下に許可された窓が無かった (または点がモニターの隙間かカーソルの動く範囲の外だった。error.reason) ので、残りの点を送らず、押したボタンを離して止めた (断った点は error.detail.point)。窓を動かす drag (タイトルバーを掴むなど) なら、窓が途中まで動いていることがあるので `ai-cu windows` で rect を読み直す。窓はカーソルの後から動くので、1 歩を、掴んだ点から進む向きの窓の端までの距離の半分以下にする (`--steps` を増やし、`--duration-ms` も 1 歩 50 ms ほどに。操作列なら `steps` と `duration_ms`)。同じ始点と終点で送り直さず、読み直した rect から新しい始点で作る。窓の外へ運ぶ drag なら、途中の点と終点の下が許可された窓になる経路にするか、人間に頼む (設定は書き換えない)。組み直しは各点が同じガードを通すもので、ガードの回避ではない。組み直しは 1 回だけで、また断られたら繰り返さず人間に頼む";
 /// ドラッグの途中でガードに断られた (MCP。D-132)
-const MCP_DRAG_GUARD_MIDWAY_HINT: &str = "途中まで送った。ドラッグの途中の点の下に許可された窓が無かったので、残りの点を送らず、押したボタンを離して止めた (断った点は error.detail.point)。窓を動かす drag (タイトルバーを掴むなど) なら、窓が途中まで動いていることがあるので windows の道具で rect を読み直す。窓はカーソルの後から動くので、1 歩を、掴んだ点から進む向きの窓の端までの距離の半分以下にする (steps を増やし、duration_ms も 1 歩 50 ms ほどに)。同じ始点と終点で送り直さず、読み直した rect から新しい始点で作る。窓の外へ運ぶ drag なら、途中の点と終点の下が許可された窓になる経路にするか、人間に頼む (設定は書き換えない)。組み直しは各点が同じガードを通すもので、ガードの回避ではない。組み直しは 1 回だけで、また断られたら繰り返さず人間に頼む";
+const MCP_DRAG_GUARD_MIDWAY_HINT: &str = "途中まで送った。ドラッグの途中の点の下に許可された窓が無かった (または点がモニターの隙間かカーソルの動く範囲の外だった。error.reason) ので、残りの点を送らず、押したボタンを離して止めた (断った点は error.detail.point)。窓を動かす drag (タイトルバーを掴むなど) なら、窓が途中まで動いていることがあるので windows の道具で rect を読み直す。窓はカーソルの後から動くので、1 歩を、掴んだ点から進む向きの窓の端までの距離の半分以下にする (steps を増やし、duration_ms も 1 歩 50 ms ほどに)。同じ始点と終点で送り直さず、読み直した rect から新しい始点で作る。窓の外へ運ぶ drag なら、途中の点と終点の下が許可された窓になる経路にするか、人間に頼む (設定は書き換えない)。組み直しは各点が同じガードを通すもので、ガードの回避ではない。組み直しは 1 回だけで、また断られたら繰り返さず人間に頼む";
 
 /// 操作の途中で前面が別のプロセスに変わった (CLI。D-100)
 pub const TARGET_CHANGED_HINT: &str = "途中まで送った。文字を打っている間に前面が別のアプリの窓に変わったので、残りを送らずに止めた (変わった後の窓は error.detail.window、最初の窓の pid は error.detail.pinned_pid)。どこまで入ったかを画面で確かめ、`ai-cu focus` で対象を前面にしてから残りだけを送る。全文を送り直すと二重に入る";
@@ -340,6 +352,9 @@ pub fn hint(kind: Hint, surface: Surface) -> &'static str {
         Hint::ResizeTooLarge => RESIZE_TOO_LARGE_HINT,
         Hint::ResizeNotResponding if mcp => MCP_RESIZE_NOT_RESPONDING_HINT,
         Hint::ResizeNotResponding => RESIZE_NOT_RESPONDING_HINT,
+        // 道具やサブコマンドの名前を含まない文なので、CLI と MCP で同じ (D-151)
+        Hint::OffMonitor => OFF_MONITOR_HINT,
+        Hint::CursorClipped => CURSOR_CLIPPED_HINT,
     }
 }
 
@@ -661,6 +676,8 @@ mod tests {
                 Hint::ResizeTooLarge => 37,
                 Hint::ResizeGoneAfterRequest => 38,
                 Hint::ResizeNotResponding => 39,
+                Hint::OffMonitor => 40,
+                Hint::CursorClipped => 41,
             }
         }
         let mut seen: Vec<usize> = Hint::ALL.iter().map(|h| index(*h)).collect();
@@ -927,6 +944,10 @@ mod tests {
                 "人間",
                 "書き換えない",
                 "ガードの回避ではない",
+                // 途中の点の断りはモニターの隙間とカーソルの動く範囲の外でもありうる (D-151)
+                "モニターの隙間",
+                "カーソルの動く範囲",
+                "error.reason",
             ] {
                 assert!(h.contains(word), "{word}: {h}");
             }
@@ -937,6 +958,30 @@ mod tests {
         let mcp = hint(Hint::DragGuardMidway, Surface::Mcp);
         assert!(mcp.contains("steps"), "{mcp}");
         assert!(mcp.contains("duration_ms"), "{mcp}");
+    }
+
+    /// モニターの隙間と ClipCursor の範囲の外 (D-151): CLI と MCP で同じ文。隙間は何も送っていないと言い、
+    /// 範囲の外は 7 と 6 が共有するので「7 なら」と限って言う。どちらも寄せられることと選び直しを書く
+    #[test]
+    fn off_monitor_and_cursor_clipped_hints_are_same_on_both_surfaces() {
+        for h in [Hint::OffMonitor, Hint::CursorClipped] {
+            assert_eq!(hint(h, Surface::Cli), hint(h, Surface::Mcp), "{h:?}");
+        }
+        let gap = hint(Hint::OffMonitor, Surface::Cli);
+        assert!(gap.starts_with("何も送っていない。"), "{gap}");
+        for word in ["隙間", "寄せる", "選び直す"] {
+            assert!(gap.contains(word), "{word}: {gap}");
+        }
+        let clip = hint(Hint::CursorClipped, Surface::Cli);
+        assert!(!clip.starts_with("何も送っていない"), "{clip}");
+        for word in [
+            "detail.clip",
+            "範囲の中の点",
+            "人間",
+            "7 なら何も送っていない",
+        ] {
+            assert!(clip.contains(word), "{word}: {clip}");
+        }
     }
 
     /// 14 の既定の文 (D-066): CLI と MCP で同じ文で、コマンド名を含まず、何も送っていないと言い切らない

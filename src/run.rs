@@ -803,7 +803,7 @@ pub fn backend_error(e: BackendError) -> AppError {
         BackendError::Os(_) => ErrorKind::OsError,
         // UIA の読み取りの時間切れも 8。終了コードと出力の形は変えない (D-104)
         BackendError::TimedOut(_) => ErrorKind::OsError,
-        // GetCursorPos の 5 (画面のロックか別のデスクトップ)。名前は読んでいないので null (D-066)
+        // GetCursorPos と GetClipCursor (D-151) の 5 (画面のロックか別のデスクトップ)。名前は読んでいないので null (D-066)
         BackendError::DesktopUnavailable(_) => {
             return AppError::new(ErrorKind::DesktopUnavailable, e.to_string())
                 .with_reason(reason::OTHER_DESKTOP)
@@ -2052,7 +2052,8 @@ impl Executor<'_> {
 
     /// フォアグラウンドガード (D-020、D-033)。送る直前に、届く先のウィンドウを取り直して確かめる。
     /// キーの束なら、確かめた前面の窓を返す (パスワード欄の判定の detail と、前面が変わったかの比較に使う。D-090)。
-    /// マウスは `None`
+    /// マウスは `None`。マウスの点ごとの順は、仮想画面の外 → モニターの隙間 (`off_monitor`) → カーソルの動く範囲
+    /// (ClipCursor) の外 (`cursor_clipped`) → 設定の点 → 点の下の窓 (D-151)
     fn guard(&self, target: &Target, ctx: &Ctx<'_>) -> Result<Option<WindowInfo>, AppError> {
         match target {
             Target::Mouse { points } => {
@@ -2071,6 +2072,38 @@ impl Executor<'_> {
                             format!("座標 ({}, {}) が画面 {} の外", p.x, p.y, ctx.screen),
                         )
                         .with_detail(no_window));
+                    }
+                    // OS が寄せる点は、窓の判定の前に断る (窓の判定は寄せる前の点で行われ、意味を持たない。D-151)。
+                    // SendInput の絶対移動はカーソルを近いモニターへ寄せ、ClipCursor の範囲の中へ寄せる
+                    if !self.desktop.on_monitor(p).map_err(backend_error)? {
+                        return Err(AppError::new(
+                            ErrorKind::ForegroundGuard,
+                            format!(
+                                "座標 ({}, {}) はどのモニターの上にも無い (モニターの間の隙間)。OS がカーソルを近いモニターへ寄せ、判定していない窓に届くので送らない",
+                                p.x, p.y
+                            ),
+                        )
+                        .with_reason(reason::OFF_MONITOR)
+                        .with_detail(no_window)
+                        .with_hint(hint(Hint::OffMonitor, ctx.surface)));
+                    }
+                    if let Some(clip) = self.desktop.cursor_clip().map_err(backend_error)?
+                        && !clip.contains(p)
+                    {
+                        return Err(AppError::new(
+                            ErrorKind::ForegroundGuard,
+                            format!(
+                                "座標 ({}, {}) がカーソルの動く範囲 (ClipCursor) {clip} の外。OS がカーソルを範囲の中へ寄せ、判定していない窓に届くので送らない",
+                                p.x, p.y
+                            ),
+                        )
+                        .with_reason(reason::CURSOR_CLIPPED)
+                        .with_detail(serde_json::json!({
+                            "point": point,
+                            "window": null,
+                            "clip": clip,
+                        }))
+                        .with_hint(hint(Hint::CursorClipped, ctx.surface)));
                     }
                     self.policy
                         .check_point(p)
@@ -8234,6 +8267,224 @@ mod tests {
         let e = AppError::new(ErrorKind::PolicyDenied, "領域");
         let e = mid_drag_hint(e, true, &mouse, Surface::Cli);
         assert_eq!(e.hint, None);
+    }
+
+    // ---- モニターの隙間と ClipCursor の範囲の外 (送る前の 7。D-151) ----
+
+    /// 横に 2 枚。2 枚目は 200 下にずれているので、(1920..3840, 0..200) は隙間
+    fn two_monitors(w: &mut World) {
+        w.monitors = vec![
+            Rect::new(0, 0, 1920, 1080),
+            Rect::new(1920, 200, 1920, 1080),
+        ];
+    }
+
+    #[test]
+    fn guard_refuses_click_in_monitor_gap_before_sending() {
+        for surface in [Surface::Cli, Surface::Mcp] {
+            let mut w = World::new();
+            two_monitors(&mut w);
+            let world = w.shared();
+            let e = exec_on(
+                &world,
+                &mut StopSet::new(),
+                &script(r#"{"type":"click","x":2000,"y":100}"#),
+                &[],
+                surface,
+            )
+            .unwrap_err();
+            assert_eq!(e.kind, ErrorKind::ForegroundGuard, "{e}");
+            assert_eq!(e.reason, Some(reason::OFF_MONITOR));
+            assert_eq!(e.reason, Some("off_monitor"));
+            assert_eq!(
+                detail(&e)["point"],
+                serde_json::json!({"x": 2000, "y": 100})
+            );
+            assert!(detail(&e)["window"].is_null(), "{:?}", e.detail);
+            assert!(detail(&e).get("clip").is_none(), "{:?}", e.detail);
+            assert_eq!(e.hint.as_deref(), Some(hint(Hint::OffMonitor, surface)));
+            assert!(e.message.contains("(2000, 100)"), "{}", e.message);
+            assert!(world.borrow().sent.is_empty(), "{:?}", world.borrow().sent);
+        }
+    }
+
+    #[test]
+    fn guard_allows_click_on_second_monitor() {
+        let mut w = World::new();
+        two_monitors(&mut w);
+        let world = w.shared();
+        let (r, _) = exec(
+            &world,
+            &policy(ENABLED),
+            &mut StopSet::new(),
+            &script(r#"{"type":"click","x":2000,"y":500}"#),
+        );
+        r.unwrap();
+        assert!(!world.borrow().sent.is_empty());
+    }
+
+    /// drag の途中の点 (x = 105) が隙間なら 7 off_monitor。押してあり、離してあり、ドラッグの途中の hint
+    #[test]
+    fn guard_refuses_drag_midway_through_gap_and_releases() {
+        let mut w = World::new();
+        w.monitors = vec![Rect::new(0, 0, 100, 2160), Rect::new(150, 0, 3690, 2160)];
+        let world = w.shared();
+        let (r, _) = exec(
+            &world,
+            &policy(ENABLED),
+            &mut StopSet::new(),
+            &script(DRAG_4),
+        );
+        let e = r.unwrap_err();
+        assert_eq!(e.kind, ErrorKind::ForegroundGuard, "{e}");
+        assert_eq!(e.reason, Some(reason::OFF_MONITOR), "reason は保つ");
+        assert_eq!(detail(&e)["point"]["x"], 105);
+        assert!(detail(&e)["window"].is_null(), "{:?}", e.detail);
+        let h = e.hint.as_deref().unwrap();
+        assert!(h.contains("partial=true"), "{h}");
+        assert!(
+            h.ends_with(hint(Hint::DragGuardMidway, Surface::Cli)),
+            "{h}"
+        );
+        assert_eq!(progress(&e)["partial"], true);
+        let w = world.borrow();
+        assert!(
+            !w.sent
+                .iter()
+                .any(|b| b.contains(&InputEvent::MoveTo { x: 105, y: 10 })),
+            "断った点は送らない: {:?}",
+            w.sent
+        );
+        assert!(w.sent.iter().any(|b| is_button(b, true)), "{:?}", w.sent);
+        assert!(
+            is_button(w.sent.last().unwrap(), false),
+            "押したボタンは離す: {:?}",
+            w.sent
+        );
+    }
+
+    #[test]
+    fn guard_refuses_click_outside_cursor_clip_before_sending() {
+        for surface in [Surface::Cli, Surface::Mcp] {
+            let mut w = World::new();
+            w.clip = Some(Rect::new(0, 0, 500, 500));
+            let world = w.shared();
+            let e = exec_on(
+                &world,
+                &mut StopSet::new(),
+                &script(r#"{"type":"click","x":600,"y":100}"#),
+                &[],
+                surface,
+            )
+            .unwrap_err();
+            assert_eq!(e.kind, ErrorKind::ForegroundGuard, "{e}");
+            assert_eq!(e.reason, Some("cursor_clipped"));
+            assert_eq!(detail(&e)["point"], serde_json::json!({"x": 600, "y": 100}));
+            assert!(detail(&e)["window"].is_null(), "{:?}", e.detail);
+            assert_eq!(
+                detail(&e)["clip"],
+                serde_json::json!({"x": 0, "y": 0, "w": 500, "h": 500})
+            );
+            assert_eq!(e.hint.as_deref(), Some(hint(Hint::CursorClipped, surface)));
+            assert!(e.message.contains("ClipCursor"), "{}", e.message);
+            assert!(world.borrow().sent.is_empty(), "{:?}", world.borrow().sent);
+        }
+        // 範囲の中の点は通る
+        let mut w = World::new();
+        w.clip = Some(Rect::new(0, 0, 500, 500));
+        let world = w.shared();
+        let (r, _) = exec(
+            &world,
+            &policy(ENABLED),
+            &mut StopSet::new(),
+            &script(r#"{"type":"click","x":100,"y":100}"#),
+        );
+        r.unwrap();
+        assert!(!world.borrow().sent.is_empty());
+    }
+
+    /// 範囲が読めなければ送らない (断る向き)。5 は 14 other_desktop、ほかは 8 (D-151)
+    #[test]
+    fn guard_cursor_clip_read_failure_is_os_error_without_sending() {
+        for (fail, kind) in [
+            (
+                BackendError::Os("GetClipCursor が失敗 (GetLastError=87)".into()),
+                ErrorKind::OsError,
+            ),
+            (
+                BackendError::DesktopUnavailable("GetClipCursor が失敗 (GetLastError=5)".into()),
+                ErrorKind::DesktopUnavailable,
+            ),
+        ] {
+            let mut w = World::new();
+            w.clip_fail = Some((0, fail));
+            let world = w.shared();
+            let (r, _) = exec(
+                &world,
+                &policy(ENABLED),
+                &mut StopSet::new(),
+                &script(r#"{"type":"click","x":100,"y":100}"#),
+            );
+            let e = r.unwrap_err();
+            assert_eq!(e.kind, kind, "{e}");
+            assert!(e.message.contains("GetClipCursor"), "{}", e.message);
+            assert!(world.borrow().sent.is_empty(), "{:?}", world.borrow().sent);
+        }
+    }
+
+    /// ドロップの点が隙間なら、パスワード欄かを読まずに飛ばし (`guard_first`)、断りは離す束のガードの 7 off_monitor
+    #[test]
+    fn drop_point_in_gap_is_not_read_for_password() {
+        let world = pt_world(Ok(Some(true)));
+        world.borrow_mut().monitors =
+            vec![Rect::new(0, 0, 190, 2160), Rect::new(210, 0, 3630, 2160)];
+        let (r, _) = exec(
+            &world,
+            &policy(ENABLED),
+            &mut StopSet::new(),
+            &script(DRAG_4),
+        );
+        let e = r.unwrap_err();
+        assert_eq!(e.kind, ErrorKind::ForegroundGuard, "{e}");
+        assert_eq!(e.reason, Some(reason::OFF_MONITOR));
+        assert_eq!(detail(&e)["point"]["x"], 200);
+        let h = e.hint.as_deref().unwrap();
+        assert!(
+            h.ends_with(hint(Hint::DragGuardMidway, Surface::Cli)),
+            "{h}"
+        );
+        let w = world.borrow();
+        assert_eq!(w.point_password_calls, 0);
+        assert!(w.sent.iter().any(|b| is_button(b, true)), "{:?}", w.sent);
+        assert!(is_button(w.sent.last().unwrap(), false), "{:?}", w.sent);
+    }
+
+    /// ドロップの点がカーソルの動く範囲 (ClipCursor) の外でも、パスワード欄かを読まずに飛ばし、
+    /// 断りは離す束のガードの 7 cursor_clipped (D-151)
+    #[test]
+    fn drop_point_outside_clip_is_not_read_for_password() {
+        let world = pt_world(Ok(Some(true)));
+        world.borrow_mut().clip = Some(Rect::new(0, 0, 190, 2160));
+        let (r, _) = exec(
+            &world,
+            &policy(ENABLED),
+            &mut StopSet::new(),
+            &script(DRAG_4),
+        );
+        let e = r.unwrap_err();
+        assert_eq!(e.kind, ErrorKind::ForegroundGuard, "{e}");
+        assert_eq!(e.reason, Some(reason::CURSOR_CLIPPED));
+        assert_eq!(detail(&e)["point"]["x"], 200);
+        assert_eq!(detail(&e)["clip"]["w"], 190);
+        let h = e.hint.as_deref().unwrap();
+        assert!(
+            h.ends_with(hint(Hint::DragGuardMidway, Surface::Cli)),
+            "{h}"
+        );
+        let w = world.borrow();
+        assert_eq!(w.point_password_calls, 0);
+        assert!(w.sent.iter().any(|b| is_button(b, true)), "{:?}", w.sent);
+        assert!(is_button(w.sent.last().unwrap(), false), "{:?}", w.sent);
     }
 
     const ALLOW_TARGET_AND_NOTEPAD: &str = "[allow]\nprocesses=[\"target\",\"notepad\"]\n";

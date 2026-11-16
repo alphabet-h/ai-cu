@@ -216,6 +216,10 @@ pub mod reason {
     pub const LEAD_INPUT: &str = "lead_input";
     /// 7: 1 つの操作のキーの束の途中で、前面が別のプロセスの窓に変わった。それより前の束は送ってある (D-100)
     pub const TARGET_CHANGED: &str = "target_changed";
+    /// 7: マウスの点がどのモニターの上にも無い (モニターの隙間。D-151)
+    pub const OFF_MONITOR: &str = "off_monitor";
+    /// 7 と 6: 点がカーソルの動く範囲 (ClipCursor) の外。7 は送る前、6 は送った後に寄せられた (D-151)
+    pub const CURSOR_CLIPPED: &str = "cursor_clipped";
 }
 
 /// JSON にした失敗の error オブジェクト (`to_json()` の `error`) が、人か停止要因に止められた実行のものか (D-093)。
