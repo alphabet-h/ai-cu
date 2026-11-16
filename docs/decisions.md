@@ -2186,6 +2186,7 @@
 - 状態: 採用
 - 追記 (実装、2026-11-16): src/tui.rs の `App::counting_down` と `App::step` を直した。テスト: 新しい `tui_step_does_not_count_time_spent_on_confirm_screen` (確認の画面で 10 秒と 3 秒の経過を持った `y` の周回の後も残りが `RUN_COUNTDOWN_MS` のまま、`Effect` は `ArmRun` だけ。その後の実時間で 0 になって `RunScript` を出す)。既存の `tui_step_advances_countdown_with_real_elapsed_even_when_keys_arrive` の期待は、武装の周回の 10 ms を数えない値 (`RUN_COUNTDOWN_MS - 1200`) に直した。対照: 作業領域の control_s1.py で `step` の `if counting {` を `if true {` に書き換えて `cargo test --lib tui_step_does_not_count_time_spent_on_confirm_screen` を走らせ、exit 101 (カウントダウンの残りの断言で panicked) を見た。finally で書き戻し、sha256 が前後で一致した
 - 追記 (手動確認の手順、2026-11-16): CHECKLIST の節 13 に、確認の画面で 6 秒以上待ってから `y` を押す項目を足した。実施は利用者の端末で別に行う
+- 追記 (手動確認、2026-11-16): release 0.2.0+g11e2515e96bd (main の 11e2515) で、CHECKLIST の節 13 の新しい項が期待どおり。利用者が TUI で、待つだけの操作列を選んだ確認の画面に 6 秒以上いてから `y` を押すと、カウントダウンが 5 秒から数え始め、`Esc` で「取りやめた (何も送っていない)」になった
 
 ### D-149 パスワード欄の判定 (D-090) を、マウスの右クリックとドラッグの離す点 (ドロップ) に広げる。点の下の UIA の要素の IsPassword を押す前に読む
 - 日付: 2026-11-16
