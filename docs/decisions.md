@@ -2391,3 +2391,46 @@
   - reason・detail の欄・終了コード・前面化の経路 (SetForegroundWindow の呼び方、補助プロセスの条件、ガードの順) と unsafe は変えない。`refused_host_front` と `refused_unknown` の文も変えない
 - 覆る条件: 文を直した後も、見えているのに断られた場面で呼び出し側が判断を誤る事例が出たとき、または Z 順の最前面を読む手が要ると分かったとき (B を案として検討する)。クリックで別の操作が起きる窓 (クリックの位置で中身が反応する) で困った事例が出たとき (頼み方を「題名の帯をクリック」に絞る)。要点版にも、見えていても前面とは限らないことの説明が要ると分かったとき (利用者に上限を選び直してもらう)。報告の前面が呼び出し側の端末だったと確かめられたとき (前面のプロセスの判定を見直す)。補助プロセスについては D-057 の覆る条件と同じ
 - 状態: 採用 (D-056 の「人が別のアプリを使っていると言い切るのは refused_other_app のとき」を、この理由の message と MCP の hint について置き換える。D-056 の「CLI の文は今のまま」は保つ)
+
+### D-157 クリップボードに文字を置く操作 `clipboard` を足す (読む操作は足さない。履歴と同期から外す。元の中身は戻さない)
+- 日付: 2026-11-18
+- 場面: 別のプロジェクトの受け入れで、「複数行の文を Ctrl+V で貼ると取り込みのダイアログが開く」を ai-cu で確かめたかった。ai-cu にクリップボードを書く手段が無く、PowerShell の `Set-Clipboard` で置いてから ai-cu の `key ctrl+v` を打った (道具の外の回り道)。`type` で別の欄に打って切り取る手は、受け入れの対象のアプリの状態を余計に動かす
+- 本人 (利用者) が決めたこと:
+  - 口は 3 つ: 操作列 `{"type":"clipboard","text":…}`、一手ずつの `ai-cu clipboard`、MCP の道具 `clipboard` (resize・close と同じそろえ方)
+  - 許可は操作の種類 `clipboard` として `allow.actions` / `deny.actions` に従い、既定は `general.input_enabled` の側 (resize と同じ)。Win+V の履歴とクラウドの同期から外す印を付ける。人が操作中なら 10 で断る。元の中身は戻さず、結果に上書きしたことを出す
+  - 読む操作 (クリップボードの中身を返す) は足さない
+  - Cargo.toml の windows-sys に feature `Win32_System_DataExchange` と `Win32_System_Memory` を足す
+- 選択肢: 口は A 3 つの口 (操作列・一手ずつ・MCP) / B 操作列 (`run`) だけ / C 足さない (今までどおり道具の外で置く)。許可は A 既存の操作の種類 (`allow.actions` / `deny.actions`、既定は `general.input_enabled` の側) / B 既定で拒否の新しい旗
+- 判断: 口は A、許可は A (本人の選択)。細部は推奨で決めた (○)
+- 細部 (自分で決めたこと):
+  - 置く形式は `CF_UNICODETEXT` だけ (UTF-16、終端の NUL つき)。`CF_TEXT` は OS の合成に任せる
+  - 改行は、単独の LF と単独の CR を CRLF にそろえて置く (既にある CRLF はそのまま。Windows の文字のクリップボードの慣例は CRLF。Win32 の EDIT は LF だけの改行を改行として表示しない。JSON の書き手は `\n` で書く)
+  - 文字数は 1〜65536 (UTF-16 の単位ではなく Rust の `char` の数)。空は 3 で断る (クリップボードを空にする目的には使わせない。上限は巨大な割り当てを防ぐ。受け入れの文は数行。`type` には上限が無いが、1 文字ずつ送るので時間で実質の上限が掛かる)
+  - 履歴とクラウドから外す印は 3 つとも置く: `ExcludeClipboardContentFromMonitorProcessing`、`CanIncludeInClipboardHistory`、`CanUploadToCloudClipboard` (中身はどれも DWORD 0)
+  - 印の登録 (`RegisterClipboardFormatW`) と、文字と 3 つの印の置き場 (4 つの `GlobalAlloc`) は `OpenClipboard` の前にすべて済ませる。そこで失敗すれば開かずに 8 (中身は変わらない、`partial` 偽)。開いた後は印を先に、文字を最後に置き、`EmptyClipboard` の後のどこかで失敗したら `EmptyClipboard` を呼び直して空にしてから閉じ、8 に `partial` 真と「元の中身は失われ、クリップボードは空」の文を付ける (fail-closed。D-065 の partial)
+  - `CF_UNICODETEXT` (13) は src/win32/clipboard.rs にローカルの定数で持つ (windows-sys 0.61.2 ではこの定数が `Win32_System_Ole` にあり、本人が了承した 2 つの feature の外。値は Standard Clipboard Formats の文書で固定)
+  - 置く文の検査は `type` と同じ「改行 (LF・CR) とタブ以外の制御文字は 3」を共有の述語で掛ける (U+0000 が混じると CF_UNICODETEXT が途中で切れ、結果の文字数と貼られる文がずれる)
+  - `--dry-run` と `validate` の計画 (plan) の出力にも文を出さない: `Step::Clipboard` は文を直列化から外し、`chars` と `lines` だけを出す
+  - `OpenClipboard` には ai-cu が作る message-only の窓 (`HWND_MESSAGE`) を渡す。置き終えたら `CloseClipboard` の後に窓を壊す (NULL で開くと `EmptyClipboard` が持ち主を NULL にし、`SetClipboardData` が失敗する。message-only の窓は見えず、前面も Z 順も変えない)
+  - 他のアプリが開いていて `OpenClipboard` が失敗したら、50 ms おきに上限 1000 ms まで試し直し (停止要因を見ながら)、だめなら 8 (`os_error`、reason `clipboard_busy`)。hint で少し待って 1 回だけ打ち直すよう伝える
+  - 実行器では「画面を変える操作」の仲間に入れ、入力の錠 (D-113) と枠・予告の間 (D-093) を掛ける (錠: 別の ai-cu の [clipboard, key ctrl+v] の間に割り込んで中身を差し替えると、相手が違う文を貼る。枠: 人の環境を変える前に予告する。予告の終わりの人の入力の判定 (10 `lead_input`) も効く)
+  - 無操作の判定は前面によらず掛ける: `capture.min_idle_ms` が正で、人が操作中なら 10 (`user_active`) で何も置かない (クリップボードは窓ごとでなく窓口 (window station) で 1 つ。人がコピーと貼り付けの途中なら、どのアプリが前面でも中身を壊す)
+  - ロック中の扱いは close・resize と同じ (入力デスクトップの判定は通さない。入力は送らず、続く貼り付けの key がロックの判定で止まる)
+  - 置いた文字は結果に返さない。結果 `clipboard[]` は `action_index`、`chars` (置いた文字数、CRLF にそろえた後)、`lines` (行数)、`history_excluded` (真)
+  - パスワード欄への貼り付けは、続く `key ctrl+v` が既存のキーの束の判定 (D-090) を通る。clipboard 自身はパスワード欄を見ない
+  - フィクスチャ専用の装置では clipboard を通す。開発シェル (D-022) では断る (窓を持たない操作なので「フィクスチャの hwnd だけ」の絞りが当たらない)
+  - clipboard の実機テストは `--ignored` に入れたうえで、環境変数 `AI_CU_CLIPBOARD_REAL=1` を立てたときだけ走る (無ければ印字して抜ける。D-111 の `AI_CU_FRAME_REAL=1` の前例)。走るときは、置く前の CF_UNICODETEXT を読み、終わりに (失敗しても Drop のガードで) 書き戻す。文字以外の形式 (画像など) は戻らないので、立てて走らせるのは利用者の了承を得た回だけ (`--ignored` は重い検査のたびに GO なしで走るので、そのたびに利用者のクリップボードを消さない。後始末の読みは製品の「読む操作」ではない)
+  - 文の長さには形の上限 (65536) に加えて、人の設定の `limits.max_text_len` (type と同じ `check_text_len`、4) も掛ける。改行 (LF・CR) を含む文には `enter`、タブを含む文には `tab` のキーの規則 (type と同じ判定、4) も掛ける (掛けないと [clipboard, key ctrl+v] で type の上限や、deny.keys で断った Enter を回れる)
+  - 無操作の判定は ai-cu 自身の入力の直後にも当たる (GetLastInputInfo は SendInput も数える)。だから [click, clipboard] は 10 になる。推奨の順は [clipboard, click 欄, key ctrl+v] で、hint・手引き・MCP の説明に書く (判定から自分の入力を除くと、人の入力と見分けられない。close の hint と同じ案内の形)
+  - 一手ずつの CLI は `ai-cu clipboard TEXT`。`TEXT` が `-` なら標準入力を UTF-8 で全部読む (末尾の改行 1 つは落とさない。PowerShell の引数に複数行を渡しにくい。`run -` と同じ `-` の慣例)
+  - MCP の道具 `clipboard` は `{text}` と一手ずつの道具に共通の `shot`・`dry_run` (未知のフィールドは断る。resize と同じ形)。readOnlyHint は偽、idempotentHint は真、destructiveHint は真 (人の中身を上書きする)
+  - ガード hook (`.claude/hooks/guard_real_input.py`) の `ACTIONS` への `clipboard` の追加は、このブランチでは行わず利用者に頼む (`.claude/` は保護パス。足さなくても `ai-cu clipboard …` は未知の語として止まるが、起動先を変数で渡す形は素通りしうる。D-150 の追記と同じ穴)
+- 根拠:
+  - Microsoft Learn の OpenClipboard の Remarks: NULL の持ち主で開くと `EmptyClipboard` が持ち主を NULL にして `SetClipboardData` が失敗する。別の窓が開いていると失敗する (試し直しと `clipboard_busy` の根拠)
+  - Clipboard Formats の「Synthesized」の表: `CF_UNICODETEXT` から `CF_TEXT` / `CF_OEMTEXT` は OS が変換する (重ねて置く利点が無い)。同じ文書の「Cloud Clipboard and Clipboard History Formats」: `ExcludeClipboardContentFromMonitorProcessing` で履歴と同期の両方から外れ、`CanIncludeInClipboardHistory` と `CanUploadToCloudClipboard` に 0 を置くとそれぞれから外れる (版や実装の差に備えて 3 つを重ねる)
+  - Clipboard の SECURITY NOTE「The clipboard should not be used to transfer sensitive data」: 置いた文字は他のアプリから読めるので、秘密を置かない (手引きの「秘密を type しない」と同じ扱い) と限界に書く
+  - D-040 と D-133 が退けたのは type の既定や代わりとしてクリップボードを使う案 (利用者の状態を書き換えるため)。本件は呼び出し側が明示して選ぶ操作で、結果に上書きを出し、許可の層も通すので、両者の判断を覆さない
+- 限界: 元の中身は失われる (戻さない)。印は Windows の履歴と同期の機能に向けたもので、他のクリップボードの監視アプリが印を守るとは限らない。置いた文字は他のどのアプリからも読める
+- 目標外: クリップボードを読む、画像やファイルを置く、元の中身を戻す、貼り付けまで 1 手で行う (`paste` 操作)
+- 覆る条件: `CF_TEXT` の合成で文字化けするアプリの事例 (`CF_TEXT` も置く)。LF のまま貼りたい事例 (旗を足す)。長い文書を貼る要望 (上限を見直す)。3 つの印を重ねると貼り付けが壊れるアプリの事例 (1 つ目だけにする)。計画で文を確かめたい要望。1000 ms の試し直しで足りない事例。一手ずつの clipboard の予告の待ちが重いという報告 (予告を省く旗)。key ctrl+v がパスワード欄の判定を通らない経路が見つかったとき (clipboard の後の key を断る)。入力の直後の clipboard が断られて困る事例が多いとき (同じ run の自分の入力の後だけ除く形を検討)
+- 状態: 採用 (D-040 と D-133 の判断は変えない)
