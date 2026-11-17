@@ -45,7 +45,8 @@ pub enum Hint {
     FocusNotFound,
     /// focus: 最小化されている (11)
     FocusMinimized,
-    /// focus: 人が別のアプリを使っていて断られた (11。`reason: refused_other_app`)
+    /// focus: 前面 (キーの届く窓) が別のアプリで断られた (11。`reason: refused_other_app`。人が使っている、
+    /// または前面のまま置かれている。D-156)
     FocusRefused,
     /// focus: 前面は ai-cu を起動した側なのに断られた (11。`reason: refused_host_front`)
     FocusHostFront,
@@ -265,7 +266,7 @@ const MCP_CAPTURE_OCCLUDED_HINT: &str = "何も撮っていない。対象のウ
 const MCP_CAPTURE_SENSITIVE_HINT: &str = "何も撮っていない。撮る矩形に、設定で拒否されたウィンドウ (error.detail の window。見えている部分は visible) が見えている。region (と全画面) なら、そのウィンドウにかからないよう region を狭めるか、window で対象のウィンドウだけを撮る。window で撮っていて対象の手前に重なっているなら、先に focus の道具で対象を前面にしてから撮る (focus は 1 回だけ。focus_failed なら繰り返さない)。中身を読むだけなら find と text の道具で足りる。そのウィンドウを閉じる・動かすのは人間に頼む。設定を緩めるよう頼まない";
 const MCP_HOST_UNKNOWN_HINT: &str = "何も送っていない。ai-cu を起動した側のプロセスを特定できないので、実入力をすべて止めている。focus や再試行では変わらない。読むだけの道具 (windows、shot、pixel、find、tree、text、status) は使える。人間に ai-cu の起動のしかたを確かめてもらう";
 const MCP_FOCUS_NOT_FOUND_HINT: &str = "何も送っていない。その実行ファイル名 (と題名) の見えているウィンドウが無い。windows の道具で名前と題名を確かめる。起動した直後なら数秒待って windows を見直す";
-const MCP_FOCUS_REFUSED_HINT: &str = "何も送っていない。人が別のアプリ (前面のプロセスは message と error.detail にある) を使っているので、Windows が前面の切り替えを断った。繰り返さず、人間に対象を前面に出してもらう。タスクバーや Alt+Tab、click、他のツールで前面にしようとしない";
+const MCP_FOCUS_REFUSED_HINT: &str = "何も送っていない。前面 (キーの届く窓) が別のアプリ (前面のプロセスは message と error.detail にある) なので、Windows が前面の切り替えを断った (人が使っている、または前面のまま置かれている。対象の窓が一番手前に見えていても前面とは限らない)。focus を繰り返さず、人間に対象の窓を 1 回クリックしてもらい、windows で対象の foreground が true になったのを確かめてから続ける。タスクバー、Alt+Tab、click、他のツールで前面にしようとしない";
 const MCP_FOCUS_HOST_FRONT_HINT: &str = "何も送っていない。前面はあなたの端末なのに、Windows が前面の切り替えを断った (前面化の補助プロセスを試したかと、その結果は error.detail の helper と helper_result にある)。focus を繰り返さず、人間に対象のウィンドウを前面に出してもらい (クリックでよい)、windows で対象の foreground が true になったのを確かめてから続ける。タスクバー、Alt+Tab、click、他のツールで前面にしようとしない。find と text は前面でなくても読める";
 const MCP_FOCUS_REFUSED_UNKNOWN_HINT: &str = "何も送っていない。Windows が前面の切り替えを断った (前面のウィンドウを確かめられない)。focus を繰り返さず、人間に対象を前面に出してもらい、windows で対象の foreground が true になったのを確かめてから続ける。タスクバー、Alt+Tab、click、他のツールで前面にしようとしない";
 const MCP_CLOSE_NOT_FOUND_HINT: &str = "何も閉じていない。その実行ファイル名と題名の見えているウィンドウが無い (もう閉じている場合を含む)。windows の道具で名前と題名を確かめる";
