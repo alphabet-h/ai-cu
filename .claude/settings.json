@@ -156,8 +156,6 @@
       "PowerShell(git * --ext-diff *)",
       "Bash(git * --extcmd*)",
       "PowerShell(git * --extcmd*)",
-      "Bash(git * --output*)",
-      "PowerShell(git * --output*)",
       "Bash(git reset *--hard*)",
       "Bash(git * reset *--hard*)",
       "Bash(git clean *)",
