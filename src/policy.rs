@@ -59,7 +59,7 @@ pub fn tui_label(rule: &str) -> Option<&'static str> {
         "deny.classes" => "拒否リスト (deny) > ウィンドウクラス",
         "limits.max_actions" => "上限 > 最大の操作数",
         "limits.max_duration_ms" => "上限 > 最大の実行時間 (ms)",
-        "limits.max_text_len" => "上限 > 最大の文字数 (type)",
+        "limits.max_text_len" => "上限 > 最大の文字数 (type・clipboard)",
         "capture.full_screen" => "撮影の制限 > 全画面の撮影",
         "capture.save_dirs" => "撮影の制限 > 撮影の保存先のフォルダ",
         _ => return None,
@@ -549,7 +549,7 @@ impl Policy {
                 "limits.max_duration_ms",
                 format!("を {need} 以上にする"),
                 format!(
-                    "待ちの合計 {total_sleep_ms} ms (focus、close、resize、wait_for、wait_stable、wait_change、screenshot の settle の待ちの上限を含む) と実行の余裕 {margin_ms} ms が limits.max_duration_ms ({limit}) を超える"
+                    "待ちの合計 {total_sleep_ms} ms (focus、close、resize、clipboard、wait_for、wait_stable、wait_change、screenshot の settle の待ちの上限を含む) と実行の余裕 {margin_ms} ms が limits.max_duration_ms ({limit}) を超える"
                 ),
             ));
         }
@@ -1719,7 +1719,7 @@ mod tests {
         assert_eq!(
             d.fix.as_deref(),
             Some(
-                format!("{FLOOR_FIX_HEAD}上限 > 最大の文字数 (type)」か、設定ファイル F.toml の limits.max_text_len を 60 以上にする").as_str()
+                format!("{FLOOR_FIX_HEAD}上限 > 最大の文字数 (type・clipboard)」か、設定ファイル F.toml の limits.max_text_len を 60 以上にする").as_str()
             )
         );
         // 判定は今までどおり最小値 (40) で、文もそれを言う

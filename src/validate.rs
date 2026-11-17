@@ -204,8 +204,8 @@ pub fn validate(script: &Script, policy: &Policy, screen: Option<Rect>) -> Valid
         plans.push(steps);
     }
     // 実行には待ち以外の時間もかかる。検証を通った操作列が実行時の期限で必ず止まることのないよう、余裕を見る
-    // (focus が前面になるのを待つ上限、close で消えるのを待つ上限、resize の読み直しの上限、wait_for、wait_stable、wait_change、
-    // screenshot の settle の timeout_ms も数える)
+    // (focus が前面になるのを待つ上限、close で消えるのを待つ上限、resize の読み直しの上限、clipboard を開き直す上限、
+    // wait_for、wait_stable、wait_change、screenshot の settle の timeout_ms も数える)
     if let Err(d) = policy.check_duration(total_sleep, DEADLINE_MARGIN_MS) {
         issues.push(Issue::denied(None, d));
     }
@@ -244,19 +244,13 @@ fn check_action_policy(
                 issues.push(Issue::denied(Some(i), d));
             }
         }
-        Action::Type { text, .. } => {
+        // 文の長さの上限とキーの規則は、type と clipboard で同じ判定を掛ける (掛けないと [clipboard, key ctrl+v] で
+        // type の上限や deny.keys で断った Enter を回れる。D-157)。数えるのは clipboard でも CRLF にそろえる前の文
+        Action::Type { text, .. } | Action::Clipboard { text } => {
             if let Err(d) = policy.check_text_len(text) {
                 issues.push(Issue::denied(Some(i), d));
             }
-            // 改行とタブは Enter と Tab のキーとして送るので、キーの規則にも通す
-            for (c, name) in [('\n', "enter"), ('\r', "enter"), ('\t', "tab")] {
-                if text.contains(c) {
-                    let combo: KeyCombo = name.parse().expect("組み込みの名前");
-                    if let Err(d) = policy.check_key(&combo) {
-                        issues.push(Issue::denied(Some(i), d));
-                    }
-                }
-            }
+            check_text_keys(policy, i, text, issues);
         }
         // 撮る対象 (screenshot と画面の待ち。D-081): 判定は 1 つの関数で通す
         Action::Screenshot { region, window, .. } => check_capture_target(
@@ -315,6 +309,19 @@ fn check_action_policy(
             }
         }
         _ => {}
+    }
+}
+
+/// 文の改行とタブのキーの規則 (D-157 で type から切り出した)。type は改行とタブを Enter と Tab のキーとして送り、
+/// clipboard は貼った先で同じ働きをするので、キーの規則にも通す。拒否のたびに push し、早く抜けない
+fn check_text_keys(policy: &Policy, i: usize, text: &str, issues: &mut Vec<Issue>) {
+    for (c, name) in [('\n', "enter"), ('\r', "enter"), ('\t', "tab")] {
+        if text.contains(c) {
+            let combo: KeyCombo = name.parse().expect("組み込みの名前");
+            if let Err(d) = policy.check_key(&combo) {
+                issues.push(Issue::denied(Some(i), d));
+            }
+        }
     }
 }
 

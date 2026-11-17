@@ -239,6 +239,9 @@ pub struct World {
     pub clipboard_busy: u32,
     /// Some なら `set_clipboard_text` が失敗する (D-157)。`Busy` の回数を使い切った後に効く。既定は None
     pub clipboard_fail: Option<ClipboardFail>,
+    /// 真なら、入力の送信 (sink の send の成功) のたびに `last_input_at_ms` を模擬の時計の今にする
+    /// (GetLastInputInfo が SendInput も数えるのを模す。D-157)。既定は偽 (既存のテストは変わらない)
+    pub input_resets_idle: bool,
     /// モニターの矩形 (`on_monitor` が見る。D-151)。空なら `screen` を 1 つのモニターとみなす。既定は空
     pub monitors: Vec<Rect>,
     /// カーソルの動く範囲 (ClipCursor。D-151)。None なら絞りなしで `cursor_clip` は `Ok(None)`。
@@ -394,6 +397,7 @@ impl World {
             clipboard_sets: Vec::new(),
             clipboard_busy: 0,
             clipboard_fail: None,
+            input_resets_idle: false,
             monitors: Vec::new(),
             clip: None,
             clip_fail: None,
@@ -452,6 +456,9 @@ impl InputSink for MockSink {
             }
         }
         w.sent.push(events.to_vec());
+        if w.input_resets_idle {
+            w.last_input_at_ms = Some(w.now_ms);
+        }
         let n = w.sent.len() - 1;
         let clip = w
             .clip_after_sends

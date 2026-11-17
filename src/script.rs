@@ -129,6 +129,9 @@ pub struct WindowTarget {
 /// `resize` の幅と高さの上限 (D-150)。論理の指定は物理に換算した後もこれ以下。SetWindowPos の int で桁あふれしない
 pub const RESIZE_MAX: u32 = 16384;
 
+/// `clipboard` の文の文字数 (Rust の `char` の数) の上限 (D-157)。巨大な割り当てを防ぐ
+pub const CLIPBOARD_MAX_CHARS: usize = 65536;
+
 /// `resize` の大きさの基準 (D-150)。`client` は中身 (client area)、`frame` は DWM の見えている枠
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -385,6 +388,12 @@ pub enum Action {
         #[serde(default)]
         area: ResizeArea,
     },
+    /// クリップボードに文字を置く (D-157)。`CF_UNICODETEXT` で、改行は CRLF にそろえ、Win+V の履歴とクラウドの同期から
+    /// 外す印を付ける。入力は送らず、前面も Z 順も変えない。元の中身は戻さない
+    Clipboard {
+        /// 置く文 (1 以上 `CLIPBOARD_MAX_CHARS` 以下の文字。改行とタブ以外の制御文字は使えない)
+        text: String,
+    },
 }
 
 /// 操作の種類。設定の `actions` リストで使う名前 (D-028)。
@@ -405,10 +414,11 @@ pub enum ActionKind {
     WaitStable,
     WaitChange,
     Resize,
+    Clipboard,
 }
 
 impl ActionKind {
-    pub const ALL: [ActionKind; 15] = [
+    pub const ALL: [ActionKind; 16] = [
         ActionKind::Click,
         ActionKind::DoubleClick,
         ActionKind::Drag,
@@ -424,6 +434,7 @@ impl ActionKind {
         ActionKind::WaitStable,
         ActionKind::WaitChange,
         ActionKind::Resize,
+        ActionKind::Clipboard,
     ];
 
     pub fn name(self) -> &'static str {
@@ -443,6 +454,7 @@ impl ActionKind {
             ActionKind::WaitStable => "wait_stable",
             ActionKind::WaitChange => "wait_change",
             ActionKind::Resize => "resize",
+            ActionKind::Clipboard => "clipboard",
         }
     }
 
@@ -458,7 +470,8 @@ impl ActionKind {
     }
 
     /// 本物のマウスかキーボードを動かすか (`focus` は前面を変え、`close` はウィンドウを閉じ、`resize` は窓の大きさを
-    /// 変えるが、入力は送らない。`wait_for` は読むだけ。`wait_stable` と `wait_change` は撮るだけ)。
+    /// 変え、`clipboard` はクリップボードを書き換えるが、入力は送らない。`wait_for` は読むだけ。`wait_stable` と
+    /// `wait_change` は撮るだけ)。
     pub fn is_input(self) -> bool {
         !matches!(
             self,
@@ -467,6 +480,7 @@ impl ActionKind {
                 | ActionKind::Focus
                 | ActionKind::Close
                 | ActionKind::Resize
+                | ActionKind::Clipboard
                 | ActionKind::WaitFor
                 | ActionKind::WaitStable
                 | ActionKind::WaitChange
@@ -492,6 +506,7 @@ impl Action {
             Action::WaitStable { .. } => ActionKind::WaitStable,
             Action::WaitChange { .. } => ActionKind::WaitChange,
             Action::Resize { .. } => ActionKind::Resize,
+            Action::Clipboard { .. } => ActionKind::Clipboard,
         }
     }
 
@@ -585,11 +600,7 @@ pub fn shape_issue(action: &Action) -> Option<String> {
         Action::Type { interval_ms, .. } if *interval_ms > MAX_TYPE_INTERVAL_MS => Some(format!(
             "type の interval_ms は {MAX_TYPE_INTERVAL_MS} 以下"
         )),
-        Action::Type { text, .. }
-            if text
-                .chars()
-                .any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t')) =>
-        {
+        Action::Type { text, .. } if text.chars().any(forbidden_control) => {
             Some("type の text に改行とタブ以外の制御文字は使えない".into())
         }
         Action::Key { keys } => keys.parse::<KeyCombo>().err(),
@@ -722,8 +733,27 @@ pub fn shape_issue(action: &Action) -> Option<String> {
             }
             None
         }
+        Action::Clipboard { text } => {
+            if text.is_empty() {
+                return Some("clipboard の text は 1 文字以上".into());
+            }
+            if text.chars().count() > CLIPBOARD_MAX_CHARS {
+                return Some(format!(
+                    "clipboard の text は {CLIPBOARD_MAX_CHARS} 文字以下"
+                ));
+            }
+            if text.chars().any(forbidden_control) {
+                return Some("clipboard の text に改行とタブ以外の制御文字は使えない".into());
+            }
+            None
+        }
         _ => None,
     }
+}
+
+/// `type` と `clipboard` の文に使えない制御文字か (改行 LF・CR とタブ以外の制御文字。D-157 で共有にした)
+fn forbidden_control(c: char) -> bool {
+    c.is_control() && !matches!(c, '\n' | '\r' | '\t')
 }
 
 /// `click` / `double_click` の `modifiers` の形の検査 (D-137)。同じ修飾キーの重複は書き手の誤りとして断る
@@ -1058,8 +1088,8 @@ mod tests {
         assert_eq!(ActionKind::Resize.name(), "resize");
         assert_eq!(ActionKind::parse("Resize"), Some(ActionKind::Resize));
         assert!(!ActionKind::Resize.is_input(), "入力は送らない");
-        assert_eq!(ActionKind::ALL.len(), 15);
-        assert_eq!(ActionKind::ALL.last(), Some(&ActionKind::Resize));
+        assert_eq!(ActionKind::ALL.len(), 16);
+        assert_eq!(ActionKind::ALL[14], ActionKind::Resize);
         let full = one_action(
             r#"{"type":"resize","process":"a","title":"メモ","width":1,"height":16384,"logical":true,"area":"frame"}"#,
         )
@@ -1132,6 +1162,64 @@ mod tests {
             r#"{"type":"resize","process":"a","width":1,"height":1,"area":"outer"}"#,
             r#"{"type":"resize","process":"a","height":1}"#,
             r#"{"type":"resize","process":"a","width":-1,"height":1}"#,
+        ] {
+            assert!(one_action(json).is_err(), "{json}");
+        }
+    }
+
+    /// clipboard (D-157): 文字数は `char` の数で数える (絵文字 1 つは 1。UTF-16 では 2)。65536 個の絵文字は通り、
+    /// 65537 個の ASCII は形の誤り
+    #[test]
+    fn clipboard_text_length_counts_chars() {
+        let emoji = Action::Clipboard {
+            text: "😀".repeat(CLIPBOARD_MAX_CHARS),
+        };
+        assert_eq!(shape_issue(&emoji), None, "65536 個の絵文字は通る");
+        let over = Action::Clipboard {
+            text: "a".repeat(CLIPBOARD_MAX_CHARS + 1),
+        };
+        let issue = shape_issue(&over).expect("65537 文字は誤り");
+        assert!(issue.contains("65536 文字以下"), "{issue}");
+        let max = Action::Clipboard {
+            text: "a".repeat(CLIPBOARD_MAX_CHARS),
+        };
+        assert_eq!(shape_issue(&max), None);
+    }
+
+    /// clipboard (D-157): 読み方、種類の名前、入力でないこと、空と NUL は誤り、改行とタブは通る、未知のフィールドは拒否
+    #[test]
+    fn script_parses_clipboard_and_rejects_bad_shapes() {
+        let a = one_action(r#"{"type":"clipboard","text":"a\nb"}"#).unwrap();
+        assert_eq!(
+            a,
+            Action::Clipboard {
+                text: "a\nb".into()
+            }
+        );
+        assert_eq!(a.kind(), ActionKind::Clipboard);
+        assert!(a.mouse_points().is_empty());
+        assert_eq!(ActionKind::Clipboard.name(), "clipboard");
+        assert_eq!(ActionKind::parse("clipboard"), Some(ActionKind::Clipboard));
+        assert_eq!(ActionKind::parse("Clipboard"), Some(ActionKind::Clipboard));
+        assert!(!ActionKind::Clipboard.is_input(), "入力は送らない");
+        assert_eq!(ActionKind::ALL.last(), Some(&ActionKind::Clipboard));
+        for ok in ["a\nb", "a\r\nb", "a\rb", "a\tb", "日本語"] {
+            assert_eq!(
+                shape_issue(&Action::Clipboard { text: ok.into() }),
+                None,
+                "{ok:?}"
+            );
+        }
+        let empty = shape_issue(&Action::Clipboard { text: "".into() }).expect("空は誤り");
+        assert!(empty.contains("1 文字以上"), "{empty}");
+        for bad in ["a\u{0}b", "a\u{7}b", "\u{1b}[0m"] {
+            let issue = shape_issue(&Action::Clipboard { text: bad.into() }).expect("制御文字");
+            assert!(issue.contains("制御文字"), "{bad:?}: {issue}");
+        }
+        for json in [
+            r#"{"type":"clipboard","text":"a","append":true}"#,
+            r#"{"type":"clipboard"}"#,
+            r#"{"type":"clipboard","text":1}"#,
         ] {
             assert!(one_action(json).is_err(), "{json}");
         }
@@ -1287,7 +1375,7 @@ mod tests {
         assert_eq!(ActionKind::parse("wait-for"), Some(ActionKind::WaitFor));
         assert_eq!(ActionKind::parse("WAIT_FOR"), Some(ActionKind::WaitFor));
         assert!(!ActionKind::WaitFor.is_input(), "読むだけで何も送らない");
-        assert_eq!(ActionKind::ALL.len(), 15);
+        assert_eq!(ActionKind::ALL.len(), 16);
         // 出力 (serialize) では省いた項目を出さず、名前が type に戻る
         let v = serde_json::to_value(&s.actions[0]).unwrap();
         assert_eq!(

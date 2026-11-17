@@ -240,7 +240,7 @@ impl Field {
             Field::List(_, k) => k.name(),
             Field::MaxActions => "最大の操作数",
             Field::MaxDurationMs => "最大の実行時間 (ms)",
-            Field::MaxTextLen => "最大の文字数 (type)",
+            Field::MaxTextLen => "最大の文字数 (type・clipboard)",
             Field::SentinelFile => "停止の目印のファイル",
             Field::MouseThreshold => "停止するマウス移動 (px)",
             Field::CaptureFullScreen => "全画面の撮影",
@@ -2460,6 +2460,8 @@ pub fn action_summary(a: &Action) -> String {
                 None => format!("{kind} {process} {width}x{height}{unit}{basis}"),
             }
         }
+        // 文そのものは出さない (D-157)。文言はステップ 4 で整える
+        Action::Clipboard { text } => format!("{kind} {} 文字", text.chars().count()),
     }
 }
 
@@ -6084,6 +6086,7 @@ mod tests {
                 closed: Vec::new(),
                 waited: Vec::new(),
                 resized: Vec::new(),
+                clipboard: Vec::new(),
                 elapsed_ms: 1,
             })
         }
@@ -6157,6 +6160,7 @@ mod tests {
                 closed: vec![c],
                 waited: Vec::new(),
                 resized: Vec::new(),
+                clipboard: Vec::new(),
                 elapsed_ms: 1000,
             }));
             draw(a, 120, 32)
@@ -6230,6 +6234,7 @@ mod tests {
                 closed: Vec::new(),
                 waited: Vec::new(),
                 resized: vec![z],
+                clipboard: Vec::new(),
                 elapsed_ms: 1000,
             }));
             draw(a, 160, 32)
@@ -6286,6 +6291,7 @@ mod tests {
             closed: Vec::new(),
             waited: Vec::new(),
             resized: Vec::new(),
+            clipboard: Vec::new(),
             elapsed_ms: 1234,
         }));
         assert!(matches!(a.overlay, Overlay::RunResult { ok: true, .. }));

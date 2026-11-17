@@ -248,6 +248,8 @@ pub struct PreflightReport {
     pub closes: usize,
     /// `resize` の数 (窓の大きさを変える。D-150)
     pub resizes: usize,
+    /// `clipboard` の数 (クリップボードに文字を置く。D-157)
+    pub clipboards: usize,
     /// 判定に使った層の出所 (床と追加の層)
     pub layer_sources: Vec<String>,
     pub max_duration_ms: u64,
@@ -272,6 +274,7 @@ impl PreflightReport {
             |is: fn(&Step) -> bool| validation.plans.iter().flatten().filter(|s| is(s)).count();
         let closes = count(|s| matches!(s, Step::Close { .. }));
         let resizes = count(|s| matches!(s, Step::Resize { .. }));
+        let clipboards = count(|s| matches!(s, Step::Clipboard { .. }));
         PreflightReport {
             path: path.to_path_buf(),
             script,
@@ -282,6 +285,7 @@ impl PreflightReport {
             screenshots,
             closes,
             resizes,
+            clipboards,
             layer_sources: policy.layers.iter().map(|l| l.source.clone()).collect(),
             max_duration_ms: policy.max_duration_ms(),
             mouse_threshold_px: policy.mouse_threshold_px(),
@@ -348,6 +352,9 @@ fn summarize(v: &Validation) -> (usize, Option<FirstBatch>, u64, usize) {
         Step::Focus { .. } => Some(FirstBatch::Focus),
         Step::Close { .. } => Some(FirstBatch::Close),
         Step::Resize { .. } => Some(FirstBatch::Resize),
+        // clipboard は前面にも束の届く先にも関わらないので読み飛ばし、続く束を first_batch にする (勧める順
+        // [clipboard, key ctrl+v] でもキーの注意を消さない。D-157)
+        Step::Clipboard { .. } => None,
         _ => None,
     });
     let wait: u64 = v.plans.iter().map(|p| crate::plan::total_sleep_ms(p)).sum();
@@ -709,5 +716,28 @@ mod tests {
         ] {
             assert_eq!(first(a), Some(FirstBatch::Mouse), "{a}");
         }
+    }
+
+    /// clipboard は first_batch に数えず、続く束で決める ([clipboard, key ctrl+v] でもキーの注意が出る)。
+    /// clipboard の数は `clipboards` に入る (D-157)
+    #[test]
+    fn summarize_skips_clipboard_for_first_batch() {
+        let cfg = crate::config::Config::parse(&format!("version = 1\n{ENABLED}")).unwrap();
+        let policy = Policy::new(vec![crate::config::Layer::from_config(&cfg, "t").unwrap()]);
+        let s = Script::from_json(
+            r#"{"version":1,"actions":[{"type":"clipboard","text":"a\nb"},{"type":"key","keys":"ctrl+v"}]}"#,
+        )
+        .unwrap();
+        let r = PreflightReport::build(Path::new("s.json"), s, &policy, None, Vec::new());
+        assert!(r.runnable(), "{:?}", r.validation.issues);
+        assert_eq!(r.first_batch, Some(FirstBatch::Keyboard));
+        assert_eq!(r.clipboards, 1);
+        assert_eq!(r.batches, 1);
+        let only =
+            Script::from_json(r#"{"version":1,"actions":[{"type":"clipboard","text":"a"}]}"#)
+                .unwrap();
+        let r = PreflightReport::build(Path::new("s.json"), only, &policy, None, Vec::new());
+        assert_eq!(r.first_batch, None);
+        assert_eq!(r.clipboards, 1);
     }
 }
