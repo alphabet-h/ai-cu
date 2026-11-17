@@ -240,6 +240,18 @@ impl Policy {
                     d
                 });
         }
+        // clipboard は、置いた文を key の ctrl+v で貼れば type と同じく文字を入れられる。type を断った設定
+        // (deny.actions の type、type の無い allow.actions) で回り道にならないよう、自分の名前の許可に加えて
+        // type の許可も求める (D-157 の追記。D-153 と同じ形で、type を断った軸の rule と fix を写す)
+        if kind == ActionKind::Clipboard {
+            return self.check_action_kind(ActionKind::Type).map_err(|mut d| {
+                d.message = format!(
+                    "clipboard は貼り付けで文字を入れられるので type と同じ許可が要る: {}",
+                    d.message
+                );
+                d
+            });
+        }
         Ok(())
     }
 
@@ -1240,6 +1252,67 @@ mod tests {
             );
             assert!(!d.message.contains(head), "{name}: {}", d.message);
         }
+    }
+
+    /// clipboard は、自分の名前の許可に加えて type の許可も要る (D-157 の追記)。type を断った軸の rule と
+    /// fix を写し、自分の名前で断るときの文は今までどおり
+    #[test]
+    fn policy_clipboard_also_needs_type_permission() {
+        let head = "clipboard は貼り付けで文字を入れられるので type と同じ許可が要る";
+        let kind = ActionKind::Clipboard;
+        // (a) clipboard だけを並べた allow.actions は、type の軸 (allow.actions) で断る
+        let d = policy(&[&format!("{ENABLED}[allow]\nactions = [\"clipboard\"]\n")])
+            .check_action_kind(kind)
+            .unwrap_err();
+        assert_eq!(d.rule, Some("allow.actions"));
+        assert!(
+            d.fix.as_deref().unwrap().contains("に type を足す"),
+            "{:?}",
+            d.fix
+        );
+        assert!(d.message.starts_with(head), "{}", d.message);
+        // (b) clipboard と type の両方を並べれば通る
+        assert!(
+            policy(&[&format!(
+                "{ENABLED}[allow]\nactions = [\"clipboard\", \"type\"]\n"
+            )])
+            .check_action_kind(kind)
+            .is_ok()
+        );
+        // (c) deny.actions の type でも断る (allow.actions を書かない設定の回り道を塞ぐ)
+        let d = policy(&[&format!("{ENABLED}[deny]\nactions = [\"type\"]\n")])
+            .check_action_kind(kind)
+            .unwrap_err();
+        assert_eq!(d.rule, Some("deny.actions"));
+        assert!(d.message.contains(head), "{}", d.message);
+        assert!(
+            d.fix.as_deref().unwrap().contains("から type を外す"),
+            "{:?}",
+            d.fix
+        );
+        // (d) clipboard 自身が deny.actions に当たるなら、今までどおり自分の名前の文
+        let d = policy(&[&format!("{ENABLED}[deny]\nactions = [\"clipboard\"]\n")])
+            .check_action_kind(kind)
+            .unwrap_err();
+        assert_eq!(d.rule, Some("deny.actions"));
+        assert!(!d.message.contains(head), "{}", d.message);
+        assert!(
+            d.fix.as_deref().unwrap().contains("から clipboard を外す"),
+            "{:?}",
+            d.fix
+        );
+        // (e) allow.actions を書かず実入力の総スイッチだけなら通る
+        assert!(
+            policy(&["[general]\ninput_enabled = true\n"])
+                .check_action_kind(kind)
+                .is_ok()
+        );
+        // (f) 追加の層が type を外しても断る (層の合成は D-153 と同じ)
+        let d = policy(&[ENABLED, &format!("{ENABLED}[deny]\nactions = [\"type\"]\n")])
+            .check_action_kind(kind)
+            .unwrap_err();
+        assert_eq!(d.rule, Some("deny.actions"));
+        assert!(d.message.contains(head), "{}", d.message);
     }
 
     /// 画面を読む待ちの撮影の判定 (D-153) は全ての層に掛かり、撮影を断った層の rule と fix を写す。
