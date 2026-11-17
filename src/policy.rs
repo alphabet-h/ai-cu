@@ -1242,6 +1242,75 @@ mod tests {
         }
     }
 
+    /// 画面を読む待ちの撮影の判定 (D-153) は全ての層に掛かり、撮影を断った層の rule と fix を写す。
+    /// 基本の層が待ちと screenshot を許しても、追加の層が screenshot を外せば (allow.actions に無い、
+    /// deny.actions にある) 断り、fix は追加の層を指す。基本の層が screenshot を外せば、追加の層が何を
+    /// 書いても (追加の層は allow を広げられない) 基本の層の fix で断る
+    #[test]
+    fn policy_screen_waits_screenshot_check_spans_layers() {
+        let head = "は画面を読むので撮影 (screenshot) と同じ許可が要る";
+        let overlay_head = "許可してよければ、追加の層の設定ファイル overlay.toml";
+        for kind in [
+            ActionKind::WaitFor,
+            ActionKind::WaitStable,
+            ActionKind::WaitChange,
+        ] {
+            let name = kind.name();
+            let both = format!("{ENABLED}[allow]\nactions = [\"{name}\", \"screenshot\"]\n");
+            let floor = || floor_at(&both, "floor.toml");
+            // 追加の層の allow.actions に screenshot が無い
+            let d = Policy::new(vec![
+                floor(),
+                overlay_at(
+                    &format!("{ENABLED}[allow]\nactions = [\"{name}\"]\n"),
+                    "overlay.toml",
+                ),
+            ])
+            .check_action_kind(kind)
+            .unwrap_err();
+            assert_eq!(d.rule, Some("allow.actions"), "{name}");
+            let fix = d.fix.as_deref().unwrap();
+            assert!(fix.starts_with(overlay_head), "{name}: {fix}");
+            assert!(fix.contains("に screenshot を足す"), "{name}: {fix}");
+            assert!(d.message.contains(head), "{name}: {}", d.message);
+            // 追加の層の deny.actions に screenshot がある
+            let d = Policy::new(vec![
+                floor(),
+                overlay_at(
+                    &format!("{ENABLED}[deny]\nactions = [\"screenshot\"]\n"),
+                    "overlay.toml",
+                ),
+            ])
+            .check_action_kind(kind)
+            .unwrap_err();
+            assert_eq!(d.rule, Some("deny.actions"), "{name}");
+            let fix = d.fix.as_deref().unwrap();
+            assert!(fix.starts_with(overlay_head), "{name}: {fix}");
+            assert!(fix.contains("から screenshot を外す"), "{name}: {fix}");
+            // 基本の層が screenshot を外せば、追加の層が両方を並べても基本の層で断る
+            let d = Policy::new(vec![
+                floor_at(
+                    &format!("{ENABLED}[allow]\nactions = [\"{name}\"]\n"),
+                    "floor.toml",
+                ),
+                overlay_at(&both, "overlay.toml"),
+            ])
+            .check_action_kind(kind)
+            .unwrap_err();
+            assert_eq!(d.rule, Some("allow.actions"), "{name}");
+            let fix = d.fix.as_deref().unwrap();
+            assert!(fix.contains("floor.toml"), "{name}: {fix}");
+            assert!(!fix.contains("追加の層"), "{name}: {fix}");
+            // 両方の層が両方を並べれば通る
+            assert!(
+                Policy::new(vec![floor(), overlay_at(&both, "overlay.toml")])
+                    .check_action_kind(kind)
+                    .is_ok(),
+                "{name}"
+            );
+        }
+    }
+
     #[test]
     fn policy_deny_wins_over_allow_in_every_dimension() {
         let p = policy(&[&format!(
