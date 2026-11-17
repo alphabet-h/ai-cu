@@ -4818,6 +4818,11 @@ fn fixture_real_clipboard_sets_text_with_history_exclusion() {
     let exclusion = clipboard::monitor_exclusion_format_id().expect("印の形式の値");
     let (present, before, seq_before) =
         clipboard::snapshot().expect("置く前のクリップボードを読めない。何も置いていない");
+    // 番号が 0 (窓口のクリップボードの権利が無い) なら、変化の確かめがすべて素通りになるので置かない
+    if seq_before == 0 {
+        println!("FIXTURE clipboard skipped (sequence unavailable)");
+        return;
+    }
     if present.contains(&exclusion) {
         println!("FIXTURE clipboard skipped (monitor-excluded content present)");
         return;
@@ -4842,10 +4847,14 @@ fn fixture_real_clipboard_sets_text_with_history_exclusion() {
         before,
         set_sequence: None,
     };
-    let r = f
-        .execute(r#"{"type":"clipboard","text":"ai-cu 一行目\n二行目😀"}"#)
-        .expect("clipboard");
-    restore.set_sequence = Some(clipboard::sequence_number());
+    let r = f.execute(r#"{"type":"clipboard","text":"ai-cu 一行目\n二行目😀"}"#);
+    // 失敗 (空にした後の失敗の Emptied を含む) でも、中身が書き換わっていれば番号を記録してから止まる。
+    // 番号が置く前と同じなら何も書き換わっていない (Busy で尽きたなど) ので記録しない
+    let after = clipboard::sequence_number();
+    if after != seq_before {
+        restore.set_sequence = Some(after);
+    }
+    let r = r.expect("clipboard");
     assert_eq!(r.executed, 1);
     assert_eq!(r.clipboard.len(), 1, "{:?}", r.clipboard);
     let info = &r.clipboard[0];
