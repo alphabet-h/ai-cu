@@ -89,6 +89,7 @@ ai-cu wait-for notepad.exe --title "保存の確認" --absent                   
 
 - 操作列では `{"type": "wait_for", "process": "notepad.exe", "element": {"name": "保存", "type": "button"}}`。条件は一番細かい指定で決まる (`text` > `element` > ウィンドウ)。`absent` は「無くなるまで」
 - 250 ミリ秒の待ちを挟んで確かめ、`timeout_ms` (既定 10 秒。MCP ではクライアントの制限時間より短く) を超えると終了コード 15 (同じ条件で繰り返し待たず、状態と条件を見直す)。満たされると `waited[].element.center` をそのまま `click` に渡せる。`absent` が即時に満たされたら `note` を読む
+- `text` は値 (入力欄の値、文書の本文) を持つ要素だけを見る。名前に状態を出すアプリでは `text` を使わず、待つ字を `element.name` (CLI は `--name`) に入れる (確かめるたびに部分一致で引き直す)。値を持たない要素だけなら 15 の `unmet` は `text` で、message に数が出る (D-154)
 
 点の色を確かめるなら `pixel` (読むだけ。撮って画像から読む代わりに使う)。
 

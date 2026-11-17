@@ -23,7 +23,7 @@ ai-cu find --window PROCESS [--window-title TEXT] [--name TEXT] [--type TYPE] [-
 ai-cu tree --window PROCESS [--window-title TEXT] [--depth N] [--limit N] [--all]
                               要素の木を深さで切って、1 行 1 要素の字下げの文字列 (種類 "名前" @x,y。@x,y は center) で出す。名前の無い入れ物と画面外は畳む。skipped は読めなかった要素と取れなかった枝の数で、find の skipped と数え方が違う (読み取りだけ。撮影の許可が要る。D-084)
 ai-cu text --window PROCESS [--window-title TEXT] [--name TEXT] [--type TYPE] [--max-chars N]
-                              要素の文字列 (文書の本文、入力欄の値) を読む。本文は既定 20000 字で切り、出力の truncated と total_chars (切る前の字数) で分かる (--max-chars で 1〜1000000。D-102)。出力の element には focused と password が出る (状態は出ない。ほかの要素の欄は find の行と同じで、name_truncated を含む)。パスワードの要素 (UIA の IsPassword) は文字列を読まずに飛ばして次の要素へ進み、文字列を持つ要素が無ければ 13 で、飛ばした数を message の末尾に「(パスワードの要素 N 個は読まない)」と添える (読み取りだけ。撮影の許可が要る。D-090)
+                              要素の文字列 (文書の本文、入力欄の値) を読む。本文は既定 20000 字で切り、出力の truncated と total_chars (切る前の字数) で分かる (--max-chars で 1〜1000000。D-102)。出力の element には focused と password が出る (状態は出ない。ほかの要素の欄は find の行と同じで、name_truncated を含む)。パスワードの要素 (UIA の IsPassword) は文字列を読まずに飛ばして次の要素へ進み、文字列を持つ要素が無ければ 13 で、飛ばした数を message の末尾に「(パスワードの要素 N 個は読まない)」と添える。値を持たない要素 (名前だけの list_item など) は読まず、一致したが値を持たない要素があれば 13 の message に「(一致した要素 N 個は文字列 (値) を持たない。名前は find で読む)」と添える (読み取りだけ。撮影の許可が要る。D-090、D-154)
 ai-cu config show|path|validate            設定の層、場所、検証結果を出す (読み取り専用)
 ai-cu mcp [--log PATH]        MCP サーバー (stdio) として待ち受ける。Claude Code や Codex の設定に登録して、道具として呼ぶ (「MCP サーバーモード」)。--log は拡張子 .log のファイルだけ (それ以外は書かずに続ける。D-140)
 ai-cu                         引数なし: 設定を編集する TUI (端末のときだけ)。r で操作列 JSON を選んで検証・実行できる
@@ -38,7 +38,7 @@ ai-cu close notepad.exe --title TEXT       ウィンドウを閉じる (WM_CLOSE
 ai-cu resize PROCESS [--title TEXT] --width W --height H [--logical] [--frame]
                                            窓の大きさを変える (既定は物理ピクセルで中身。--logical で論理、--frame で見えている枠。左上と前面は変えない。D-150)
 ai-cu wait-for PROCESS [--title TEXT] [--name TEXT] [--type TYPE] [--text TEXT] [--absent] [--timeout-ms MS]
-                                           条件がそろうまで待つ (ウィンドウ、要素、文字列が出る / 消えるまで。読むだけ。D-068)。--text はパスワードの要素を読まずに飛ばす (D-090)
+                                           条件がそろうまで待つ (ウィンドウ、要素、文字列が出る / 消えるまで。読むだけ。D-068)。--text はパスワードの要素を読まずに飛ばす (D-090)。--text は値を持たない要素を見ないので、名前の変化は --text でなく --name で待つ (確かめるたびに引き直す。D-154)
   共通: --shot PATH [--window PROCESS [--window-title TEXT] | --region X,Y,W,H] [--scale F] [--max-edge N] [--settle-ms 300|auto] で操作の後に撮る
         (操作列の screenshot と同じ扱い)。--dry-run で装置に触れない
         --settle-ms auto は固定の待ちの代わりに、画面が落ち着くまで (最長 3000 ミリ秒) 待ってから撮る (screenshot の settle。MCP は shot.settle_ms: "auto"。D-081)

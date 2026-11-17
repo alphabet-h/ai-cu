@@ -532,7 +532,7 @@ fn schema_wait_timeout() -> Value {
 
 /// `wait_for` の `text` (D-068)
 fn schema_wait_text() -> Value {
-    json!({ "type": "string", "minLength": 1, "description": "要素の文字列に含む文字列 (LF にそろえて部分一致、大文字小文字を区別)。element があればその絞り込みの中で、無ければ最初に文字列を持つ要素を読む。パスワードの要素は読まずに飛ばす" })
+    json!({ "type": "string", "minLength": 1, "description": "要素の文字列に含む文字列 (LF にそろえて部分一致、大文字小文字を区別)。element があればその絞り込みの中で、無ければ最初に文字列を持つ要素を読む。パスワードの要素は読まずに飛ばす。値を持たない要素 (名前だけの list_item など) は読まない。名前の変化を待つなら text を外し、待つ字を element.name に入れる" })
 }
 
 /// `wait_for` の `absent` (D-068)
@@ -738,7 +738,7 @@ pub fn tools() -> Vec<Value> {
         tool(
             "text",
             "文字列を読む",
-            "対象のウィンドウの要素のうち、名前と種類に一致して最初に文字列 (文書の本文、入力欄の値) を持つものを読む。入力した内容の確認は撮るよりこれが確実。パスワードの要素 (UIA の IsPassword) は読まずに飛ばす。無ければ element_not_found (find で名前と種類を確かめる)。撮影の許可が要る。読むだけ。本文は既定で切り、切ったら truncated が真で total_chars に元の字数が出る (max_chars で広げる)",
+            "対象のウィンドウの要素のうち、名前と種類に一致して最初に文字列 (文書の本文、入力欄の値) を持つものを読む。入力した内容の確認は撮るよりこれが確実。パスワードの要素 (UIA の IsPassword) は読まずに飛ばす。値を持たない要素は読まない (名前は find で読む)。無ければ element_not_found (find で名前と種類を確かめる)。撮影の許可が要る。読むだけ。本文は既定で切り、切ったら truncated が真で total_chars に元の字数が出る (max_chars で広げる)",
             json!({ "type": "object", "additionalProperties": false, "properties": { "window": schema_window(), "window_title": schema_window_title(), "name": { "type": "string", "description": "要素の名前に含む文字列" }, "type": schema_element_type(), "max_chars": { "type": "integer", "minimum": 1, "maximum": TEXT_MAX_CHARS_MAX, "description": format!("本文の上限 (字。既定 {TEXT_MAX_CHARS_DEFAULT})。truncated が真なら上げて読み直す") } }, "required": ["window"] }),
             read_only(),
         ),

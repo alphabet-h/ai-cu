@@ -74,7 +74,7 @@ OS の呼び出しの失敗 (`SendInput`、撮影、保存)。UIA の読み取�
 
 ### `element_not_found`
 
-`text` の条件で、文字列を持つ要素が無い (パスワードの要素は読まずに飛ばし、飛ばしたときは message の末尾に「(パスワードの要素 N 個は読まない)」が付く。D-090)。何もしていない
+`text` の条件で、文字列を持つ要素が無い (パスワードの要素は読まずに飛ばし、飛ばしたときは message の末尾に「(パスワードの要素 N 個は読まない)」が付く。D-090)。一致したが値を持たない要素があれば、その数を「(一致した要素 N 個は文字列 (値) を持たない。名前は find で読む)」と添える (D-154)。何もしていない
 
 ### `desktop_unavailable`
 
@@ -82,7 +82,7 @@ OS の呼び出しの失敗 (`SendInput`、撮影、保存)。UIA の読み取�
 
 ### `wait_timeout`
 
-`wait_for`、`wait_stable`、`wait_change` の条件が時間内に満たされなかった。何も送っていない (操作列なら、それより前の操作は済んでいて `executed` で分かる)。`error.detail` に `timeout_ms`、`checks` (確かめた回数)、`unmet` (`wait_for` は `window` / `element` / `text`、`wait_stable` は `stable`、`wait_change` は `change`)、`window` (最後の判定で見た対象。題名なし。無ければ null)。画面の待ちでは、最後に撮った矩形の `rect` と最後の比較の差の `last_changed_ratio` も入る。同じ条件で繰り返し待たない。`wait_for` なら `windows`、`find`、`text`、`shot` で状態と条件を見直す (D-068)。`wait_for` は許可の外と起動した側の窓を無いと数えるので、そうした窓を待つと時間切れの 15 になる (`unmet` が `window` の 15 は、message の末尾に 12 と同じ名指しの範囲の 1 文が付く。D-139)。画面の待ちなら `shot` で今の画面を見て、動き続ける部分 (動画、スピナー、点滅) があれば `region` を狭めるか `threshold` を上げ、変わるのを待っていたなら待つ前に既に変わっていなかったか (待ち始めの画像が基準になる) を確かめる (D-081)
+`wait_for`、`wait_stable`、`wait_change` の条件が時間内に満たされなかった。何も送っていない (操作列なら、それより前の操作は済んでいて `executed` で分かる)。`error.detail` に `timeout_ms`、`checks` (確かめた回数)、`unmet` (`wait_for` は `window` / `element` / `text`。`text` は要素はあるが文字列の条件がそろわない (一致した要素が値を持たないときも。そのときは message の末尾に値を持たない要素の数と、名前の変化は `element.name` で待つことが付く。D-154)、`wait_stable` は `stable`、`wait_change` は `change`)、`window` (最後の判定で見た対象。題名なし。無ければ null)。画面の待ちでは、最後に撮った矩形の `rect` と最後の比較の差の `last_changed_ratio` も入る。同じ条件で繰り返し待たない。`wait_for` なら `windows`、`find`、`text`、`shot` で状態と条件を見直す (D-068)。`wait_for` は許可の外と起動した側の窓を無いと数えるので、そうした窓を待つと時間切れの 15 になる (`unmet` が `window` の 15 は、message の末尾に 12 と同じ名指しの範囲の 1 文が付く。D-139)。画面の待ちなら `shot` で今の画面を見て、動き続ける部分 (動画、スピナー、点滅) があれば `region` を狭めるか `threshold` を上げ、変わるのを待っていたなら待つ前に既に変わっていなかったか (待ち始めの画像が基準になる) を確かめる (D-081)
 
 ### `input_busy`
 
