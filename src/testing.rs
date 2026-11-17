@@ -8,9 +8,9 @@ use std::rc::Rc;
 
 use crate::config::EnvLookup;
 use crate::device::{
-    BackendError, Clock, CoverTraits, Desktop, FrameState, HeldInputs, HelperOutcome, HiddenWindow,
-    Image, Indicator, InputDesktop, InputEvent, InputLock, InputSink, StackWindow, TopWindow,
-    WindowGeometry, WindowInfo, WindowOwner, WindowPresence,
+    BackendError, ClipboardSet, Clock, CoverTraits, Desktop, FrameState, HeldInputs, HelperOutcome,
+    HiddenWindow, Image, Indicator, InputDesktop, InputEvent, InputLock, InputSink, StackWindow,
+    TopWindow, WindowGeometry, WindowInfo, WindowOwner, WindowPresence,
 };
 use crate::geometry::{Point, Rect};
 use crate::run::ImageWriter;
@@ -232,6 +232,13 @@ pub struct World {
     pub resize_gone: bool,
     /// `window_geometry` が、窓はあるのに読めない (`Err(BackendError::Os)`、8) を返す (D-150)
     pub geometry_broken: bool,
+    /// `set_clipboard_text` で置けた文 (呼ばれた順。D-157)。`Busy` と失敗の呼びは記録しない
+    pub clipboard_sets: Vec<String>,
+    /// この回数だけ `set_clipboard_text` が `Busy(MOCK_CLIPBOARD_BUSY_ERROR)` を返す (他のアプリが開いている模擬。
+    /// 呼ぶたびに 1 減る。D-157)
+    pub clipboard_busy: u32,
+    /// Some なら `set_clipboard_text` が失敗する (D-157)。`Busy` の回数を使い切った後に効く。既定は None
+    pub clipboard_fail: Option<ClipboardFail>,
     /// モニターの矩形 (`on_monitor` が見る。D-151)。空なら `screen` を 1 つのモニターとみなす。既定は空
     pub monitors: Vec<Rect>,
     /// カーソルの動く範囲 (ClipCursor。D-151)。None なら絞りなしで `cursor_clip` は `Ok(None)`。
@@ -245,6 +252,19 @@ pub struct World {
     /// `(n, r)`: n 回のカーソルの読みの後 (0 始まりで n 番目の読みの前) に `clip` を r にし、今のカーソルを範囲に寄せる
     /// (移動を送る前、待ちの途中に別のアプリが範囲を掛けたことを模す。D-151)。既定は空
     pub clip_after_reads: Vec<(usize, Rect)>,
+}
+
+/// `MockDesktop::set_clipboard_text` が `Busy` に載せる `GetLastError` の値 (`ERROR_ACCESS_DENIED`。D-157)
+pub const MOCK_CLIPBOARD_BUSY_ERROR: u32 = 5;
+
+/// `MockDesktop::set_clipboard_text` の失敗の模擬 (D-157)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClipboardFail {
+    /// 開く前の失敗 (登録・確保・窓)。`Err(BackendError::Os)` を返す (中身は変わらない)。
+    /// 開いた後の `EmptyClipboard` 自身の失敗 (同じく `Err` で、中身は変わっていない扱い) の模擬も兼ねる
+    BeforeOpen,
+    /// `EmptyClipboard` の後の失敗。`Ok(ClipboardSet::Emptied(..))` を返す (元の中身は失われた)
+    AfterEmpty,
 }
 
 /// `MockInputLock` への呼び出しの記録 (D-113)。呼ばれた時点のモックの時計の `now_ms`、送ったバッチの数 (`sent.len()`)、
@@ -371,6 +391,9 @@ impl World {
             resize_ignored: false,
             resize_gone: false,
             geometry_broken: false,
+            clipboard_sets: Vec::new(),
+            clipboard_busy: 0,
+            clipboard_fail: None,
             monitors: Vec::new(),
             clip: None,
             clip_fail: None,
@@ -790,6 +813,28 @@ impl Desktop for MockDesktop {
             g.client = client;
         }
         Ok(true)
+    }
+
+    /// `clipboard_busy` が残っていれば 1 減らして `Busy`、次に `clipboard_fail` の失敗、どれでもなければ記録して `Set`
+    /// (D-157)
+    fn set_clipboard_text(&self, text: &str) -> Result<ClipboardSet, BackendError> {
+        let mut w = self.0.borrow_mut();
+        if w.clipboard_busy > 0 {
+            w.clipboard_busy -= 1;
+            return Ok(ClipboardSet::Busy(MOCK_CLIPBOARD_BUSY_ERROR));
+        }
+        match w.clipboard_fail {
+            Some(ClipboardFail::BeforeOpen) => Err(BackendError::Os(
+                "模擬: クリップボードの置き場を確保できない".to_string(),
+            )),
+            Some(ClipboardFail::AfterEmpty) => Ok(ClipboardSet::Emptied(
+                "模擬: 文 (CF_UNICODETEXT) を置けない".to_string(),
+            )),
+            None => {
+                w.clipboard_sets.push(text.to_string());
+                Ok(ClipboardSet::Set)
+            }
+        }
     }
 
     fn window_presence(&self, hwnd: usize, pid: u32) -> Result<WindowPresence, BackendError> {

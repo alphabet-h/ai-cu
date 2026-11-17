@@ -156,6 +156,20 @@ pub struct WindowGeometry {
     pub hung: bool,
 }
 
+/// クリップボードに文字を置いた結果 (`Desktop::set_clipboard_text`。D-157)。開く前の失敗 (形式の登録、置き場の確保、
+/// 持ち主の窓) と、開いた後の `EmptyClipboard` 自身の失敗は `Err(BackendError::Os)` で、中身は変わらない
+/// (`EmptyClipboard` の失敗で中身が残るかは文書に無いので、変わっていない扱いにする。推定)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClipboardSet {
+    /// 文と履歴・同期から外す印を置いた
+    Set,
+    /// 他のアプリが開いていて `OpenClipboard` が失敗した (中身は変わらない。試し直しは実行器が行う)。値はその失敗の
+    /// `GetLastError` (実行器が試し直しを諦めたときの 8 の文に最後の値を添える)
+    Busy(u32),
+    /// `EmptyClipboard` の後に失敗し、空にして閉じた (人の元の中身は失われた)。値は理由
+    Emptied(String),
+}
+
 /// RGBA 8 ビットの画像。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Image {
@@ -377,6 +391,9 @@ pub trait Desktop {
         outer_w: u32,
         outer_h: u32,
     ) -> Result<bool, BackendError>;
+    /// クリップボードに `text` (改行は呼ぶ側が CRLF にそろえたもの) を `CF_UNICODETEXT` で置き、Win+V の履歴と
+    /// クラウドの同期から外す印を付ける (D-157)。入力は送らず、前面も Z 順も変えない。結果の形は `ClipboardSet`
+    fn set_clipboard_text(&self, text: &str) -> Result<ClipboardSet, BackendError>;
     /// ハンドルのウィンドウの状態 (`close` の後に消えたかを見る)。`Destroyed` はハンドルが無効か、持ち主の pid が
     /// 違う (再利用された)。`Hidden` は同じ pid のまま見えない (トレイに隠したアプリ)。読み取りだけ。D-062、D-096
     fn window_presence(&self, hwnd: usize, pid: u32) -> Result<WindowPresence, BackendError>;
