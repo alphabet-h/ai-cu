@@ -853,6 +853,9 @@ fn query_elements_with(
     if !consider(root, query, &mut out)? {
         return Ok(out);
     }
+    // 窓の根は値を持たない要素に数えない。数えると UIA に子孫の要素を出さないアプリ (D-070) でも常に
+    // 「値を持たない要素がある」になり、要素が無いときの案内 (find で確かめる) が失われる (D-154)
+    out.textless = 0;
     between();
     for i in 0..n {
         // SAFETY: i は 0..Length の範囲。
@@ -918,7 +921,12 @@ fn consider(
                 out.elements.push(e);
                 false
             }
-            None => true,
+            None => {
+                // 一致したが文字列 (値) を持たない要素を数える。「要素が無い」と分けるため (D-154)。
+                // 根の分は呼び手 (query_elements_with) が 0 に戻す
+                out.textless += 1;
+                true
+            }
         });
     }
     if out.elements.len() >= query.limit {

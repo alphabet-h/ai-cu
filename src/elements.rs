@@ -149,6 +149,15 @@ pub struct Elements {
     pub skipped: usize,
     /// 文字列を読む問い合わせで、パスワードの要素なので読まずに飛ばした数 (D-090)
     pub password_skipped: usize,
+    /// 文字列を読む問い合わせで、一致したが文字列を持たなかった子孫の要素の数 (文字列を持つ最初の要素より前の分。
+    /// 窓の根は数えない。D-154)。パスワードで飛ばした要素は `password_skipped` に数え、ここには入れない
+    pub textless: usize,
+}
+
+/// 一致したが文字列 (値) を持たない要素の数の文。`wait_for` の時間切れと `text` の 13 の message が、
+/// これに次の手の句を足す (字面を 1 か所にそろえる。D-154)
+pub fn textless_note(n: usize) -> String {
+    format!("一致した要素 {n} 個は文字列 (値) を持たない")
 }
 
 /// CR / CRLF を LF にそろえる。要素の文字列 (`first_text`) と、`wait_for` の `text` の条件の両方に掛けて、
@@ -564,6 +573,15 @@ pub fn render_tree(tree: &UiTree, limit: usize, all: bool) -> RenderedTree {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 値を持たない要素の数の文は 1 か所で作る (D-154)
+    #[test]
+    fn textless_note_names_count() {
+        assert_eq!(
+            textless_note(1),
+            "一致した要素 1 個は文字列 (値) を持たない"
+        );
+    }
 
     #[test]
     fn control_type_names_round_trip_and_unknown_ids_are_labeled() {
