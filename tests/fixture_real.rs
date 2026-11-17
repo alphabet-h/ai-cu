@@ -4728,3 +4728,159 @@ fn fixture_real_input_lock_waits_for_other_holder() {
         "錠が解かれる前に返った (返るまで {waited:?})"
     );
 }
+
+/// clipboard の実機テストを走らせる環境変数 (D-157)。`1` のときだけ利用者のクリップボードに触れる
+const CLIPBOARD_REAL_ENV: &str = "AI_CU_CLIPBOARD_REAL";
+
+/// 書き戻しで `Busy` を試し直す間隔と上限 (D-157)
+const CLIPBOARD_RESTORE_RETRY_MS: u64 = 50;
+const CLIPBOARD_RESTORE_LIMIT_MS: u64 = 1000;
+
+/// 置く前のクリップボードの文を、テストの終わりに (失敗しても) 書き戻す (D-157)。Drop の中で panic しない。
+///
+/// - 書き戻すのは、置いた後の更新の番号 (`set_sequence`) を記録した後だけ。置く前に panic したら記録が無いので
+///   書き戻さない (`FIXTURE clipboard restore_skipped (not set)`)
+/// - 元に文が無ければ書き戻さず、テストの文が残る旨を出す (`restore_skipped (no text before ...)`。空にする口は作らない)
+/// - 書き戻す直前の番号が記録と違えば、置いた後に人か他のアプリが書き換えたので、その中身を壊さないよう書き戻さない
+///   (`restore_skipped (changed after set)`)。番号を見てから `set_text` が開くまでの短い間は許容する
+/// - 元の文は UTF-16 のまま持つ。`set_text` は `&str` を取るので、UTF-16 として壊れていれば書き換えずに
+///   `restore_skipped (not valid UTF-16)`
+/// - 書き戻せなければ `restore_failed`
+struct RestoreClipboard {
+    before: Option<Vec<u16>>,
+    set_sequence: Option<u32>,
+}
+
+impl Drop for RestoreClipboard {
+    fn drop(&mut self) {
+        let Some(expected) = self.set_sequence else {
+            println!("FIXTURE clipboard restore_skipped (not set)");
+            return;
+        };
+        let Some(units) = self.before.take() else {
+            println!(
+                "FIXTURE clipboard restore_skipped (no text before; the test text stays on the clipboard)"
+            );
+            return;
+        };
+        if ai_cu::win32::clipboard::sequence_number() != expected {
+            println!("FIXTURE clipboard restore_skipped (changed after set)");
+            return;
+        }
+        let Ok(text) = String::from_utf16(&units) else {
+            println!("FIXTURE clipboard restore_skipped (not valid UTF-16)");
+            return;
+        };
+        let start = Instant::now();
+        loop {
+            match ai_cu::win32::clipboard::set_text(&text) {
+                Ok(ai_cu::device::ClipboardSet::Set) => return,
+                Ok(ai_cu::device::ClipboardSet::Busy(_))
+                    if start.elapsed() < Duration::from_millis(CLIPBOARD_RESTORE_LIMIT_MS) =>
+                {
+                    std::thread::sleep(Duration::from_millis(CLIPBOARD_RESTORE_RETRY_MS));
+                }
+                other => {
+                    println!("FIXTURE clipboard restore_failed ({other:?})");
+                    return;
+                }
+            }
+        }
+    }
+}
+
+/// 操作列の `clipboard` を、フィクスチャ専用の装置で実のクリップボードに通す (D-157)。LF の改行が CRLF にそろって
+/// 置かれ、Win+V の履歴とクラウドの同期から外す印 3 つがすべて付き、結果に文字数と行数が出ることを見る。
+/// 前面にもフィクスチャにも入力は送らない (フィクスチャは装置の範囲とウォッチドッグのためだけに開く)。
+///
+/// 利用者のクリップボードを書き換えるので、`AI_CU_CLIPBOARD_REAL=1` のときだけ走る。無ければ
+/// `FIXTURE clipboard skipped (set AI_CU_CLIPBOARD_REAL=1)` を出して通る (`--ignored` が通っても clipboard は
+/// 確かめていない)。立っていても、置く前のクリップボードに次のどれかがあれば、書き換えずに skip を出して通る:
+/// 印 `ExcludeClipboardContentFromMonitorProcessing` (パスワード管理ソフトの秘密の可能性。前に ai-cu が置いた
+/// 中身にも付く) は `skipped (monitor-excluded content present)`、文字の形式 (と ai-cu の残りの印) 以外の形式
+/// (画像など) は `skipped (non-text formats present)`、確かめた後に書き換えられたら `skipped (changed)`。
+/// 置く前の文は `RestoreClipboard` が書き戻すが、文字以外の形式は戻らないので、立てて走らせるのは利用者の了承を
+/// 得た回だけ
+#[test]
+#[ignore = "実機のフィクスチャ限定。cargo test -- --ignored --test-threads=1"]
+fn fixture_real_clipboard_sets_text_with_history_exclusion() {
+    use ai_cu::win32::clipboard;
+    if std::env::var(CLIPBOARD_REAL_ENV).as_deref() != Ok("1") {
+        println!("FIXTURE clipboard skipped (set {CLIPBOARD_REAL_ENV}=1)");
+        return;
+    }
+    // フィクスチャを先に開く (開くのに掛かる時間を、確かめてから置くまでの間に入れない)
+    let f = Fixture::open("clipboard");
+    f.win.clear_events();
+    let fg_before = window::foreground_hwnd();
+    // 書き戻せない形式や秘密の印があれば何も置かない (読みだけ)。形式・元の文・更新の番号は 1 回開いてまとめて読む
+    let marks = clipboard::history_format_ids().expect("印の形式の値");
+    let exclusion = clipboard::monitor_exclusion_format_id().expect("印の形式の値");
+    let (present, before, seq_before) =
+        clipboard::snapshot().expect("置く前のクリップボードを読めない。何も置いていない");
+    if present.contains(&exclusion) {
+        println!("FIXTURE clipboard skipped (monitor-excluded content present)");
+        return;
+    }
+    let foreign: Vec<u32> = present
+        .iter()
+        .copied()
+        .filter(|f| !clipboard::is_text_format(*f) && !marks.contains(f))
+        .collect();
+    if !foreign.is_empty() {
+        println!("FIXTURE clipboard skipped (non-text formats present) formats={foreign:?}");
+        return;
+    }
+    // 確かめた後に書き換えられていたら置かない (元の文の写しが古い)。残る間 (この読み直しから実行器を通って
+    // set_text が OpenClipboard するまで) に書き換えられると、その中身は失われ、書き戻すのは古い写しになる。
+    // 短い間なので許容する (D-157 のステップ 5 の追記)
+    if clipboard::sequence_number() != seq_before {
+        println!("FIXTURE clipboard skipped (changed)");
+        return;
+    }
+    let mut restore = RestoreClipboard {
+        before,
+        set_sequence: None,
+    };
+    let r = f
+        .execute(r#"{"type":"clipboard","text":"ai-cu 一行目\n二行目😀"}"#)
+        .expect("clipboard");
+    restore.set_sequence = Some(clipboard::sequence_number());
+    assert_eq!(r.executed, 1);
+    assert_eq!(r.clipboard.len(), 1, "{:?}", r.clipboard);
+    let info = &r.clipboard[0];
+    let expected = "ai-cu 一行目\r\n二行目😀";
+    assert_eq!(info.chars, expected.chars().count(), "{info:?}");
+    assert_eq!(info.lines, 2, "{info:?}");
+    assert!(info.history_excluded, "{info:?}");
+    let (text, formats) = clipboard::read_text_and_formats().expect("置いた後の読み");
+    let text_ok = text.as_deref() == Some(expected);
+    let marks_ok = formats.iter().all(|&m| m);
+    // 置いた後の読みで番号が進むかは確かめていないので、置いた文と印のままと読めたら、読みの後の番号を取り直す
+    // (読めた中身が違えば取り直さない。記録が古いままなら書き戻さない側に倒れる)
+    if text_ok && marks_ok {
+        restore.set_sequence = Some(clipboard::sequence_number());
+    }
+    println!(
+        "FIXTURE clipboard text_ok={text_ok} formats={formats:?} chars={} lines={}",
+        info.chars, info.lines
+    );
+    // 失敗の文に読めた文の中身は写さない (人の文が読めた場合に備える)。長さと一致したかだけを出す
+    assert!(
+        text_ok,
+        "置いた文が違う: 読めた長さ={:?} 期待の長さ={} 一致={text_ok}",
+        text.as_ref().map(|t| t.chars().count()),
+        expected.chars().count()
+    );
+    assert!(
+        marks_ok,
+        "印 {:?} が付いていない: {formats:?}",
+        clipboard::HISTORY_FORMATS
+    );
+    assert_eq!(window::foreground_hwnd(), fg_before, "前面は変わらない");
+    assert!(
+        f.win.events().is_empty(),
+        "入力は送らない: {:?}",
+        f.win.events()
+    );
+}

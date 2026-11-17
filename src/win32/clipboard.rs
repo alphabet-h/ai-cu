@@ -8,12 +8,16 @@
 //! 渡す (NULL で開くと `EmptyClipboard` が持ち主を NULL にし、`SetClipboardData` が失敗する。OpenClipboard と
 //! SetClipboardData の Remarks)。
 
+use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use windows_sys::Win32::Foundation::{ERROR_CLASS_ALREADY_EXISTS, GlobalFree, HGLOBAL, HWND};
+use windows_sys::Win32::Foundation::{
+    ERROR_CLASS_ALREADY_EXISTS, GlobalFree, HGLOBAL, HWND, SetLastError,
+};
 use windows_sys::Win32::System::DataExchange::{
-    CloseClipboard, EmptyClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard,
+    CloseClipboard, CountClipboardFormats, EmptyClipboard, EnumClipboardFormats, GetClipboardData,
+    GetClipboardSequenceNumber, IsClipboardFormatAvailable, OpenClipboard,
     RegisterClipboardFormatW, SetClipboardData,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -159,8 +163,16 @@ impl Drop for OwnerWindow {
     }
 }
 
-/// 開いたクリップボード。`Drop` で閉じる (成否によらず。持ち主の窓より先に落ちるよう、窓より後に作る)
-struct OpenClipboardGuard;
+/// 開いたクリップボード。`Drop` で閉じる (成否によらず。持ち主の窓より先に落ちるよう、窓より後に作る)。
+/// クリップボードは開いたスレッドに結びつくので、`PhantomData<*const ()>` で `!Send` にし、別のスレッドで閉じさせない
+struct OpenClipboardGuard(PhantomData<*const ()>);
+
+impl OpenClipboardGuard {
+    /// このスレッドが `OpenClipboard` に成功した直後にだけ呼ぶ
+    fn opened() -> OpenClipboardGuard {
+        OpenClipboardGuard(PhantomData)
+    }
+}
 
 impl Drop for OpenClipboardGuard {
     fn drop(&mut self) {
@@ -219,7 +231,7 @@ pub fn set_text(text_crlf: &str) -> Result<ClipboardSet, String> {
     if unsafe { OpenClipboard(owner.0) } == 0 {
         return Ok(ClipboardSet::Busy(super::last_error()));
     }
-    let opened = OpenClipboardGuard;
+    let opened = OpenClipboardGuard::opened();
     // (5) 空にする (持ち主が owner の窓になる)
     // SAFETY: このスレッドがクリップボードを開いている。
     if unsafe { EmptyClipboard() } == 0 {
@@ -283,21 +295,14 @@ fn put(format: u32, g: Global) -> Result<(), String> {
     Ok(())
 }
 
-/// クリップボードの `CF_UNICODETEXT` の文と、`HISTORY_FORMATS` の各印があるかを読む (D-157)。
-/// **実機テスト (tests/fixture_real.rs) の後始末と確かめからだけ呼ぶ。** 製品の操作に「読む」は無い。
-/// 開くのは `OpenClipboard(NULL)` で、50 ms おきに上限 1000 ms まで試し直す (置いた直後は履歴のサービスなどが
-/// 短く開くため)。文が無ければ `None`
-#[doc(hidden)]
-pub fn read_text_and_formats() -> Result<(Option<String>, Vec<bool>), String> {
-    let mut ids = Vec::with_capacity(HISTORY_FORMATS.len());
-    for name in HISTORY_FORMATS {
-        ids.push(register_format(name)?);
-    }
+/// 読むためにクリップボードを `OpenClipboard(NULL)` で開く。50 ms おきに上限 1000 ms まで試し直す
+/// (置いた直後は履歴のサービスなどが短く開くため)。返る値の `Drop` で閉じる
+fn open_for_read() -> Result<OpenClipboardGuard, String> {
     let start = Instant::now();
     loop {
-        // SAFETY: NULL は「今のタスクに結びつけて開く」の意味で、読むだけなので持ち主は要らない。
+        // SAFETY: NULL は「今のタスクに結びつけて開く」の意味で、読むだけなので持ち主は要らない (空にも置きもしない)。
         if unsafe { OpenClipboard(std::ptr::null_mut()) } != 0 {
-            break;
+            return Ok(OpenClipboardGuard::opened());
         }
         if start.elapsed() >= Duration::from_millis(READ_RETRY_LIMIT_MS) {
             return Err(format!(
@@ -307,16 +312,119 @@ pub fn read_text_and_formats() -> Result<(Option<String>, Vec<bool>), String> {
         }
         std::thread::sleep(Duration::from_millis(READ_RETRY_MS));
     }
-    let _opened = OpenClipboardGuard;
+}
+
+/// 文字の形式 (`CF_TEXT` 1、`CF_OEMTEXT` 7、`CF_UNICODETEXT` 13、`CF_LOCALE` 16) か。`CF_UNICODETEXT` を置けば
+/// OS が残りを合成するので、文を書き戻せば元に戻る形式 (Microsoft Learn の「Clipboard Formats」の「Synthesized」)
+pub fn is_text_format(format: u32) -> bool {
+    matches!(format, 1 | 7 | CF_UNICODETEXT | 16)
+}
+
+/// `HISTORY_FORMATS` の各印の形式の値 (登録して得る。既にあれば同じ値が返る)。実機テストが、置く前の
+/// クリップボードにある形式が書き戻せるものかを確かめるのに使う (文を `set_text` で書き戻すと印も付く)
+#[doc(hidden)]
+pub fn history_format_ids() -> Result<Vec<u32>, String> {
+    HISTORY_FORMATS.iter().map(|n| register_format(n)).collect()
+}
+
+/// 形式を並べる回数の上限。超えたら壊れた列挙 (同じ値を返し続けるなど) とみて Err にする (D-157)
+const ENUM_FORMATS_LIMIT: usize = 4096;
+
+/// 印 `ExcludeClipboardContentFromMonitorProcessing` (`HISTORY_FORMATS` の 1 つ目) の形式の値。パスワード管理
+/// ソフトなどが秘密を置くときに付ける印でもある (Microsoft Learn の「Clipboard Formats」)
+#[doc(hidden)]
+pub fn monitor_exclusion_format_id() -> Result<u32, String> {
+    register_format(HISTORY_FORMATS[0])
+}
+
+/// クリップボードの更新の番号 (`GetClipboardSequenceNumber`)。開かずに読め、中身が変わるたびに進む (D-157)。
+/// **実機テスト (tests/fixture_real.rs) が、置く前と書き戻す前に他から書き換えられていないかを見るためだけに呼ぶ**
+#[doc(hidden)]
+pub fn sequence_number() -> u32 {
+    // SAFETY: 引数は無く、クリップボードを開いていなくても呼べる。番号を返すだけ (読めなければ 0)。
+    unsafe { GetClipboardSequenceNumber() }
+}
+
+/// `snapshot` の結果: (形式の値の列、`CF_UNICODETEXT` の文の UTF-16 の写し、更新の番号)
+#[doc(hidden)]
+pub type Snapshot = (Vec<u32>, Option<Vec<u16>>, u32);
+
+/// 置く前のクリップボードを 1 回の `open_for_read` の中でまとめて読む (D-157): いまある形式の値の列、
+/// `CF_UNICODETEXT` の文の写し (UTF-16 のまま、最初の U+0000 の手前まで。無ければ `None`)、開いている間に読んだ
+/// 更新の番号。読むだけで、中身は変えない。
+/// 印 `ExcludeClipboardContentFromMonitorProcessing` がある (秘密の可能性がある) ときは、文を写さず `None` を返す
+/// (呼ぶ側は形式の列で印を見て、書き換えずに抜ける)。
+/// **実機テスト (tests/fixture_real.rs) が、置く前に書き戻せるかを確かめ、元の文を覚えるためだけに呼ぶ。**
+/// 製品の操作に「読む」は無い
+#[doc(hidden)]
+pub fn snapshot() -> Result<Snapshot, String> {
+    let exclusion = monitor_exclusion_format_id()?;
+    let _opened = open_for_read()?;
+    let formats = enum_formats_opened()?;
+    let text = if formats.contains(&exclusion) {
+        None
+    } else {
+        read_unicode_text_opened()?
+    };
+    let sequence = sequence_number();
+    Ok((formats, text, sequence))
+}
+
+/// いまある形式の値をすべて並べる。**このスレッドがクリップボードを開いている間にだけ呼ぶ**
+fn enum_formats_opened() -> Result<Vec<u32>, String> {
+    // SAFETY: 引数は無く、クリップボードを開いていなくても呼べる (CountClipboardFormats の文書)。数を返すだけで、
+    //         ここでは置き場の大きさの目安にしか使わない。
+    let count = unsafe { CountClipboardFormats() };
+    let cap = usize::try_from(count).unwrap_or(0).min(ENUM_FORMATS_LIMIT);
+    let mut formats = Vec::with_capacity(cap);
+    let mut format = 0u32;
+    loop {
+        if formats.len() >= ENUM_FORMATS_LIMIT {
+            return Err(format!(
+                "EnumClipboardFormats が {ENUM_FORMATS_LIMIT} 個を超えて形式を返した (列挙が終わらない)"
+            ));
+        }
+        // 尽きた (ERROR_SUCCESS) と失敗を見分けるため、前の値を残さない
+        // SAFETY: 呼び出したスレッドの最後のエラー値を書くだけ。
+        unsafe { SetLastError(0) };
+        // SAFETY: このスレッドがクリップボードを開いている (EnumClipboardFormats の求め)。0 から始め、前に返った値を渡す。
+        format = unsafe { EnumClipboardFormats(format) };
+        if format == 0 {
+            // 0 は尽きたか失敗。尽きたときの GetLastError は ERROR_SUCCESS (EnumClipboardFormats の文書)
+            let err = super::last_error();
+            if err != 0 {
+                return Err(format!("EnumClipboardFormats が失敗 (GetLastError={err})"));
+            }
+            return Ok(formats);
+        }
+        formats.push(format);
+    }
+}
+
+/// クリップボードの `CF_UNICODETEXT` の文と、`HISTORY_FORMATS` の各印があるかを読む (D-157)。
+/// **実機テスト (tests/fixture_real.rs) の後始末と確かめからだけ呼ぶ。** 製品の操作に「読む」は無い。
+/// 開くのは `OpenClipboard(NULL)` で、50 ms おきに上限 1000 ms まで試し直す (置いた直後は履歴のサービスなどが
+/// 短く開くため)。文が無ければ `None`
+#[doc(hidden)]
+pub fn read_text_and_formats() -> Result<(Option<String>, Vec<bool>), String> {
+    let ids = history_format_ids()?;
+    let _opened = open_for_read()?;
     let formats = ids
         .iter()
         // SAFETY: 形式の値を渡すだけ。
         .map(|&id| unsafe { IsClipboardFormatAvailable(id) } != 0)
         .collect();
-    // SAFETY: このスレッドがクリップボードを開いている。返るハンドルは OS の持ち物で、閉じるまで読める。
+    let text = read_unicode_text_opened()?.map(|units| String::from_utf16_lossy(&units));
+    Ok((text, formats))
+}
+
+/// `CF_UNICODETEXT` の文を UTF-16 のまま写す (最初の U+0000 の手前まで)。無ければ `None`。
+/// **このスレッドがクリップボードを開いている間にだけ呼ぶ**
+fn read_unicode_text_opened() -> Result<Option<Vec<u16>>, String> {
+    // SAFETY: 呼ぶ側がこのスレッドでクリップボードを開いている。返るハンドルは OS の持ち物で、閉じるまで読める。
     let h = unsafe { GetClipboardData(CF_UNICODETEXT) };
     if h.is_null() {
-        return Ok((None, formats));
+        return Ok(None);
     }
     // SAFETY: h は GetClipboardData が返した有効なメモリのハンドル。
     let size = unsafe { GlobalSize(h) };
@@ -333,8 +441,25 @@ pub fn read_text_and_formats() -> Result<(Option<String>, Vec<bool>), String> {
     //         8 バイト境界)。読むのは size / 2 単位まで。
     let all = unsafe { std::slice::from_raw_parts(p.cast::<u16>(), len) };
     let end = all.iter().position(|&u| u == 0).unwrap_or(len);
-    let text = String::from_utf16_lossy(&all[..end]);
-    // SAFETY: 上で 1 回取った錠を 1 回解く。
+    let units = all[..end].to_vec();
+    // SAFETY: 上で 1 回取った錠を 1 回解く (写し終えた後。all はこの後使わない)。
     unsafe { GlobalUnlock(h) };
-    Ok((Some(text), formats))
+    Ok(Some(units))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 書き戻せる (OS が CF_UNICODETEXT から合成する) 文字の形式だけを真にする。画像 (CF_BITMAP 2、CF_DIB 8) や
+    /// 登録の形式 (0xC000 以上) は偽 (D-157)
+    #[test]
+    fn is_text_format_accepts_only_synthesized_text_formats() {
+        for f in [1, 7, 13, 16] {
+            assert!(is_text_format(f), "{f}");
+        }
+        for f in [0, 2, 8, 15, 17, 0xC000, 0xC123] {
+            assert!(!is_text_format(f), "{f}");
+        }
+    }
 }
