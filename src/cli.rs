@@ -94,7 +94,7 @@ pub fn guide_summary() -> String {
     name = "ai-cu",
     version = crate::build_info::VERSION,
     about = "AI が Windows のデスクトップを操作するための CLI (一手ずつのサブコマンド、または JSON の操作列)",
-    after_help = "初めて使う AI は、まず `ai-cu guide` を読む (要点版。座標の注意、前面化、終了コードごとの次の手)。全文は `ai-cu guide --full` (使い方の流れ、一手ずつの操作、操作列 JSON)。\n一手ずつ操作するなら、click / double-click / drag / move / scroll / type / key / focus / close / resize / wait-for の各サブコマンド (`--shot PATH --window PROCESS` か `--shot PATH --region X,Y,W,H` で操作の後に撮る。出力は run と同じ)。focus / close / resize / wait-for の対象は位置引数で、`--window` は撮る対象 (`--shot` と組む)。\n要素の位置は `find --window PROCESS [--name TEXT] [--type TYPE]` (UI Automation) で取れ、`center` をそのまま click に渡せる。何があるか分からないときは、先に `tree --window PROCESS` で要素の木 (1 行 1 要素の字下げ、`@x,y` は center) を見る。文字列は `text`。\n引数なしで、標準入力と標準出力の両方が端末のときは、設定を編集する TUI を起動する。\n`mcp` は MCP サーバー (stdio) として待ち受ける。クライアントの設定に `ai-cu mcp` を登録する (README の「MCP サーバーモード」)。\n終了コード: 0 成功 / 1 内部 / 2 使い方 / 3 操作列 / 4 ポリシー / 5 設定 / 6 緊急停止 / 7 フォアグラウンドガード / 8 OS / 9 開発シェルでの実入力の拒否 / 10 人が操作中 (shot、pixel、focus を行わない) / 11 前面にできない (focus) / 12 対象のウィンドウが無い (window) / 13 文字列を持つ要素が無い (text) / 14 画面がロックかセーバー (何も送らない) / 15 条件が時間内に満たされない (wait_for、run の wait_stable と wait_change。何も送らない) / 16 別の ai-cu が画面を操作中か、人が TUI を開いていて待ちきれない (何も送らない)"
+    after_help = "初めて使う AI は、まず `ai-cu guide` を読む (要点版。座標の注意、前面化、終了コードごとの次の手)。全文は `ai-cu guide --full` (使い方の流れ、一手ずつの操作、操作列 JSON)。\n一手ずつ操作するなら、click / double-click / drag / move / scroll / type / key / focus / close / resize / wait-for の各サブコマンド (`--shot PATH --window PROCESS` か `--shot PATH --region X,Y,W,H` で操作の後に撮る。出力は run と同じ)。focus / close / resize / wait-for の対象は位置引数で、`--window` は撮る対象 (`--shot` と組む)。\n`clipboard TEXT` (`-` なら標準入力) はクリップボードに文字を置く (Win+V の履歴と同期から外す。元の中身は戻らない。秘密を置かない)。貼るのは続く `key ctrl+v` で、入力の前に置く。\n要素の位置は `find --window PROCESS [--name TEXT] [--type TYPE]` (UI Automation) で取れ、`center` をそのまま click に渡せる。何があるか分からないときは、先に `tree --window PROCESS` で要素の木 (1 行 1 要素の字下げ、`@x,y` は center) を見る。文字列は `text`。\n引数なしで、標準入力と標準出力の両方が端末のときは、設定を編集する TUI を起動する。\n`mcp` は MCP サーバー (stdio) として待ち受ける。クライアントの設定に `ai-cu mcp` を登録する (README の「MCP サーバーモード」)。\n終了コード: 0 成功 / 1 内部 / 2 使い方 / 3 操作列 / 4 ポリシー / 5 設定 / 6 緊急停止 / 7 フォアグラウンドガード / 8 OS / 9 開発シェルでの実入力の拒否 / 10 人が操作中 (shot、pixel、focus を行わない) / 11 前面にできない (focus) / 12 対象のウィンドウが無い (window) / 13 文字列を持つ要素が無い (text) / 14 画面がロックかセーバー (何も送らない) / 15 条件が時間内に満たされない (wait_for、run の wait_stable と wait_change。何も送らない) / 16 別の ai-cu が画面を操作中か、人が TUI を開いていて待ちきれない (何も送らない)"
 )]
 pub struct Cli {
     /// 追加の設定ファイル。deny を足せるが allow は広げられない (人間の設定が基本の層)
@@ -396,6 +396,14 @@ pub enum Command {
         #[command(flatten)]
         step: StepOpts,
     },
+    /// 一手ずつ: クリップボードに文字を置く (改行は CRLF にそろえる。Win+V の履歴と同期から外す。元の中身は戻らない。
+    /// 入力は送らない。貼るのは続く key ctrl+v。D-157)
+    Clipboard {
+        /// 置く文 (1 以上 65536 以下の文字)。`-` なら標準入力を UTF-8 で読み切る (末尾の改行も置く)
+        text: String,
+        #[command(flatten)]
+        step: StepOpts,
+    },
     // 条件がそろうまで待つ wait-for (D-068)
     /// 一手ずつ: 対象のウィンドウ、その要素、要素の文字列が出る (--absent なら消える) まで待つ。読むだけ
     WaitFor {
@@ -596,6 +604,22 @@ fn parse_region(s: &str) -> Result<Region, String> {
     })
 }
 
+/// 一手ずつの type と clipboard の文: `-` なら標準入力を UTF-8 で読み切り (そのまま。末尾の改行も残す)、
+/// それ以外は引数のまま。UTF-8 でなければ 2 の usage
+fn text_or_stdin(text: &str, stdin: &mut dyn Read) -> Result<String, AppError> {
+    if text != "-" {
+        return Ok(text.to_string());
+    }
+    let mut s = String::new();
+    stdin.read_to_string(&mut s).map_err(|e| {
+        AppError::new(
+            ErrorKind::Usage,
+            format!("標準入力を UTF-8 として読めない: {e}"),
+        )
+    })?;
+    Ok(s)
+}
+
 /// 一手ずつの操作なら、その共通オプション。
 pub fn step_opts(cmd: &Command) -> Option<&StepOpts> {
     match cmd {
@@ -609,6 +633,7 @@ pub fn step_opts(cmd: &Command) -> Option<&StepOpts> {
         | Command::Focus { step, .. }
         | Command::Close { step, .. }
         | Command::Resize { step, .. }
+        | Command::Clipboard { step, .. }
         | Command::WaitFor { step, .. } => Some(step),
         _ => None,
     }
@@ -682,21 +707,14 @@ pub fn step_script(cmd: &Command, stdin: &mut dyn Read) -> Result<Script, AppErr
         }
         Command::Type {
             text, interval_ms, ..
-        } => {
-            let text = if text == "-" {
-                let mut s = String::new();
-                stdin
-                    .read_to_string(&mut s)
-                    .map_err(|e| usage(format!("標準入力を UTF-8 として読めない: {e}")))?;
-                s
-            } else {
-                text.clone()
-            };
-            Action::Type {
-                text,
-                interval_ms: interval_ms.unwrap_or(DEFAULT_TYPE_INTERVAL_MS),
-            }
-        }
+        } => Action::Type {
+            text: text_or_stdin(text, stdin)?,
+            interval_ms: interval_ms.unwrap_or(DEFAULT_TYPE_INTERVAL_MS),
+        },
+        // clipboard (D-157): type と同じく `-` なら標準入力 (末尾の改行も落とさない)
+        Command::Clipboard { text, .. } => Action::Clipboard {
+            text: text_or_stdin(text, stdin)?,
+        },
         Command::Key { keys, .. } => Action::Key { keys: keys.clone() },
         Command::Focus { process, title, .. } => Action::Focus {
             process: process.clone(),
@@ -4454,6 +4472,11 @@ mod tests {
                 ],
                 r#"{"type":"resize","process":"app.exe","title":"メモ","width":500,"height":300,"logical":false,"area":"client"}"#,
             ),
+            // clipboard (D-157): 位置引数の文をそのまま 1 操作に
+            (
+                &["clipboard", "a b"],
+                r#"{"type":"clipboard","text":"a b"}"#,
+            ),
             // wait-for (D-068): --name / --type のどちらかがあれば element、--text があれば text
             (
                 &[
@@ -4503,6 +4526,22 @@ mod tests {
             "{e}"
         );
         assert!(e.to_string().contains("--width"), "{e}");
+        // clipboard の文は必須 (D-157)
+        let e = Cli::try_parse_from(["ai-cu", "clipboard"]).unwrap_err();
+        assert_eq!(
+            e.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument,
+            "{e}"
+        );
+        // `-` なら標準入力をそのまま読む (末尾の改行も残す)
+        let cli = parse(&["clipboard", "-"]);
+        let s = step_script(&cli.command.unwrap(), &mut "x\ny\n".as_bytes()).unwrap();
+        assert_eq!(
+            s.actions,
+            vec![Action::Clipboard {
+                text: "x\ny\n".into()
+            }]
+        );
         // wait-for の --type は find と同じ種類の名前 (未知は使い方の誤り)
         assert!(
             Cli::try_parse_from(["ai-cu", "wait-for", "notepad.exe", "--type", "bogus"]).is_err()
