@@ -62,7 +62,7 @@ OS の呼び出しの失敗 (`SendInput`、撮影、保存)。UIA の読み取�
 
 ### `focus_failed`
 
-`focus` の対象を前面にできなかった (見つからない、最小化、閉じられた、Windows が断った。`error.reason` で分かる)。断られたときは前面のプロセスで分ける: 人が別のアプリを使っている (`refused_other_app`)、前面は ai-cu を起動した側なのに断られた (`refused_host_front`。常駐の `ai-cu mcp` では、補助プロセスを試しても前面にならなかったときなど。試したかは `error.detail` の `helper`)、前面を確かめられない (`refused_unknown`)。入力は送っていない (タスクバーのボタンは点滅しうる)
+`focus` の対象を前面にできなかった (見つからない、最小化、閉じられた、Windows が断った。`error.reason` で分かる)。断られたときは前面のプロセスで分ける: 前面 (キーの届く窓) が別のアプリ (`refused_other_app`。人が使っている、または前面のまま置かれている。対象の窓が一番手前に見えていても前面とは限らない。人に頼むときは対象の窓を 1 回クリックしてもらう)、前面は ai-cu を起動した側なのに断られた (`refused_host_front`。常駐の `ai-cu mcp` では、補助プロセスを試しても前面にならなかったときなど。試したかは `error.detail` の `helper`)、前面を確かめられない (`refused_unknown`)。入力は送っていない (タスクバーのボタンは点滅しうる)
 
 ### `window_not_found`
 

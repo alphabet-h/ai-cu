@@ -2220,7 +2220,7 @@ impl Executor<'_> {
     }
 
     /// 許可されたウィンドウを前面にする (D-050)。`SetForegroundWindow` を 1 回呼ぶだけで、入力は送らず、
-    /// 最小化は復元しない。人が別のアプリを使っていれば OS が断るので、それをそのまま終了コード 11 にする (理由は
+    /// 最小化は復元しない。前面が別のアプリなら OS が断るので、それをそのまま終了コード 11 にする (理由は
     /// 前面のプロセスで分けて `reason` に入れる。D-056)。
     /// CLI として呼ぶたびに起動されたときは、AI の端末が前面なら OS は断らない (常駐の MCP サーバーは端末が前面でも
     /// 断られうる。D-056) ので、人の最後の入力からの無操作 (`capture.min_idle_ms`) も求める。
@@ -2314,8 +2314,9 @@ impl Executor<'_> {
         if !still_there(self.desktop)? {
             return Err(closed(None));
         }
-        // 前面のプロセスで理由を分ける (D-056)。「人が別のアプリを使っている」と言い切るのは、前面がホスト以外の
-        // アプリのときだけ。前面がホスト (AI の端末など) なのに断られたのは、この ai-cu に前面化の権利が無いため
+        // 前面のプロセスで理由を分ける (D-056)。「前面が別のアプリ」と言うのは、前面がホスト以外のアプリのときだけ
+        // (人が使っているとは言い切らない。前面のまま置かれていても同じく断られ、対象が一番手前に見えていても
+        // 前面とは限らない。D-156)。前面がホスト (AI の端末など) なのに断られたのは、この ai-cu に前面化の権利が無いため
         // (常駐の MCP サーバー、起動の後の人の入力)。前面が無いか読めなければ断定しない。既に失敗の経路なので、
         // 前面を読めないこと自体は 8 にしない
         let read_fg = |d: &dyn Desktop| d.foreground_window().ok().flatten().filter(|f| f.pid != 0);
@@ -2370,7 +2371,7 @@ impl Executor<'_> {
             ),
             Some(_) => (
                 format!(
-                    "対象 ({describe}) を前面にできなかった (SetForegroundWindow={set_foreground}。前面は {now})。人が別のアプリを使っている"
+                    "対象 ({describe}) を前面にできなかった (SetForegroundWindow={set_foreground}。前面 (キーの届く窓) は {now})。前面が別のアプリにある (人が使っている、または前面のまま置かれている)。対象の窓が一番手前に見えていても、前面とは限らない"
                 ),
                 reason::REFUSED_OTHER_APP,
                 Hint::FocusRefused,
@@ -4266,7 +4267,7 @@ mod tests {
         assert_eq!(e.hint.as_deref(), Some(FOCUS_MINIMIZED_HINT));
         assert!(world.borrow().focus_calls.is_empty());
         assert!(world.borrow().sent.is_empty());
-        // Windows が断る (人が別のアプリを使っている): 1 回だけ呼び、前面は変わらない
+        // Windows が断る (前面が別のアプリ): 1 回だけ呼び、前面は変わらない
         let mut w = World::new();
         w.foreground = Some(chrome());
         w.top = vec![top(0x20, "notepad.exe", "a.txt")];
@@ -5289,7 +5290,7 @@ mod tests {
         w.shared()
     }
 
-    /// 前面が ai-cu を起動した側 (ホスト) なのに断られた (D-056): 人が別のアプリを使っているとは言わず、
+    /// 前面が ai-cu を起動した側 (ホスト) なのに断られた (D-056): 前面が別のアプリとは言わず、
     /// reason と detail で分かるようにする。呼ぶのは 1 回、何も送らない。次の手の文は呼ばれ方で選ぶ
     #[test]
     fn focus_refused_with_host_in_front_reports_refused_host_front() {
@@ -5307,6 +5308,7 @@ mod tests {
             assert_eq!(d["foreground_is_host"], true);
             assert!(d.get("title").is_none(), "題名は入れない: {d}");
             assert!(!e.message.contains("人が別のアプリ"), "{}", e.message);
+            assert!(!e.message.contains("前面が別のアプリ"), "{}", e.message);
             assert!(e.message.contains("起動した側"), "{}", e.message);
             assert!(e.message.contains("SetForegroundWindow=0"), "{}", e.message);
             assert_eq!(
@@ -5320,7 +5322,9 @@ mod tests {
         }
     }
 
-    /// 前面がホスト以外のアプリなら、今までどおり「人が別のアプリを使っている」と FOCUS_REFUSED_HINT (CLI)
+    /// 前面がホスト以外のアプリなら refused_other_app。message は前面 (キーの届く窓) と見た目の一番手前を区別し、
+    /// 人が使っているとは言い切らない (前面のまま置かれている場合も含める)。CLI の hint は FOCUS_REFUSED_HINT の
+    /// まま (D-056 の固定)。MCP の hint は人に対象の窓を 1 回クリックしてもらい、AI 自身には click させない (D-156)
     #[test]
     fn focus_refused_with_other_app_keeps_focus_refused_hint() {
         let s = script(r#"{"type":"focus","process":"notepad.exe"}"#);
@@ -5329,8 +5333,17 @@ mod tests {
         assert_eq!(e.kind, ErrorKind::FocusFailed);
         assert_eq!(e.reason, Some(reason::REFUSED_OTHER_APP));
         assert_eq!(e.hint.as_deref(), Some(FOCUS_REFUSED_HINT));
+        for part in [
+            "chrome.exe",
+            "前面 (キーの届く窓)",
+            "一番手前に見えていても",
+            "人が使っている",
+            "前面のまま置かれている",
+        ] {
+            assert!(e.message.contains(part), "{part}: {}", e.message);
+        }
         assert!(
-            e.message.contains("chrome.exe") && e.message.contains("人が別のアプリを使っている"),
+            !e.message.contains("人が別のアプリを使っている"),
             "{}",
             e.message
         );
@@ -5342,10 +5355,18 @@ mod tests {
         let world = refused_world(Some(chrome()));
         let e = exec_on(&world, &mut StopSet::new(), &s, &[1], Surface::Mcp).unwrap_err();
         assert_eq!(e.reason, Some(reason::REFUSED_OTHER_APP));
-        assert_eq!(
-            e.hint.as_deref(),
-            Some(hint(Hint::FocusRefused, Surface::Mcp))
-        );
+        let h = hint(Hint::FocusRefused, Surface::Mcp);
+        assert_eq!(e.hint.as_deref(), Some(h));
+        for part in [
+            "1 回クリック",
+            "人が使っている",
+            "前面のまま置かれている",
+            "一番手前に見えていても",
+            "click、他のツールで前面にしようとしない",
+            "foreground が true",
+        ] {
+            assert!(h.contains(part), "{part}: {h}");
+        }
     }
 
     /// 前面が無い (または pid が読めない) なら refused_unknown。人のせいと断定しない

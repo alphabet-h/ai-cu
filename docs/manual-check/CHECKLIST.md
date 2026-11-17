@@ -347,7 +347,7 @@ Start-Sleep -Seconds 4; & $cu run (Join-Path $dir sample-focus.json); $LASTEXITC
 ```powershell
 Start-Sleep -Seconds 4; & $cu run (Join-Path $dir sample-focus.json); $LASTEXITCODE
 ```
-- [ ] 終了コード `11`、`"code":"focus_failed"`、メッセージに「前面にできなかった」と `SetForegroundWindow=0`、前面のプロセス名 (ブラウザ)。`hint` に「人間に対象を前面に出してもらう」。メモ帳に何も入らない。ブラウザは前面のまま (タスクバーのメモ帳のボタンが点滅していたら、それも記録する)
+- [ ] 終了コード `11`、`"code":"focus_failed"`、メッセージに「前面にできなかった」と `SetForegroundWindow=0`、前面のプロセス名 (ブラウザ)、「一番手前に見えていても」。`hint` に「人間に対象を前面に出してもらう」。メモ帳に何も入らない。ブラウザは前面のまま (タスクバーのメモ帳のボタンが点滅していたら、それも記録する)
 
 メモ帳を最小化して、端末を前面のまま走らせる。
 
