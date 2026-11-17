@@ -2734,7 +2734,8 @@ fn is_fixture_edit_type(t: &str) -> bool {
 
 /// UIA の子孫と文字列 (D-088): 子つきのフィクスチャで、制限なしの問い合わせが根・ボタン・エディットを木の順に返し、
 /// 子の矩形が子の窓の矩形と一致する。名前と種類で絞れ、`text` の問い合わせはエディットの本文を LF にそろえて返し、
-/// ボタンの名前で絞ると文字列が無い (CLI の `text` が 13 にする条件)。読むだけ (入力も撮影もしない)
+/// ボタンの名前で絞ると文字列が無い (CLI の `text` が 13 にする条件) うえ、ボタンを値を持たない要素に数え、
+/// 根にだけ当たる名前では数えない (D-154)。読むだけ (入力も撮影もしない)
 #[test]
 #[ignore = "実機のフィクスチャ限定。cargo test -- --ignored --test-threads=1"]
 fn fixture_real_uia_find_and_text_read_fixture_children() {
@@ -2833,6 +2834,27 @@ fn fixture_real_uia_find_and_text_read_fixture_children() {
             e.control_type, e.name, e.rect
         );
     }
+    // 一致したが値を持たないボタンは textless に数える (D-154)
+    assert!(read.textless >= 1, "値を持たないボタンを数えない: {read:?}");
+    // (5) 根 (題名 `ai-cu fixture uia-children <pid>`) にだけ当たる名前: 根は値を持たないが textless に数えない
+    // (数えると、子孫の要素を出さないアプリでも unmet が text になり element の案内が失われる。D-154)
+    // 先に同じ名前が根だけに当たることを確かめる (当たらなければ下の断言は何も確かめずに通る)
+    let root_only = ElementQuery {
+        name: Some("ai-cu fixture uia-children".into()),
+        limit: 20,
+        ..Default::default()
+    };
+    let roots = desktop.ui_elements(f.win.hwnd(), &root_only).unwrap();
+    assert_eq!(roots.elements.len(), 1, "{roots:?}");
+    assert_eq!(roots.elements[0].rect, Some(expected_root), "{roots:?}");
+    let q = ElementQuery::for_text(Some("ai-cu fixture uia-children".into()), None);
+    let read = desktop
+        .ui_elements(f.win.hwnd(), &q)
+        .expect("文字列の問い合わせ");
+    assert!(
+        first_text(&read.elements).is_none() && read.textless == 0,
+        "根を値を持たない要素に数えた: {read:?}"
+    );
 
     assert!(f.win.events().is_empty(), "{:?}", f.win.events());
     println!(
@@ -3357,7 +3379,8 @@ fn fixture_real_wait_for_sees_fixture_window_and_element_and_times_out_on_absenc
         p["elapsed_ms"].as_u64().unwrap() >= 300,
         "時間切れは timeout_ms 以上の経過: {p}"
     );
-    // (5) 無い文字列: フィクスチャは文字列を持つ要素が無いので、unmet は element。detail.window にフィクスチャ (題名なし)
+    // (5) 無い文字列: フィクスチャは文字列を持つ要素が無く、子孫も無い。根は値を持たない要素に数えないので
+    // unmet は element のまま (D-154)。detail.window にフィクスチャ (題名なし)
     let e = f
         .execute(&wait(title, r#","text":"no-such-text""#, 300))
         .unwrap_err();

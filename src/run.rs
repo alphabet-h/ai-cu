@@ -9,6 +9,7 @@ use crate::device::{
 };
 use crate::elements::{
     ElementQuery, UiElement, element_json, first_text, normalize_newlines, parse_control_type,
+    textless_note,
 };
 use crate::error::{AppError, ErrorKind, reason};
 use crate::estop::{StopReason, StopSet};
@@ -225,8 +226,13 @@ fn moves_focus(events: &[InputEvent]) -> bool {
 
 /// `absent` が最初の判定で満たされたときの `WaitInfo::note` の文 (D-070)。`unmet` は最初の判定で無かった段
 /// (`"window"` / `"element"` / それ以外は `"text"`)。UI Automation に要素を出さないアプリ (gpui など) では、
-/// 見えている要素も無いと判定されて空振りする (D-070)。コマンドの書き方は CLI と MCP で違うので、道具の名前だけを書く
-fn absent_note(unmet: &str) -> &'static str {
+/// 見えている要素も無いと判定されて空振りする (D-070)。コマンドの書き方は CLI と MCP で違うので、道具の名前だけを書く。
+/// `textless` は文字列の条件で一致したが値を持たなかった要素の数 (`WaitObservation::textless`)。1 以上なら、
+/// 名前の変化は element.name で待つことを書いた専用の文 (text で確かめると 13 になり次の手が外れる。D-154)
+fn absent_note(unmet: &str, textless: usize) -> &'static str {
+    if textless > 0 {
+        return "最初の確認で既に無かった。一致した要素は文字列 (値) を持たないので、text を含まないと数えた。名前の変化を待つなら text を外して待つ字を要素の名前の条件 (操作列と MCP は element.name、CLI は --name) に入れる。find で今の名前を確かめる";
+    }
     match unmet {
         "window" => {
             "最初の確認で既に無かった。待つ前から無かったか、実行ファイル名か題名が表示と合っていないか、最小化されている (最小化と、許可の外と ai-cu を起動した側の窓は無いと数える)。windows で対象のウィンドウを確かめる"
@@ -1429,6 +1435,9 @@ struct WaitObservation {
     window: Option<TopWindow>,
     /// 「ある」で満たされたときの要素 (要素か文字列の条件のときだけ)
     element: Option<UiElement>,
+    /// 文字列の条件で、文字列を持つ要素が無かったときに、一致したが値を持たなかった要素の数
+    /// (`Elements::textless` の写し。文字列を持つ要素があったときと他の条件では 0。D-154)
+    textless: usize,
 }
 
 impl Executor<'_> {
@@ -2749,7 +2758,7 @@ impl Executor<'_> {
                     // 「最初から無い」は待つ意味が無かったか、条件がアプリに見えていない合図 (D-070)。
                     // timeout_ms 0 は「1 回だけ確かめる」と明示した使い方なので付けない
                     note: (spec.absent && checks == 1 && spec.timeout_ms > 0)
-                        .then(|| absent_note(obs.unmet)),
+                        .then(|| absent_note(obs.unmet, obs.textless)),
                 });
                 return Ok(());
             }
@@ -2770,6 +2779,13 @@ impl Executor<'_> {
                 if obs.unmet == "window" {
                     message.push_str(&format!("。{NAMED_WINDOW_SCOPE_NOTE}"));
                 }
+                // 一致した要素が値を持たないだけなら、その数と名前の変化の待ち方を足す (unmet は text。D-154)
+                if obs.textless > 0 {
+                    message.push_str(&format!(
+                        "。{}。名前の変化を待つなら text を外し、待つ字を要素の名前の条件に入れる (操作列と MCP は element.name、CLI は --name。名前は確かめるたびに部分一致で引き直す)",
+                        textless_note(obs.textless)
+                    ));
+                }
                 return Err(AppError::new(ErrorKind::WaitTimeout, message).with_detail(
                     serde_json::json!({
                         "timeout_ms": spec.timeout_ms,
@@ -2788,7 +2804,8 @@ impl Executor<'_> {
     /// 無い、許可の外か起動した側の窓しか無い、または最小化なら「ウィンドウが無い」。あれば、読んでよい相手か
     /// (`check_ui_window`。述語を通った窓には当たらない守りの重ね)。
     /// 条件が要素なら 1 つ以上あるか、文字列なら最初に文字列を持つ要素の文字列が含むか (要素の文字列と条件の
-    /// 文字列の両方を LF にそろえてから比べる)。
+    /// 文字列の両方を LF にそろえてから比べる)。文字列を持つ要素が無く、一致したが値を持たない要素があれば
+    /// unmet は text (その数を `textless` に写す)、それも無ければ element (D-154)。
     /// 要素の読み取りが失敗したら、ウィンドウを探し直して無ければその回は「無い」(閉じられた直後の競合)、
     /// まだあれば失敗 (多くは 8)
     fn observe_wait(
@@ -2801,6 +2818,7 @@ impl Executor<'_> {
             unmet: "window",
             window: None,
             element: None,
+            textless: 0,
         };
         let (policy, host_pids, self_hwnd) = (self.policy, ctx.host_pids, ctx.self_hwnd);
         let find = |d: &dyn Desktop| -> Result<Option<TopWindow>, AppError> {
@@ -2841,6 +2859,7 @@ impl Executor<'_> {
                 unmet: "window",
                 window: Some(w),
                 element: None,
+                textless: 0,
             });
         };
         let found = match self.desktop.ui_elements(w.info.hwnd, &query) {
@@ -2854,19 +2873,22 @@ impl Executor<'_> {
                 };
             }
         };
-        let (present, unmet, element) = match spec.text {
+        let (present, unmet, element, textless) = match spec.text {
             // 条件の文字列も LF にそろえる (CRLF で書かれた text が決して一致せずに 15 になるのを防ぐ)
             Some(needle) => match first_text(&found.elements) {
-                None => (false, "element", None),
+                // 一致した要素はあるが値を持たないだけなら、要素が無いのではなく文字列の条件がそろわない (D-154)
+                None if found.textless > 0 => (false, "text", None, found.textless),
+                None => (false, "element", None, 0),
                 Some((el, s)) => (
                     s.contains(&normalize_newlines(needle)),
                     "text",
                     Some(el.clone()),
+                    0,
                 ),
             },
             None => match found.elements.first() {
-                Some(el) => (true, "element", Some(el.clone())),
-                None => (false, "element", None),
+                Some(el) => (true, "element", Some(el.clone()), 0),
+                None => (false, "element", None, 0),
             },
         };
         Ok(WaitObservation {
@@ -2874,6 +2896,7 @@ impl Executor<'_> {
             unmet,
             window: Some(w),
             element,
+            textless,
         })
     }
 
@@ -10079,6 +10102,38 @@ mod tests {
         assert_eq!(world.borrow().now_ms, 600);
     }
 
+    /// 要素の名前の条件は確かめるたびに部分一致で引き直す: 名前に状態を出す要素 (値を持たない list_item) の
+    /// 名前が 2 回目の読みで変われば checks 2 で満たされる (名前の変化は text でなく element.name で待つ。D-154)
+    #[test]
+    fn wait_for_element_name_rechecked_each_poll() {
+        let row = |name: &str| {
+            (
+                0x20,
+                el(name, "list_item", Some(Rect::new(100, 200, 300, 20)), None),
+            )
+        };
+        let mut w = wait_world();
+        w.elements = vec![row("行A 実行中")];
+        w.elements_after_reads = Some((1, vec![row("行A 完了")]));
+        let world = w.shared();
+        let (r, _) = exec(
+            &world,
+            &policy(ENABLED),
+            &mut StopSet::new(),
+            &script(&wait_json(
+                r#","element":{"name":"完了","type":"list_item"}"#,
+                1000,
+            )),
+        );
+        let report = r.unwrap();
+        let wi = &report.waited[0];
+        assert_eq!(wi.checks, 2);
+        assert_eq!(wi.elapsed_ms, WAIT_FOR_POLL_MS);
+        let el = wi.element.as_ref().unwrap();
+        assert_eq!(el["name"], "行A 完了");
+        assert_eq!(el["type"], "list_item");
+    }
+
     /// 要素の条件で満たされた waited の element に、フォーカスと状態が出る (D-089。要素の条件は find の問い合わせ)
     #[test]
     fn wait_for_element_reports_focus_and_states_in_waited() {
@@ -10099,7 +10154,8 @@ mod tests {
     }
 
     /// (4) 文字列の条件: 最初に文字列を持つ要素の文字列 (LF にそろえる) が含めば満たされ、要素に text キーは無い。
-    /// 含まなければ 15 で unmet が text。文字列を持つ要素が無ければ unmet が element
+    /// 含まなければ 15 で unmet が text。一致した要素が値を持たないだけでも unmet は text で、message に数と
+    /// 名前の変化の待ち方 (element.name / --name) が出る (D-154)。値を持つ要素が混ざって含まないときは数を出さない
     #[test]
     fn wait_for_text_condition_matches_or_15_unmet_text_or_element() {
         let mut w = wait_world();
@@ -10143,6 +10199,23 @@ mod tests {
         assert_eq!(d["unmet"], "text");
         assert_eq!(d["window"]["hwnd"], 0x20);
         assert!(e.message.contains("text が無い"), "{}", e.message);
+        // 値を持つ要素が混ざって含まないだけなら、値を持たない要素の数は出さない (D-154)
+        assert!(
+            !e.message.contains("文字列 (値) を持たない"),
+            "{}",
+            e.message
+        );
+        // 値を持たない要素だけ: unmet は text で、数と名前の変化の待ち方が message に出る (D-154)
+        let textless_timeout = |e: &AppError| {
+            assert_eq!(wait_timeout(e)["unmet"], "text");
+            for want in [
+                "一致した要素 1 個は文字列 (値) を持たない",
+                "element.name",
+                "--name",
+            ] {
+                assert!(e.message.contains(want), "{want}: {}", e.message);
+            }
+        };
         // 絞り込みの中に文字列を持つ要素が無い (button には文字列が無い)
         let (r, _) = exec(
             &world,
@@ -10153,7 +10226,7 @@ mod tests {
                 0,
             )),
         );
-        assert_eq!(wait_timeout(&r.unwrap_err())["unmet"], "element");
+        textless_timeout(&r.unwrap_err());
         // 文字列を持つ要素が 1 つも無い
         world.borrow_mut().elements = vec![save_button()];
         let (r, _) = exec(
@@ -10162,12 +10235,13 @@ mod tests {
             &mut StopSet::new(),
             &script(&wait_json(r#","text":"二行目""#, 0)),
         );
-        assert_eq!(wait_timeout(&r.unwrap_err())["unmet"], "element");
+        textless_timeout(&r.unwrap_err());
     }
 
     /// 文字列の条件はパスワードの要素の文字列を読まずに飛ばす (D-090): その要素だけの窓では、文字列が一致しても
     /// 満たされず 15 で unmet は element。absent を付けると最初の判定で満たされ、note は既存の element の文
-    /// (パスワードの要素は最初から無いと数える。受け入れた振る舞いを固定する)
+    /// (パスワードの要素は最初から無いと数える。受け入れた振る舞いを固定する)。パスワードだけなら element の文
+    /// (値を持たない要素とは分かれる。D-154)
     #[test]
     fn wait_for_text_condition_never_matches_password_element() {
         let secret = || {
@@ -10192,7 +10266,7 @@ mod tests {
         );
         let e = r.unwrap_err();
         assert_eq!(wait_timeout(&e)["unmet"], "element");
-        // absent: 最初の判定で満たされ、note は文字列を持つ要素が無いときと同じ element の文
+        // absent: 最初の判定で満たされ、note は要素が無いときの element の文
         let report = |elements: Vec<(usize, UiElement)>| {
             let mut w = wait_world();
             w.elements = elements;
@@ -10209,7 +10283,7 @@ mod tests {
         assert_eq!(got.waited[0].checks, 1);
         assert!(got.waited[0].element.is_none());
         let note = waited_note(&got).expect("note");
-        assert_eq!(Some(note), waited_note(&report(vec![save_button()])));
+        assert_eq!(note, absent_note("element", 0));
         assert!(!serde_json::to_string(&got).unwrap().contains("secret"));
     }
 
@@ -10350,11 +10424,20 @@ mod tests {
         assert!(ne.contains("find") && ne.contains("gpui"), "{ne}");
         assert!(!ne.contains("windows"), "{ne}");
         assert_eq!(report.waited[0].window.as_ref().map(|w| w.hwnd), Some(0x20));
-        // absent + text だけで、文字列を持つ要素が無い → 同じ element の文
+        // absent + text だけで、一致した要素が値を持たない → 値を持たない要素の専用の文 (D-154)
         let mut w = wait_world();
         w.elements = vec![save_button()];
         let report = run(w, r#","text":"二行目","absent":true"#);
-        assert_eq!(waited_note(&report).as_deref(), Some(ne.as_str()));
+        let nl = waited_note(&report).expect("note");
+        assert_eq!(nl, absent_note("text", 1));
+        assert_ne!(nl, ne);
+        assert!(
+            nl.contains("文字列 (値) を持たない")
+                && nl.contains("element.name")
+                && nl.contains("--name")
+                && nl.contains("find"),
+            "{nl}"
+        );
         // (c) 要素はあるが最初から含まない → text の文
         let mut w = wait_world();
         w.elements = vec![document()];

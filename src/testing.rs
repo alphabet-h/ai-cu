@@ -887,6 +887,9 @@ impl Desktop for MockDesktop {
                     out.elements.push(e);
                     break;
                 }
+                // 実装置と同じ: 一致したが文字列を持たない要素を数える (D-154)。
+                // モックは窓の根を持たないので、根を数えない扱いは無い
+                out.textless += 1;
                 continue;
             }
             if out.elements.len() >= query.limit {
@@ -1510,6 +1513,48 @@ mod tests {
             "1 回の読みの後に寄る"
         );
         assert_eq!(d.cursor_clip(), Ok(Some(r)));
+    }
+
+    /// 文字列を読む問い合わせで、文字列を持つ最初の要素より前の、一致したが文字列を持たない要素を `textless` に
+    /// 数える。パスワードの要素は `password_skipped` に数え、`textless` に入れない。最初の要素の後は数えない。
+    /// 文字列を読まない問い合わせでは数えない (実装置と同じ。D-154)
+    #[test]
+    fn mock_text_query_counts_textless_elements_before_first_text() {
+        use crate::elements::ElementQuery;
+        let typed =
+            |name: &str, ty: &str, text: Option<&str>, password: bool| crate::elements::UiElement {
+                control_type: ty.into(),
+                text: text.map(Into::into),
+                password,
+                ..tree_el(name)
+            };
+        let w = World::new().shared();
+        w.borrow_mut().elements = vec![
+            (1, typed("保存", "button", None, false)),
+            (1, typed("合言葉", "edit", Some("秘密"), true)),
+            (1, typed("行A", "list_item", None, false)),
+            (1, typed("本文", "document", Some("一行目"), false)),
+            (1, typed("閉じる", "button", None, false)),
+        ];
+        let d = MockDesktop(w);
+        let read = d
+            .ui_elements(1, &ElementQuery::for_text(None, None))
+            .unwrap();
+        assert_eq!(read.elements.len(), 1, "{read:?}");
+        assert_eq!(read.elements[0].name, "本文", "{read:?}");
+        assert_eq!(read.textless, 2, "{read:?}");
+        assert_eq!(read.password_skipped, 1, "{read:?}");
+
+        let all = ElementQuery {
+            limit: 20,
+            ..Default::default()
+        };
+        let read = d.ui_elements(1, &all).unwrap();
+        assert_eq!(read.elements.len(), 5, "{read:?}");
+        assert_eq!(
+            read.textless, 0,
+            "文字列を読まない問い合わせでは数えない: {read:?}"
+        );
     }
 
     fn tree_el(name: &str) -> crate::elements::UiElement {

@@ -14,7 +14,7 @@ use crate::elements::{
     ELEMENT_NAME_MAX_CHARS, ElementQuery, TEXT_MAX_CHARS_DEFAULT, TEXT_MAX_CHARS_MAX,
     TREE_DEPTH_DEFAULT, TREE_DEPTH_MAX, TREE_LIMIT_DEFAULT, TREE_LIMIT_MAX, TREE_MAX_NODES,
     TREE_NOTE, control_type_names, element_json, first_text, parse_control_type, render_tree,
-    truncate_chars,
+    textless_note, truncate_chars,
 };
 use crate::error::{AppError, ErrorKind};
 use crate::estop::StopSource;
@@ -233,7 +233,7 @@ pub enum Command {
         log: Option<PathBuf>,
     },
     /// 許可されたウィンドウの要素の文字列 (文書の本文や入力欄の値) を読む。読み取りだけ。
-    /// パスワードの要素 (UIA の IsPassword) は読まずに飛ばす
+    /// パスワードの要素 (UIA の IsPassword) は読まずに飛ばす。値を持たない要素は読まない (名前は find で読む)
     Text {
         /// 対象のウィンドウの実行ファイル名 (例 notepad.exe)
         #[arg(long, value_name = "PROCESS")]
@@ -410,7 +410,7 @@ pub enum Command {
         #[arg(long = "type", value_name = "TYPE", value_parser = parse_type_arg)]
         control_type: Option<String>,
         /// 要素の文字列に含む文字列 (改行は LF にそろえて部分一致。大文字小文字を区別)。あれば文字列を待つ。
-        /// パスワードの要素は読まずに飛ばす
+        /// パスワードの要素は読まずに飛ばす。値を持たない要素は読まない (名前の変化は --name で待つ)
         #[arg(long, value_name = "TEXT")]
         text: Option<String>,
         /// 無くなるまで待つ
@@ -1977,9 +1977,14 @@ pub(crate) fn text_cmd(
             0 => String::new(),
             n => format!(" (パスワードの要素 {n} 個は読まない)"),
         };
+        // 一致したが文字列 (値) を持たない要素があれば、その数を添える。「要素が無い」との誤読を避ける (D-154)
+        let textless = match found.textless {
+            0 => String::new(),
+            n => format!(" ({}。名前は find で読む)", textless_note(n)),
+        };
         return Err(AppError::new(
             ErrorKind::ElementNotFound,
-            format!("文字列を持つ要素が見つからない{filter}{skipped}"),
+            format!("文字列を持つ要素が見つからない{filter}{skipped}{textless}"),
         ));
     };
     let (text, truncated, total_chars) = truncate_chars(&text, max_chars);
@@ -2095,7 +2100,7 @@ pub fn schema() -> Value {
             "screenshot": { "path": "保存先の png (.png に限る。PNG でない既存ファイルは上書きしない)", "region": { "x": "整数", "y": "整数", "w": "幅", "h": "高さ", "省略": "window も無ければ仮想デスクトップ全体 (既定の設定では拒否。capture.full_screen)" }, "window": { "process": "撮る対象のウィンドウの実行ファイル名 (focus と同じ探し方。region と排他)", "title": "省略可。題名に含む文字列", "備考": "矩形は撮る直前に解く。見つからない / 最小化 / 画面の外は終了コード 12 (何もしない)。結果の screenshots[].window に撮ったウィンドウが入る" }, "scale": "保存する画像の縮尺 (0 より大きく 1 以下。既定 1)。画像の点 (px, py) は画面の (x + px / scale, y + py / scale)", "max_edge": "長辺の上限 (1 以上、ピクセル。省略で上限なし。MCP は既定 1568)。縮尺は scale と max_edge / 長辺 の小さい方で、出力の scale に実際の値が入る", "settle": { "stable_ms": format!("省略可。静けさが続く長さ (既定 {DEFAULT_STABLE_MS}、{MIN_STABLE_MS} 以上 {MAX_STABLE_MS} 以下)"), "threshold": "省略可。直前のフレームとの差 (変わった点の割合) の許容 (0 以上 1 未満。既定 0)", "timeout_ms": format!("省略可。待つ上限 (既定 {DEFAULT_SETTLE_TIMEOUT_MS}、stable_ms 以上 {MAX_SINGLE_WAIT_MS} 以下)。超えたら落ち着くのを待たずに撮る (失敗にしない)"), "備考": "省略可 ({} でも既定値で付く)。撮る前に wait_stable と同じ判定で画面が落ち着くのを待ち、最後に撮った画像を保存する (撮り直さない)。結果の screenshots[] に settled (落ち着いたか) と settle_ms (待った時間) が入る。一手ずつの --settle-ms auto はこれを既定値で付ける" } },
             "focus": { "process": "実行ファイル名 (例 notepad.exe。大文字小文字と .exe の有無は問わない)", "title": "省略可。題名に含む文字列 (大文字小文字を無視)。許可を通る窓 (windows に出る窓) の中で前面から見て最初に一致したウィンドウ (ツールチップなどのポップアップは後に回す。権限で断られれば 7) を SetForegroundWindow で前面にする。既に前面なら何もしない。最小化は復元しない。人が操作中 (capture.min_idle_ms) なら 10。できなければ終了コード 11 (何も送らない)。成功の出力の focused に、前面にしたウィンドウが入る。撮影の許可 (general.capture_enabled と actions の screenshot) が無いと、title の指定は 4 で、focused の title は null" },
             "close": { "process": "実行ファイル名 (focus と同じ探し方)", "title": "必須。題名に含む文字列 (大文字小文字を無視)。許可を通る窓 (windows に出る窓) の中で前面から見て最初に一致したウィンドウ (ツールチップなどのポップアップは後に回すので、title がポップアップと本体の両方に当たると本体に届く。権限で断られれば 7) に WM_CLOSE を 1 回置く。前面は変えず、前面でなくても届く。対象が前面で人が操作中 (capture.min_idle_ms) なら 10。見つからなければ 12 (何もしない)。閉じるか (保存の確認を出すか) はアプリが決める。成功の出力の closed に、閉じようとしたウィンドウと gone (1 秒のうちに見える窓から消えたか。破棄とは限らない) と hidden (破棄されず隠れただけ。トレイに入るアプリで、プロセスは動いている) が入る。hidden が false でもプロセスが終わったとは限らない (exe の入れ替えや再起動の前に確かめるか人間に聞く)。gone が false なら撮って確かめる。撮影の許可 (general.capture_enabled と actions の screenshot) が無いと close は 4" },
-            "wait_for": { "process": "対象のウィンドウの実行ファイル名 (focus と同じ探し方)", "title": "省略可。題名に含む文字列", "element": { "name": "省略可。要素の名前に含む文字列", "type": "省略可。要素の種類 (find --help の一覧)" }, "text": "省略可。要素の文字列に含む文字列 (改行は LF にそろえる。大文字小文字を区別。パスワードの要素は読まずに飛ばす)", "absent": "真偽 (既定 false)。true なら無くなるまで待つ", "timeout_ms": "上限 (既定 10000、最大 600000)。超えたら終了コード 15 (何も送らない)", "備考": "条件は一番細かい指定 (text > element > window)。250 ms ごとに確かめる。満たされると結果の waited[] に窓と要素 (center) が入る。absent が最初の確認で満たされると (timeout_ms 0 は除く) waited[].note に注意が付く" },
+            "wait_for": { "process": "対象のウィンドウの実行ファイル名 (focus と同じ探し方)", "title": "省略可。題名に含む文字列", "element": { "name": "省略可。要素の名前に含む文字列", "type": "省略可。要素の種類 (find --help の一覧)" }, "text": "省略可。要素の文字列に含む文字列 (改行は LF にそろえる。大文字小文字を区別。パスワードの要素は読まずに飛ばす。値を持たない要素は読まない (名前の変化を待つなら text を外し、待つ字を element.name に入れる))", "absent": "真偽 (既定 false)。true なら無くなるまで待つ", "timeout_ms": "上限 (既定 10000、最大 600000)。超えたら終了コード 15 (何も送らない)", "備考": "条件は一番細かい指定 (text > element > window)。250 ms ごとに確かめる。満たされると結果の waited[] に窓と要素 (center) が入る。absent が最初の確認で満たされると (timeout_ms 0 は除く) waited[].note に注意が付く" },
             "wait_stable": { "region": "省略可。撮る矩形 (screenshot と同じ。window と排他。両方省略は全画面で、既定の設定では拒否)", "window": { "process": "省略可。撮る対象のウィンドウ (screenshot と同じ探し方。撮るたびに矩形を解く)", "title": "省略可" }, "stable_ms": "静けさが続く長さ (既定 300、100 以上 60000 以下)", "threshold": "直前のフレームとの差 (変わった点の割合) の許容 (0 以上 1 未満。既定 0)", "timeout_ms": "上限 (既定 10000、stable_ms 以上 600000 以下)。超えたら終了コード 15 (unmet: stable。何も送らない)", "備考": "100 ms ごとに撮り、長辺 256 に縮めて比べる。窓が動けば変わったと数える。撮るたびに screenshot と同じ判定 (撮影の許可、deny の窓、ロック) を通す。満たされると結果の waited[] に rect が入る" },
             "wait_change": { "region": "省略可 (wait_stable と同じ)", "window": "省略可 (wait_stable と同じ)", "threshold": "待ち始めの画像 (基準) との差がこれを超えたら変わった (0 以上 1 未満。既定 0.001)", "timeout_ms": "上限 (既定 10000、1 以上 600000 以下)。超えたら終了コード 15 (unmet: change。何も送らない)", "備考": "100 ms ごとに撮り、基準と比べる (直前ではない)。狭い region ではキャレットの点滅でも満たしうる。満たされると結果の waited[] に rect と changed_ratio が入る" },
             "resize": { "process": "実行ファイル名 (focus と同じ探し方)", "title": "省略可。題名に含む文字列 (大文字小文字を無視)。省略するとそのプロセスの最前のウィンドウ。撮影の許可 (general.capture_enabled と actions の screenshot) が無いと、title の指定は 4 で、resized の title は null", "width": format!("幅 (1 以上 {RESIZE_MAX} 以下)"), "height": format!("高さ (1 以上 {RESIZE_MAX} 以下)"), "logical": "真偽 (既定 false = 物理ピクセル)。true なら論理の大きさで、窓が載っている画面の有効 DPI / 96 で物理に換算する (四捨五入)。換算後が上限を超えれば実行時に 3 (validate と dry_run では見えない)。DPI を読めなければ 8", "area": "client | frame (既定 client = 中身。frame は見えている枠)", "備考": "左上は動かさず、前面も Z 順も変えず、入力も送らない。最小化・最大化の窓は 7 (reason minimized / maximized。元に戻さない)、無効な窓は 7 (target_disabled)、応答しない窓は 7 (not_responding。要求が後から効いて重なるので送らない)、対象が前面で人が操作中なら 10、見つからなければ 12、大きさの読みが壊れていれば (中身か枠が外側より大きい) 8。成功の出力の resized[] に frame と client (物理の矩形)、requested (物理の狙い)、dpi、exact (1 秒のうちに基準が狙いに届いたか。false なら frame と client が実際の大きさ) が入る", "例": { "type": "resize", "process": "notepad.exe", "width": 1280, "height": 720, "logical": true } }
@@ -6401,6 +6406,41 @@ mod tests {
         let m = message(vec![(0x20, element("保存", "button", None))]);
         assert!(m.contains("文字列を持つ要素が見つからない"), "{m}");
         assert!(!m.contains("パスワード"), "{m}");
+    }
+
+    /// text の 13 は、一致したが文字列 (値) を持たない要素の数を message に添える。
+    /// 要素が 1 つも一致しないときは添えない (D-154)
+    #[test]
+    fn text_cli_13_reports_textless_count() {
+        let dir = unique_temp_dir("cli-text-textless-13");
+        let floor = floor_file(&dir, ENABLED);
+        let env = MapEnv::new(&[(ENV_DEV_FORBID, "1"), (ENV_DEV_FLOOR, &floor)]);
+        let message = |elements: Vec<(usize, UiElement)>| -> String {
+            let mut w = World::new();
+            w.top = vec![top(0x20, "Notepad.exe", Rect::new(100, 50, 640, 480))];
+            w.elements = elements;
+            match go(
+                &["text", "--window", "notepad"],
+                &env,
+                "",
+                &mut MockDevices(w.shared()),
+                (false, false),
+            ) {
+                Outcome::Json {
+                    code: 13, value, ..
+                } => value["error"]["message"].as_str().unwrap().to_string(),
+                other => panic!("{other:?}"),
+            }
+        };
+        let m = message(vec![(0x20, element("保存", "button", None))]);
+        assert!(
+            m.contains("一致した要素 1 個は文字列 (値) を持たない"),
+            "{m}"
+        );
+        assert!(m.contains("find"), "{m}");
+        let m = message(vec![]);
+        assert!(m.contains("文字列を持つ要素が見つからない"), "{m}");
+        assert!(!m.contains("文字列 (値) を持たない"), "{m}");
     }
 
     /// find は password の要素を password == true で返し、text のキーは無い (D-090)
