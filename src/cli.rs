@@ -14,7 +14,7 @@ use crate::elements::{
     ELEMENT_NAME_MAX_CHARS, ElementQuery, TEXT_MAX_CHARS_DEFAULT, TEXT_MAX_CHARS_MAX,
     TREE_DEPTH_DEFAULT, TREE_DEPTH_MAX, TREE_LIMIT_DEFAULT, TREE_LIMIT_MAX, TREE_MAX_NODES,
     TREE_NOTE, control_type_names, element_json, first_text, parse_control_type, render_tree,
-    truncate_chars,
+    textless_note, truncate_chars,
 };
 use crate::error::{AppError, ErrorKind};
 use crate::estop::StopSource;
@@ -1977,9 +1977,14 @@ pub(crate) fn text_cmd(
             0 => String::new(),
             n => format!(" (パスワードの要素 {n} 個は読まない)"),
         };
+        // 一致したが文字列 (値) を持たない要素があれば、その数を添える。「要素が無い」との誤読を避ける (D-154)
+        let textless = match found.textless {
+            0 => String::new(),
+            n => format!(" ({}。名前は find で読む)", textless_note(n)),
+        };
         return Err(AppError::new(
             ErrorKind::ElementNotFound,
-            format!("文字列を持つ要素が見つからない{filter}{skipped}"),
+            format!("文字列を持つ要素が見つからない{filter}{skipped}{textless}"),
         ));
     };
     let (text, truncated, total_chars) = truncate_chars(&text, max_chars);
@@ -6401,6 +6406,41 @@ mod tests {
         let m = message(vec![(0x20, element("保存", "button", None))]);
         assert!(m.contains("文字列を持つ要素が見つからない"), "{m}");
         assert!(!m.contains("パスワード"), "{m}");
+    }
+
+    /// text の 13 は、一致したが文字列 (値) を持たない要素の数を message に添える。
+    /// 要素が 1 つも一致しないときは添えない (D-154)
+    #[test]
+    fn text_cli_13_reports_textless_count() {
+        let dir = unique_temp_dir("cli-text-textless-13");
+        let floor = floor_file(&dir, ENABLED);
+        let env = MapEnv::new(&[(ENV_DEV_FORBID, "1"), (ENV_DEV_FLOOR, &floor)]);
+        let message = |elements: Vec<(usize, UiElement)>| -> String {
+            let mut w = World::new();
+            w.top = vec![top(0x20, "Notepad.exe", Rect::new(100, 50, 640, 480))];
+            w.elements = elements;
+            match go(
+                &["text", "--window", "notepad"],
+                &env,
+                "",
+                &mut MockDevices(w.shared()),
+                (false, false),
+            ) {
+                Outcome::Json {
+                    code: 13, value, ..
+                } => value["error"]["message"].as_str().unwrap().to_string(),
+                other => panic!("{other:?}"),
+            }
+        };
+        let m = message(vec![(0x20, element("保存", "button", None))]);
+        assert!(
+            m.contains("一致した要素 1 個は文字列 (値) を持たない"),
+            "{m}"
+        );
+        assert!(m.contains("find"), "{m}");
+        let m = message(vec![]);
+        assert!(m.contains("文字列を持つ要素が見つからない"), "{m}");
+        assert!(!m.contains("文字列 (値) を持たない"), "{m}");
     }
 
     /// find は password の要素を password == true で返し、text のキーは無い (D-090)
