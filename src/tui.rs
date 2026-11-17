@@ -305,7 +305,10 @@ impl Field {
                 "1 回の実行にかけてよい時間の上限。",
                 "実行の余裕 1000 ms より大きい値にする。",
             ],
-            Field::MaxTextLen => vec!["1 回の type で入力できる文字数の上限。"],
+            Field::MaxTextLen => vec![
+                "1 回の type で入力できる文字数、",
+                "clipboard で置ける文字数 (CRLF にそろえる前の数) の上限。",
+            ],
             Field::SentinelFile => vec![
                 "このファイルが存在したら、実行を止める (絶対パス)。",
                 "空なら使わない。",
@@ -320,6 +323,7 @@ impl Field {
             Field::CaptureIdleMs => vec![
                 "shot、pixel、focus (操作列でウィンドウを前面にする) の直前に、人の最後の入力からこれ以上の無操作を求める (ミリ秒)。",
                 "満たさなければ撮らず、色も読まず、前面にもせずに終了コード 10 で断る。0 なら求めない。ai-cu 自身の run の直後も数える。",
+                "clipboard (クリップボードに文字を置く) の直前にも、前面によらず求める (満たさなければ置かずに 10)。",
             ],
             Field::CaptureSaveDirs => vec![
                 "撮影の保存先を、このフォルダのどれかの下に限る。",
@@ -332,7 +336,7 @@ impl Field {
                 "道具の名前を , で区切る。",
             ],
             Field::IndicatorEnabled => vec![
-                "有効にすると、画面を変える操作 (マウス、キー、文字入力、focus、close、resize) の前に、画面の縁に青い枠と案内の札を出す。",
+                "有効にすると、画面を変える操作 (マウス、キー、文字入力、focus、close、resize、clipboard) の前に、画面の縁に青い枠と案内の札を出す。",
                 "枠が出ていなければ予告の間を待ってから動かす。無効なら予告の間も音も無い。",
                 "どれかの層で有効なら出す (追加の層 (--config など) に [indicator] が無ければ、その層は既定の有効で加わる)。",
             ],
@@ -1360,6 +1364,20 @@ impl App {
                             z.action_index, z.requested.width, z.requested.height, z.area
                         ));
                     }
+                }
+                // 置いた文そのものは結果に無い (D-157)。数と印だけを出す
+                for c in &r.clipboard {
+                    lines.push(format!(
+                        "クリップボードに置いた actions[{}]: {} 文字 / {} 行{}",
+                        c.action_index,
+                        c.chars,
+                        c.lines,
+                        if c.history_excluded {
+                            " (履歴と同期から外した)"
+                        } else {
+                            ""
+                        }
+                    ));
                 }
                 self.overlay = Overlay::RunResult {
                     title: "実行した".into(),
@@ -2460,7 +2478,7 @@ pub fn action_summary(a: &Action) -> String {
                 None => format!("{kind} {process} {width}x{height}{unit}{basis}"),
             }
         }
-        // 文そのものは出さない (D-157)。文言はステップ 4 で整える
+        // 文そのものは出さない (D-157)。数えるのは CRLF にそろえる前の文字数 (検証の max_text_len と同じ)
         Action::Clipboard { text } => format!("{kind} {} 文字", text.chars().count()),
     }
 }
@@ -2582,6 +2600,8 @@ fn confirm_lines(r: &PreflightReport) -> Vec<String> {
         Some(FirstBatch::Resize) => {
             "最初の操作は resize: 前面は変えず、対象の窓の大きさを変える (最小化・最大化なら 7、前面で人が使っていれば 10、見つからなければ 12 で止まる)".into()
         }
+        // clipboard はバッチを作らない (D-157)。clipboard を含むなら「待ちと撮影だけ」と書かない
+        None if r.clipboards > 0 => "入力のバッチは無い (待ち、撮影、clipboard だけ)".into(),
         None => "入力のバッチは無い (待ちと撮影だけ)".into(),
     });
     if r.closes > 0 {
@@ -2594,6 +2614,12 @@ fn confirm_lines(r: &PreflightReport) -> Vec<String> {
         lines.push(format!(
             "⚠ resize が {} 件: 窓の大きさを変える (前面は変えない)",
             r.resizes
+        ));
+    }
+    if r.clipboards > 0 {
+        lines.push(format!(
+            "⚠ clipboard が {} 件: クリップボードを上書きする (元の中身は戻らない)",
+            r.clipboards
         ));
     }
     if r.unrestricted {
@@ -6261,6 +6287,84 @@ mod tests {
         assert!(has(&text, "(題名は伏せた)"), "{text}");
         assert!(!has(&text, "None"), "{text}");
         assert!(!has(&text, "メモ帳"), "{text}");
+    }
+
+    /// clipboard (D-157): 確認の画面は上書きを警告し、要約にも結果にも置く文そのものを出さない。
+    /// [clipboard, key ctrl+v] は最初の入力のバッチが key なので、キー入力の注意が出る。設定のチェックリストにも並ぶ
+    #[test]
+    fn tui_confirm_and_result_describe_clipboard() {
+        let secret = "ひみつの文";
+        let r = report(
+            &format!(
+                r#"{{"type":"clipboard","text":"{secret}\n2"}},{{"type":"key","keys":"ctrl+v"}}"#
+            ),
+            ENABLED,
+        );
+        assert_eq!(r.clipboards, 1);
+        assert_eq!(r.first_batch, Some(FirstBatch::Keyboard));
+        let lines = confirm_lines(&r).join("\n");
+        assert!(lines.contains("clipboard が 1 件"), "{lines}");
+        assert!(lines.contains("元の中身は戻らない"), "{lines}");
+        assert!(lines.contains("最初の操作はキー入力"), "{lines}");
+        assert!(!lines.contains(secret), "{lines}");
+        // 1 行要約は文字数だけ (CRLF にそろえる前の数)
+        let summary = action_summary(&r.script.actions[0]);
+        assert_eq!(summary, "clipboard 7 文字");
+        assert!(!summary.contains(secret));
+        // clipboard だけの操作列はバッチが無い。「待ちと撮影だけ」と書かない
+        let only = report(r#"{"type":"clipboard","text":"a"}"#, ENABLED);
+        assert_eq!(only.first_batch, None);
+        let only_lines = confirm_lines(&only).join("\n");
+        assert!(
+            only_lines.contains("入力のバッチは無い (待ち、撮影、clipboard だけ)"),
+            "{only_lines}"
+        );
+        assert!(!only_lines.contains("待ちと撮影だけ"), "{only_lines}");
+
+        let mut a = app();
+        a.on_preflight(Ok(r));
+        let text = draw(&a, 160, 40);
+        assert!(has(&text, "clipboard が 1 件"), "{text}");
+        assert!(!has(&text, secret), "{text}");
+        a.update(&press(KeyCode::Char('y')));
+        a.set_self_window(Some(me()));
+        a.tick(RUN_COUNTDOWN_MS);
+        a.on_run_finished(Ok(crate::run::RunReport {
+            executed: 2,
+            screenshots: Vec::new(),
+            focused: Vec::new(),
+            closed: Vec::new(),
+            waited: Vec::new(),
+            resized: Vec::new(),
+            clipboard: vec![crate::run::ClipboardInfo {
+                action_index: 0,
+                chars: 8,
+                lines: 2,
+                history_excluded: true,
+            }],
+            elapsed_ms: 900,
+        }));
+        let text = draw(&a, 160, 32);
+        assert!(
+            has(
+                &text,
+                "クリップボードに置いた actions[0]: 8 文字 / 2 行 (履歴と同期から外した)"
+            ),
+            "{text}"
+        );
+        assert!(!has(&text, secret), "{text}");
+
+        // allow.actions のチェックリストに clipboard が並ぶ (ActionKind::ALL から出る)
+        let mut a = app();
+        select(&mut a, Field::List(Side::Allow, ListKind::Actions));
+        a.update(&press(KeyCode::Enter));
+        a.update(&press(KeyCode::Enter));
+        assert!(matches!(a.overlay, Overlay::Checklist { .. }));
+        let text = draw(&a, 120, 40);
+        assert!(
+            text.lines().any(|l| l.contains("[ ] clipboard")),
+            "clipboard は出す\n{text}"
+        );
     }
 
     #[test]

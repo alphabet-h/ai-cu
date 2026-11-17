@@ -81,7 +81,7 @@ cargo install --git https://github.com/alphabet-h/ai-cu --locked
 | `ai-cu validate <FILE\|->` | 操作列 JSON を検証する (装置に触れない) |
 | `ai-cu run <FILE\|-> [--dry-run]` | 操作列 JSON を実行する。`--dry-run` は装置に触れず、検証と展開した手順だけを出す |
 | `ai-cu schema` | 操作列 JSON の書式を JSON で出す |
-| `ai-cu click X Y` など | 一手ずつの操作 (`click`、`double-click`、`drag`、`move`、`scroll`、`type`、`key`、`focus`、`close`、`resize`、`wait-for`)。`--shot` で操作の後に撮る |
+| `ai-cu click X Y` など | 一手ずつの操作 (`click`、`double-click`、`drag`、`move`、`scroll`、`type`、`key`、`focus`、`close`、`resize`、`clipboard`、`wait-for`)。`--shot` で操作の後に撮る |
 | `ai-cu config show\|path\|validate` | 設定の層、場所、検証結果を出す (読み取り専用) |
 | `ai-cu mcp [--log PATH]` | MCP サーバー (stdio) として待ち受ける ([MCP サーバーモード](#mcp-サーバーモード)) |
 | `ai-cu` (引数なし) | 設定を編集する TUI (端末のときだけ)。`r` で操作列 JSON を選んで検証・実行できる |
@@ -123,7 +123,7 @@ codex mcp add ai-cu -- C:\Users\<名前>\.cargo\bin\ai-cu.exe mcp    # Codex CLI
 ```
 
 - 登録するのは、置いた `ai-cu.exe` の絶対パス (上の例は `cargo install` の置き場。ビルド済みの exe なら置いたフォルダ。`ai-cu guide --setup` が、その実行ファイルのパスを埋めた文例を出す)。`target/release` を直に登録すると、常駐の間 `cargo build --release` が失敗する
-- 道具は 21 個: 読み取りの `guide`、`config`、`windows`、`shot`、`pixel`、`find`、`tree`、`text`、`wait_for`、`status`、一手ずつの操作、操作列の `run`
+- 道具は 22 個: 読み取りの `guide`、`config`、`windows`、`shot`、`pixel`、`find`、`tree`、`text`、`wait_for`、`status`、一手ずつの操作、操作列の `run`
 - 設定は CLI と同じ解決で、呼び出しごとに読み直す
 - 撮った画像は結果に `image` (png、base64) として入り、既定で長辺を 1568 に縮める
 - クライアントの取り消し (Claude Code の Esc) と標準入力の EOF で、実行を止める
@@ -148,6 +148,7 @@ codex mcp add ai-cu -- C:\Users\<名前>\.cargo\bin\ai-cu.exe mcp    # Codex CLI
 | `focus` | 許可されたアプリのウィンドウを前面にする |
 | `close` | 許可されたアプリのウィンドウに `WM_CLOSE` を置く (× ボタンと同じ) |
 | `resize` | 許可されたアプリの窓の大きさを変える (中身か枠、物理か論理。左上と前面は変えない) |
+| `clipboard` | クリップボードに文字を置く (Win+V の履歴とクラウドの同期から外す。元の中身は戻らない。貼るのは続く `key` の `ctrl+v`) |
 | `wait_for` | ウィンドウ、要素、文字列が出る (消える) まで待つ |
 | `wait_stable` | 画面が落ち着くまで待つ |
 | `wait_change` | 画面が変わるまで待つ |
@@ -198,7 +199,7 @@ keys = ["ctrl+w"]
 [limits]
 max_actions = 1000        # 1 回の操作列の最大の操作数
 max_duration_ms = 600000  # 1 回の実行の最大時間 (操作の前の予告の間は数えず、予告の後から数える)
-max_text_len = 10000      # type の最大の文字数
+max_text_len = 10000      # type と clipboard の最大の文字数
 
 [stop]
 sentinel_file = ""        # このファイルが存在したら停止する (絶対パス。空なら使わない)
@@ -206,7 +207,7 @@ mouse_threshold_px = 50   # 利用者がマウスをこれ以上動かしたら�
 
 [capture]
 full_screen = false       # 全画面 (region の省略、画面全体を覆う矩形) の撮影を許すか (既定 false)
-min_idle_ms = 3000        # shot、pixel、focus、前面にある対象への close と resize の前に求める、人の最後の入力からの無操作 (ミリ秒。0 なら求めない)
+min_idle_ms = 3000        # shot、pixel、focus、前面にある対象への close と resize、clipboard (前面によらず) の前に求める、人の最後の入力からの無操作 (ミリ秒。0 なら求めない)
 save_dirs = []            # 撮影の保存先として許すフォルダ (絶対パス)。空なら制限なし。書いた層はすべてが許すときだけ通す
 
 [mcp]
@@ -242,14 +243,14 @@ sound = false             # 予告の間に入るときに通知音を 1 回鳴�
 | 0 | - | 成功 |
 | 1 | `internal` | 内部エラー |
 | 2 | `usage` | 使い方の誤り (引数、端末なしでの引数なし起動) |
-| 3 | `invalid_script` | 操作列の誤り (JSON、未知のフィールド、形、画面の外の座標、`resize` の論理の大きさを換算すると上限を超える) |
+| 3 | `invalid_script` | 操作列の誤り (JSON、未知のフィールド、形、画面の外の座標、`resize` の論理の大きさを換算すると上限を超える、`clipboard` の文が空か 65536 文字を超えるか制御文字を含む) |
 | 4 | `policy_denied` | 設定による拒否 (総スイッチ、allow / deny、組み込みの拒否、上限、保存先、パスワード欄) |
 | 5 | `config` | 設定ファイルの誤り (構文、未知のキー、未知の版、指定したファイルが無い) |
 | 6 | `stopped` | 緊急停止 (目印のファイル、最大実行時間、利用者のマウス操作、カーソルの動く範囲 (ClipCursor) への寄せ) |
 | 7 | `foreground_guard` | フォアグラウンドガード (届く先のウィンドウが不許可、管理者権限、ウィンドウが無い、ai-cu を起動した側のウィンドウなど) |
-| 8 | `os_error` | OS の呼び出しの失敗 (`SendInput`、撮影、保存、UI Automation の時間切れ、`resize` で DPI か窓の大きさを読めない) |
+| 8 | `os_error` | OS の呼び出しの失敗 (`SendInput`、撮影、保存、UI Automation の時間切れ、`resize` で DPI か窓の大きさを読めない、`clipboard` で別のアプリがクリップボードを開いたまま) |
 | 9 | `forbidden_dev_env` | 開発シェル (`AI_CU_DEV_FORBID_REAL_INPUT`) での実入力と実画面の撮影の拒否 |
-| 10 | `user_active` | 人が操作中なので、撮らなかった、前面にしなかった、閉じなかった、大きさを変えなかった、送らなかった |
+| 10 | `user_active` | 人が操作中なので、撮らなかった、前面にしなかった、閉じなかった、大きさを変えなかった、クリップボードに置かなかった、送らなかった |
 | 11 | `focus_failed` | `focus` の対象を前面にできなかった |
 | 12 | `window_not_found` | 対象のウィンドウが見つからない (許可の外と ai-cu を起動した側の窓は探さない)、最小化されている、または画面の外 |
 | 13 | `element_not_found` | `text` の条件で、文字列を持つ要素が無い |
@@ -281,7 +282,8 @@ sound = false             # 予告の間に入るときに通知音を 1 回鳴�
 - **前面化の制限**: `focus` は `SetForegroundWindow` を 1 回呼ぶだけで、前面ロックの回避策は使わない
 - **閉じる操作の制限**: `close` は題名を必須にして `WM_CLOSE` を 1 回置くだけで、強制終了はしない
 - **大きさの変更の制限**: `resize` は `close` と同じ守り (許可、名指しの範囲、無効な窓、人の操作中、入力の排他、枠) を通し、大きさだけを変える。左上、前面、Z 順は変えず、最小化・最大化の窓は元に戻さずに断る
-- **実行時ガード (開発用)**: 環境変数 `AI_CU_DEV_FORBID_REAL_INPUT` があると、入力、撮影、前面化、閉じる操作、大きさの変更の最下層が拒否する
+- **クリップボードの上書き**: `clipboard` は `resize` と同じ許可 (`input_enabled` と `allow.actions`)、入力の排他、枠を通し、人が操作中なら前面によらず置かない。置く文には `type` と同じ文字数の上限とキーの規則 (改行は `enter`、タブは `tab`) を掛け、Win+V の履歴とクラウドの同期から外す印を付ける。置いた文は出力に出さない。元の中身は戻らず、置いた文は他のアプリから読める (秘密を置かない)
+- **実行時ガード (開発用)**: 環境変数 `AI_CU_DEV_FORBID_REAL_INPUT` があると、入力、撮影、前面化、閉じる操作、大きさの変更、クリップボードの書き込みの最下層が拒否する
 - **DPI の確認**: Per-Monitor V2 の DPI 認識を宣言できなければ、座標を扱う `run`、`shot`、`pixel` を拒否する
 - **後始末**: 停止や失敗のときも、押したかもしれないキーとボタンを離す
 - **TUI からの実行**: CLI の `run` と同じ経路を通り、判定は保存済みの設定ファイルで行う
