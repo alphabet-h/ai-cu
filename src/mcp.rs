@@ -6383,6 +6383,80 @@ mod tests {
         assert_eq!(w.resize_calls.len(), 1);
     }
 
+    /// D-153 の面: `allow.actions` に `wait_for` だけを並べた床 (総スイッチは真) では、道具 wait_for は
+    /// 窓を探さず、要素も画面も読まずに 4 (rule は allow.actions、fix に screenshot) で返り、応答に窓の題名を出さない。
+    /// `screenshot` も並べれば今までどおり満たされる (対照: 同じ世界で窓を探して見つける)
+    #[test]
+    fn mcp_wait_for_tool_needs_screenshot_in_allow_actions() {
+        let dir = unique_temp_dir("mcp-wait-for-needs-shot");
+        let only_wait = floor_file(
+            &dir,
+            &format!("{ENABLED}[allow]\nactions = [\"wait_for\"]\nprocesses = [\"notepad.exe\"]\n"),
+        );
+        let mut f = Fixture::new(MapEnv::default());
+        let world = f.world.clone();
+        {
+            let mut info = window("notepad.exe", "Notepad");
+            info.hwnd = 0x20;
+            info.title = "a.txt - メモ帳".into();
+            world.borrow_mut().top = vec![crate::device::TopWindow {
+                info,
+                rect: Some(Rect::new(100, 100, 800, 600)),
+                minimized: false,
+            }];
+        }
+        let mut s = f.server(paths(&only_wait));
+        for (id, args) in [
+            json!({ "process": "notepad.exe", "timeout_ms": 300 }),
+            json!({ "process": "notepad.exe", "title": "a.txt", "timeout_ms": 300 }),
+            json!({ "process": "notepad.exe", "element": { "name": "保存" }, "timeout_ms": 300 }),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let r = reply(&mut s, &call(id as i64 + 1, "wait_for", args));
+            assert_eq!(r["result"]["isError"], true, "{r}");
+            assert_eq!(exit_code(&r), 4, "{r}");
+            let v = text_json(&r);
+            assert_eq!(v["ok"], false, "{v}");
+            assert_eq!(v["error"]["code"], "policy_denied", "{v}");
+            assert_eq!(v["error"]["rule"], "allow.actions", "{v}");
+            let fix = v["error"]["fix"].as_str().unwrap();
+            assert!(fix.contains("screenshot"), "{fix}");
+            // 断った文は issues の message に出る (error.message は「N 件の問題」。D-131)
+            let message = v["issues"][0]["message"].as_str().unwrap();
+            assert!(message.contains("wait_for"), "{message}");
+            assert!(message.contains("撮影"), "{message}");
+            assert!(!r.to_string().contains("メモ帳"), "{r}");
+            let w = world.borrow();
+            assert_eq!(w.find_window_calls, 0, "窓を探さない");
+            assert_eq!(w.ui_element_calls, 0, "要素を読まない");
+            assert_eq!(w.capture_calls, 0, "撮らない");
+            assert!(w.sent.is_empty());
+        }
+        // 対照: screenshot も並べた床では満たされ、窓を探す
+        let with_shot = floor_file(
+            &unique_temp_dir("mcp-wait-for-with-shot"),
+            &format!(
+                "{ENABLED}[allow]\nactions = [\"wait_for\", \"screenshot\"]\nprocesses = [\"notepad.exe\"]\n"
+            ),
+        );
+        let mut s = f.server(paths(&with_shot));
+        let r = reply(
+            &mut s,
+            &call(
+                10,
+                "wait_for",
+                json!({ "process": "notepad.exe", "timeout_ms": 300 }),
+            ),
+        );
+        assert_eq!(r["result"]["isError"], false, "{r}");
+        let v = text_json(&r);
+        assert_eq!(v["ok"], true, "{v}");
+        assert_eq!(v["waited"][0]["window"]["hwnd"], 0x20, "{v}");
+        assert!(world.borrow().find_window_calls > 0);
+    }
+
     /// 手引きの MCP の節は、補助プロセスで前面化を試すことと、それでも断られたら人に頼むことを書く (D-057)
     #[test]
     fn guide_explains_focus_helper_for_mcp() {

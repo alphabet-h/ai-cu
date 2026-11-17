@@ -80,7 +80,7 @@ ai-cu text --window notepad.exe --type document    # 文書の本文を読む
 - 窓の名指し (`--window`、`focus` / `close` / `resize` / `wait_for` の対象) は、`windows` に出る窓だけから探す。一致する窓のうち、ツールチップなどのポップアップらしい窓は後に回す (本体が一致すれば本体に解ける。D-143)。ポップアップの中身 (メニューやフライアウトの項目) を読むときと、狙いを確かにしたいときは `--window-title` (focus / close / resize / wait-for では `--title`、操作列では `title`。例 PopupHost) で絞る。許可の外と ai-cu を起動した側の窓は、あっても見つからないときと同じ 12 (`focus` は 11 の `not_found`) で、`wait_for` では無いと数える (待つと 15)。12 が続くなら `windows` に対象が出ているかを確かめ、出ていなければ人間に許可を頼む。実行ファイル名が許可の外なら、窓が無くても 4
 - 起動の直後の窓では、`find` が `ok: true` の空の結果を返し、2 回目で取れた事例がある。空を「無い」と決めず、`wait_for` の `element` で待つか、1 回読み直す
 
-条件がそろうまで待つなら `wait_for` (読むだけ。許可は `find` と同じ)。起動やクリックの後に、固定の `wait` や「撮って見直す」往復の代わりに使う。
+条件がそろうまで待つなら `wait_for` (読むだけ。許可は `find` と同じ撮影の許可に加え、`allow.actions` を書いた設定では `wait_for` も要る。D-153)。起動やクリックの後に、固定の `wait` や「撮って見直す」往復の代わりに使う。
 
 ```
 ai-cu wait-for notepad.exe --name "保存" --type button --timeout-ms 5000   # ボタンが出るまで待つ

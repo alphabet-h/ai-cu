@@ -11050,6 +11050,46 @@ mod tests {
         }
     }
 
+    /// D-153 の面: `allow.actions` に画面の待ちの名前だけを並べた設定 (総スイッチは真) では、実行器は
+    /// 撮らずに 4 (rule は allow.actions、fix に screenshot) で止まる。`screenshot` も並べれば今までどおり満たされる
+    #[test]
+    fn wait_screen_needs_screenshot_in_allow_actions() {
+        for kind in ["wait_stable", "wait_change"] {
+            let json = screen_json(kind, r#","timeout_ms":1000"#);
+            let world = screen_world(Vec::new());
+            let p = policy(&format!("{ENABLED}[allow]\nactions = [\"{kind}\"]\n"));
+            let (r, images) = exec(&world, &p, &mut StopSet::new(), &script(&json));
+            let e = r.unwrap_err();
+            assert_eq!(e.kind, ErrorKind::PolicyDenied, "{kind}: {e}");
+            assert!(e.message.contains(kind), "{kind}: {}", e.message);
+            assert!(e.message.contains("撮影"), "{kind}: {}", e.message);
+            let v = e.to_json();
+            assert_eq!(v["error"]["rule"], "allow.actions", "{kind}: {v}");
+            let fix = v["error"]["fix"].as_str().unwrap();
+            assert!(fix.contains("screenshot"), "{kind}: {fix}");
+            let w = world.borrow();
+            assert_eq!(w.capture_calls, 0, "{kind}: 撮らない");
+            assert!(w.sent.is_empty(), "{kind}");
+            assert!(images.written.is_empty(), "{kind}");
+            drop(w);
+            // 対照: screenshot も並べれば満たされる (動かない画面は wait_stable が落ち着き、
+            // 変わる画面は wait_change が変化を捉える)
+            let frames = if kind == "wait_change" {
+                vec![0, 100]
+            } else {
+                Vec::new()
+            };
+            let world = screen_world(frames);
+            let p = policy(&format!(
+                "{ENABLED}[allow]\nactions = [\"{kind}\", \"screenshot\"]\n"
+            ));
+            let (r, _) = exec(&world, &p, &mut StopSet::new(), &script(&json));
+            let report = r.unwrap_or_else(|e| panic!("{kind}: {e}"));
+            assert_eq!(report.waited.len(), 1, "{kind}: {report:?}");
+            assert!(world.borrow().capture_calls > 0, "{kind}");
+        }
+    }
+
     // --- 画面の待ちの隠れの猶予 (D-082)。メモ帳 800x600 で、frames の大きな値は全点が変わったフレーム ---
 
     const ALL_DARK: usize = 1_000_000;
