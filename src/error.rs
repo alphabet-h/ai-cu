@@ -220,6 +220,8 @@ pub mod reason {
     pub const OFF_MONITOR: &str = "off_monitor";
     /// 7 と 6: 点がカーソルの動く範囲 (ClipCursor) の外。7 は送る前、6 は送った後に寄せられた (D-151)
     pub const CURSOR_CLIPPED: &str = "cursor_clipped";
+    /// 8: clipboard で、他のアプリがクリップボードを開いていて、試し直しの上限まで開けなかった。中身は変わらない (D-157)
+    pub const CLIPBOARD_BUSY: &str = "clipboard_busy";
 }
 
 /// JSON にした失敗の error オブジェクト (`to_json()` の `error`) が、人か停止要因に止められた実行のものか (D-093)。

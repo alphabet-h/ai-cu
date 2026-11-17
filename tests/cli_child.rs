@@ -263,6 +263,50 @@ fn key_dry_run_unknown_name_lists_usable_names() {
     assert!(message.contains("kanji"), "{v}");
 }
 
+/// `ai-cu clipboard -` は標準入力を読み切って置く文にする (D-157)。dry-run の計画は文を出さず、chars と lines だけ。
+/// 末尾の改行も落とさない ("x\ny\n" は CRLF にそろえて 6 文字、3 行)。実のクリップボードには触れない
+#[test]
+fn clipboard_reads_text_from_stdin_dash() {
+    let dir = temp_dir("clipboard-stdin");
+    let floor = dir.join("floor.toml");
+    std::fs::write(&floor, "version = 1\n[general]\ninput_enabled = true\n").unwrap();
+    let floor_s = floor.display().to_string();
+    let (code, stdout, stderr) = run(
+        &["clipboard", "-", "--dry-run"],
+        &[("AI_CU_DEV_FLOOR", &floor_s)],
+        b"x\ny\n",
+    );
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    let v: serde_json::Value = serde_json::from_str(&stdout).expect("JSON");
+    assert_eq!(v["dry_run"], true, "{v}");
+    let plan = v["plan"].as_array().unwrap();
+    assert_eq!(plan.len(), 1, "{v}");
+    let step = plan[0]["steps"]
+        .as_array()
+        .and_then(|s| s.iter().find(|s| s["step"] == "clipboard"))
+        .unwrap_or_else(|| panic!("clipboard の手順が無い: {v}"));
+    assert_eq!(step["chars"], 6, "{v}");
+    assert_eq!(step["lines"], 3, "{v}");
+    assert!(step.get("text").is_none(), "{v}");
+}
+
+/// `ai-cu clipboard -` の標準入力が UTF-8 でなければ使い方の誤り (2) で、何も置かない (D-157)
+#[test]
+fn clipboard_stdin_non_utf8_is_usage_error() {
+    let dir = temp_dir("clipboard-non-utf8");
+    let floor = dir.join("floor.toml");
+    std::fs::write(&floor, "version = 1\n[general]\ninput_enabled = true\n").unwrap();
+    let floor_s = floor.display().to_string();
+    let (code, stdout, stderr) = run(
+        &["clipboard", "-", "--dry-run"],
+        &[("AI_CU_DEV_FLOOR", &floor_s)],
+        &[0x61, 0xff, 0xfe, 0x62],
+    );
+    assert_eq!(code, 2, "stdout={stdout} stderr={stderr}");
+    let v: serde_json::Value = serde_json::from_str(&stdout).expect("JSON");
+    assert_eq!(v["error"]["code"], "usage", "{v}");
+}
+
 /// close の対象を --window で渡した usage の誤りに、対象は位置引数だと伝える hint が
 /// JSON と標準エラーの両方に載る。--window が無い誤りには載せない (D-086)
 #[test]
@@ -454,7 +498,7 @@ fn mcp_child_discover_list_guide_click_then_eof_exits_0_with_json_only_stdout() 
         serde_json::json!(["2026-07-28"])
     );
     assert_eq!(lines[0]["result"]["resultType"], "complete");
-    assert_eq!(lines[1]["result"]["tools"].as_array().unwrap().len(), 21);
+    assert_eq!(lines[1]["result"]["tools"].as_array().unwrap().len(), 22);
     // tools/list は設定 (承認の印) で変わるので private、server/discover は public のまま (D-078)
     assert_eq!(lines[1]["result"]["cacheScope"], "private");
     assert_eq!(lines[0]["result"]["cacheScope"], "public");
@@ -511,7 +555,7 @@ fn mcp_child_legacy_initialize_initialized_tools_list_ping_then_eof() {
         by_id(1)["result"]["capabilities"],
         serde_json::json!({ "tools": {} })
     );
-    assert_eq!(by_id(2)["result"]["tools"].as_array().unwrap().len(), 21);
+    assert_eq!(by_id(2)["result"]["tools"].as_array().unwrap().len(), 22);
     assert_eq!(by_id(3)["result"], serde_json::json!({}));
 }
 

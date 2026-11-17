@@ -30,10 +30,11 @@ use crate::run::{
 pub use crate::runner::{DeviceFactory, RealDevices};
 use crate::runner::{RunOptions, read_script_file, require_dpi};
 use crate::script::{
-    Action, ActionKind, Button, ClickModifier, DEFAULT_DRAG_MS, DEFAULT_DRAG_STEPS,
-    DEFAULT_SETTLE_TIMEOUT_MS, DEFAULT_SHOT_SCALE, DEFAULT_STABLE_MS, DEFAULT_TYPE_INTERVAL_MS,
-    DEFAULT_WAIT_FOR_TIMEOUT_MS, ElementFilter, MAX_SINGLE_WAIT_MS, MAX_STABLE_MS, MIN_STABLE_MS,
-    Pos, RESIZE_MAX, Region, ResizeArea, SCRIPT_VERSION, Script, Settle, WindowTarget,
+    Action, ActionKind, Button, CLIPBOARD_MAX_CHARS, ClickModifier, DEFAULT_DRAG_MS,
+    DEFAULT_DRAG_STEPS, DEFAULT_SETTLE_TIMEOUT_MS, DEFAULT_SHOT_SCALE, DEFAULT_STABLE_MS,
+    DEFAULT_TYPE_INTERVAL_MS, DEFAULT_WAIT_FOR_TIMEOUT_MS, ElementFilter, MAX_SINGLE_WAIT_MS,
+    MAX_STABLE_MS, MIN_STABLE_MS, Pos, RESIZE_MAX, Region, ResizeArea, SCRIPT_VERSION, Script,
+    Settle, WindowTarget,
 };
 use crate::validate::{Validation, validate};
 
@@ -93,7 +94,7 @@ pub fn guide_summary() -> String {
     name = "ai-cu",
     version = crate::build_info::VERSION,
     about = "AI が Windows のデスクトップを操作するための CLI (一手ずつのサブコマンド、または JSON の操作列)",
-    after_help = "初めて使う AI は、まず `ai-cu guide` を読む (要点版。座標の注意、前面化、終了コードごとの次の手)。全文は `ai-cu guide --full` (使い方の流れ、一手ずつの操作、操作列 JSON)。\n一手ずつ操作するなら、click / double-click / drag / move / scroll / type / key / focus / close / resize / wait-for の各サブコマンド (`--shot PATH --window PROCESS` か `--shot PATH --region X,Y,W,H` で操作の後に撮る。出力は run と同じ)。focus / close / resize / wait-for の対象は位置引数で、`--window` は撮る対象 (`--shot` と組む)。\n要素の位置は `find --window PROCESS [--name TEXT] [--type TYPE]` (UI Automation) で取れ、`center` をそのまま click に渡せる。何があるか分からないときは、先に `tree --window PROCESS` で要素の木 (1 行 1 要素の字下げ、`@x,y` は center) を見る。文字列は `text`。\n引数なしで、標準入力と標準出力の両方が端末のときは、設定を編集する TUI を起動する。\n`mcp` は MCP サーバー (stdio) として待ち受ける。クライアントの設定に `ai-cu mcp` を登録する (README の「MCP サーバーモード」)。\n終了コード: 0 成功 / 1 内部 / 2 使い方 / 3 操作列 / 4 ポリシー / 5 設定 / 6 緊急停止 / 7 フォアグラウンドガード / 8 OS / 9 開発シェルでの実入力の拒否 / 10 人が操作中 (shot、pixel、focus を行わない) / 11 前面にできない (focus) / 12 対象のウィンドウが無い (window) / 13 文字列を持つ要素が無い (text) / 14 画面がロックかセーバー (何も送らない) / 15 条件が時間内に満たされない (wait_for、run の wait_stable と wait_change。何も送らない) / 16 別の ai-cu が画面を操作中か、人が TUI を開いていて待ちきれない (何も送らない)"
+    after_help = "初めて使う AI は、まず `ai-cu guide` を読む (要点版。座標の注意、前面化、終了コードごとの次の手)。全文は `ai-cu guide --full` (使い方の流れ、一手ずつの操作、操作列 JSON)。\n一手ずつ操作するなら、click / double-click / drag / move / scroll / type / key / focus / close / resize / wait-for の各サブコマンド (`--shot PATH --window PROCESS` か `--shot PATH --region X,Y,W,H` で操作の後に撮る。出力は run と同じ)。focus / close / resize / wait-for の対象は位置引数で、`--window` は撮る対象 (`--shot` と組む)。\n`clipboard TEXT` (`-` なら標準入力) はクリップボードに文字を置く (Win+V の履歴と同期から外す。元の中身は戻らない。秘密を置かない)。貼るのは続く `key ctrl+v` で、入力の前に置く。\n要素の位置は `find --window PROCESS [--name TEXT] [--type TYPE]` (UI Automation) で取れ、`center` をそのまま click に渡せる。何があるか分からないときは、先に `tree --window PROCESS` で要素の木 (1 行 1 要素の字下げ、`@x,y` は center) を見る。文字列は `text`。\n引数なしで、標準入力と標準出力の両方が端末のときは、設定を編集する TUI を起動する。\n`mcp` は MCP サーバー (stdio) として待ち受ける。クライアントの設定に `ai-cu mcp` を登録する (README の「MCP サーバーモード」)。\n終了コード: 0 成功 / 1 内部 / 2 使い方 / 3 操作列 / 4 ポリシー / 5 設定 / 6 緊急停止 / 7 フォアグラウンドガード / 8 OS / 9 開発シェルでの実入力の拒否 / 10 人が操作中 (shot、pixel、focus を行わない) / 11 前面にできない (focus) / 12 対象のウィンドウが無い (window) / 13 文字列を持つ要素が無い (text) / 14 画面がロックかセーバー (何も送らない) / 15 条件が時間内に満たされない (wait_for、run の wait_stable と wait_change。何も送らない) / 16 別の ai-cu が画面を操作中か、人が TUI を開いていて待ちきれない (何も送らない)"
 )]
 pub struct Cli {
     /// 追加の設定ファイル。deny を足せるが allow は広げられない (人間の設定が基本の層)
@@ -395,6 +396,14 @@ pub enum Command {
         #[command(flatten)]
         step: StepOpts,
     },
+    /// 一手ずつ: クリップボードに文字を置く (改行は CRLF にそろえる。Win+V の履歴と同期から外す。元の中身は戻らない。
+    /// 入力は送らない。貼るのは続く key ctrl+v。D-157)
+    Clipboard {
+        /// 置く文 (1 以上 65536 以下の文字)。`-` なら標準入力を UTF-8 で読み切る (末尾の改行も置く)
+        text: String,
+        #[command(flatten)]
+        step: StepOpts,
+    },
     // 条件がそろうまで待つ wait-for (D-068)
     /// 一手ずつ: 対象のウィンドウ、その要素、要素の文字列が出る (--absent なら消える) まで待つ。読むだけ
     WaitFor {
@@ -595,6 +604,22 @@ fn parse_region(s: &str) -> Result<Region, String> {
     })
 }
 
+/// 一手ずつの type と clipboard の文: `-` なら標準入力を UTF-8 で読み切り (そのまま。末尾の改行も残す)、
+/// それ以外は引数のまま。UTF-8 でなければ 2 の usage
+fn text_or_stdin(text: &str, stdin: &mut dyn Read) -> Result<String, AppError> {
+    if text != "-" {
+        return Ok(text.to_string());
+    }
+    let mut s = String::new();
+    stdin.read_to_string(&mut s).map_err(|e| {
+        AppError::new(
+            ErrorKind::Usage,
+            format!("標準入力を UTF-8 として読めない: {e}"),
+        )
+    })?;
+    Ok(s)
+}
+
 /// 一手ずつの操作なら、その共通オプション。
 pub fn step_opts(cmd: &Command) -> Option<&StepOpts> {
     match cmd {
@@ -608,6 +633,7 @@ pub fn step_opts(cmd: &Command) -> Option<&StepOpts> {
         | Command::Focus { step, .. }
         | Command::Close { step, .. }
         | Command::Resize { step, .. }
+        | Command::Clipboard { step, .. }
         | Command::WaitFor { step, .. } => Some(step),
         _ => None,
     }
@@ -681,21 +707,14 @@ pub fn step_script(cmd: &Command, stdin: &mut dyn Read) -> Result<Script, AppErr
         }
         Command::Type {
             text, interval_ms, ..
-        } => {
-            let text = if text == "-" {
-                let mut s = String::new();
-                stdin
-                    .read_to_string(&mut s)
-                    .map_err(|e| usage(format!("標準入力を UTF-8 として読めない: {e}")))?;
-                s
-            } else {
-                text.clone()
-            };
-            Action::Type {
-                text,
-                interval_ms: interval_ms.unwrap_or(DEFAULT_TYPE_INTERVAL_MS),
-            }
-        }
+        } => Action::Type {
+            text: text_or_stdin(text, stdin)?,
+            interval_ms: interval_ms.unwrap_or(DEFAULT_TYPE_INTERVAL_MS),
+        },
+        // clipboard (D-157): type と同じく `-` なら標準入力 (末尾の改行も落とさない)
+        Command::Clipboard { text, .. } => Action::Clipboard {
+            text: text_or_stdin(text, stdin)?,
+        },
         Command::Key { keys, .. } => Action::Key { keys: keys.clone() },
         Command::Focus { process, title, .. } => Action::Focus {
             process: process.clone(),
@@ -2103,7 +2122,8 @@ pub fn schema() -> Value {
             "wait_for": { "process": "対象のウィンドウの実行ファイル名 (focus と同じ探し方)", "title": "省略可。題名に含む文字列", "element": { "name": "省略可。要素の名前に含む文字列", "type": "省略可。要素の種類 (find --help の一覧)" }, "text": "省略可。要素の文字列に含む文字列 (改行は LF にそろえる。大文字小文字を区別。パスワードの要素は読まずに飛ばす。値を持たない要素は読まない (名前の変化を待つなら text を外し、待つ字を element.name に入れる))", "absent": "真偽 (既定 false)。true なら無くなるまで待つ", "timeout_ms": "上限 (既定 10000、最大 600000)。超えたら終了コード 15 (何も送らない)", "備考": "条件は一番細かい指定 (text > element > window)。250 ms ごとに確かめる。満たされると結果の waited[] に窓と要素 (center) が入る。absent が最初の確認で満たされると (timeout_ms 0 は除く) waited[].note に注意が付く" },
             "wait_stable": { "region": "省略可。撮る矩形 (screenshot と同じ。window と排他。両方省略は全画面で、既定の設定では拒否)", "window": { "process": "省略可。撮る対象のウィンドウ (screenshot と同じ探し方。撮るたびに矩形を解く)", "title": "省略可" }, "stable_ms": "静けさが続く長さ (既定 300、100 以上 60000 以下)", "threshold": "直前のフレームとの差 (変わった点の割合) の許容 (0 以上 1 未満。既定 0)", "timeout_ms": "上限 (既定 10000、stable_ms 以上 600000 以下)。超えたら終了コード 15 (unmet: stable。何も送らない)", "備考": "100 ms ごとに撮り、長辺 256 に縮めて比べる。窓が動けば変わったと数える。撮るたびに screenshot と同じ判定 (撮影の許可、deny の窓、ロック) を通す。満たされると結果の waited[] に rect が入る" },
             "wait_change": { "region": "省略可 (wait_stable と同じ)", "window": "省略可 (wait_stable と同じ)", "threshold": "待ち始めの画像 (基準) との差がこれを超えたら変わった (0 以上 1 未満。既定 0.001)", "timeout_ms": "上限 (既定 10000、1 以上 600000 以下)。超えたら終了コード 15 (unmet: change。何も送らない)", "備考": "100 ms ごとに撮り、基準と比べる (直前ではない)。狭い region ではキャレットの点滅でも満たしうる。満たされると結果の waited[] に rect と changed_ratio が入る" },
-            "resize": { "process": "実行ファイル名 (focus と同じ探し方)", "title": "省略可。題名に含む文字列 (大文字小文字を無視)。省略するとそのプロセスの最前のウィンドウ。撮影の許可 (general.capture_enabled と actions の screenshot) が無いと、title の指定は 4 で、resized の title は null", "width": format!("幅 (1 以上 {RESIZE_MAX} 以下)"), "height": format!("高さ (1 以上 {RESIZE_MAX} 以下)"), "logical": "真偽 (既定 false = 物理ピクセル)。true なら論理の大きさで、窓が載っている画面の有効 DPI / 96 で物理に換算する (四捨五入)。換算後が上限を超えれば実行時に 3 (validate と dry_run では見えない)。DPI を読めなければ 8", "area": "client | frame (既定 client = 中身。frame は見えている枠)", "備考": "左上は動かさず、前面も Z 順も変えず、入力も送らない。最小化・最大化の窓は 7 (reason minimized / maximized。元に戻さない)、無効な窓は 7 (target_disabled)、応答しない窓は 7 (not_responding。要求が後から効いて重なるので送らない)、対象が前面で人が操作中なら 10、見つからなければ 12、大きさの読みが壊れていれば (中身か枠が外側より大きい) 8。成功の出力の resized[] に frame と client (物理の矩形)、requested (物理の狙い)、dpi、exact (1 秒のうちに基準が狙いに届いたか。false なら frame と client が実際の大きさ) が入る", "例": { "type": "resize", "process": "notepad.exe", "width": 1280, "height": 720, "logical": true } }
+            "resize": { "process": "実行ファイル名 (focus と同じ探し方)", "title": "省略可。題名に含む文字列 (大文字小文字を無視)。省略するとそのプロセスの最前のウィンドウ。撮影の許可 (general.capture_enabled と actions の screenshot) が無いと、title の指定は 4 で、resized の title は null", "width": format!("幅 (1 以上 {RESIZE_MAX} 以下)"), "height": format!("高さ (1 以上 {RESIZE_MAX} 以下)"), "logical": "真偽 (既定 false = 物理ピクセル)。true なら論理の大きさで、窓が載っている画面の有効 DPI / 96 で物理に換算する (四捨五入)。換算後が上限を超えれば実行時に 3 (validate と dry_run では見えない)。DPI を読めなければ 8", "area": "client | frame (既定 client = 中身。frame は見えている枠)", "備考": "左上は動かさず、前面も Z 順も変えず、入力も送らない。最小化・最大化の窓は 7 (reason minimized / maximized。元に戻さない)、無効な窓は 7 (target_disabled)、応答しない窓は 7 (not_responding。要求が後から効いて重なるので送らない)、対象が前面で人が操作中なら 10、見つからなければ 12、大きさの読みが壊れていれば (中身か枠が外側より大きい) 8。成功の出力の resized[] に frame と client (物理の矩形)、requested (物理の狙い)、dpi、exact (1 秒のうちに基準が狙いに届いたか。false なら frame と client が実際の大きさ) が入る", "例": { "type": "resize", "process": "notepad.exe", "width": 1280, "height": 720, "logical": true } },
+            "clipboard": { "text": format!("置く文 (1 以上 {CLIPBOARD_MAX_CHARS} 以下の文字。数えるのは文字 (char) で UTF-16 の単位ではない。設定の limits.max_text_len も掛かり、超えれば 4。改行とタブ以外の制御文字は 3。改行 (LF・CR) を含めば enter、タブを含めば tab のキーの規則も掛かる (断られれば 4))"), "備考": "クリップボードに CF_UNICODETEXT で置く。単独の LF と CR は CRLF にそろえる。Win+V の履歴とクラウドの同期から外す印を付ける。元の中身は戻さない (失われる)。入力は送らず、前面も変えない。貼るのは続く key ctrl+v (届く先の判定とパスワード欄の判定は key が通す)。入力の前に置く ([clipboard, click 欄, key ctrl+v])。人が操作中 (capture.min_idle_ms。ai-cu 自身の入力の直後も含む) なら 10 で何も置かない。別のアプリがクリップボードを開いていて 1 秒試し直しても開けなければ 8 (reason clipboard_busy。中身は変わらない)。空にした後に置けなければ 8 (partial。クリップボードは空)。成功の出力の clipboard[] に chars (CRLF にそろえた後の文字数)、lines、history_excluded が入る (置いた文は出さない)。置いた文は他のアプリから読めるので、秘密を置かない", "例": { "type": "clipboard", "text": "1 行目\n2 行目" } }
         },
         "key_names": format!("{}。修飾: {}", usable_key_names(), usable_modifier_names()),
         "exit_codes": crate::error::ErrorKind::ALL.iter().map(|k| json!({ "code": k.exit_code(), "name": k.code() })).collect::<Vec<_>>(),
@@ -4452,6 +4472,11 @@ mod tests {
                 ],
                 r#"{"type":"resize","process":"app.exe","title":"メモ","width":500,"height":300,"logical":false,"area":"client"}"#,
             ),
+            // clipboard (D-157): 位置引数の文をそのまま 1 操作に
+            (
+                &["clipboard", "a b"],
+                r#"{"type":"clipboard","text":"a b"}"#,
+            ),
             // wait-for (D-068): --name / --type のどちらかがあれば element、--text があれば text
             (
                 &[
@@ -4501,6 +4526,22 @@ mod tests {
             "{e}"
         );
         assert!(e.to_string().contains("--width"), "{e}");
+        // clipboard の文は必須 (D-157)
+        let e = Cli::try_parse_from(["ai-cu", "clipboard"]).unwrap_err();
+        assert_eq!(
+            e.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument,
+            "{e}"
+        );
+        // `-` なら標準入力をそのまま読む (末尾の改行も残す)
+        let cli = parse(&["clipboard", "-"]);
+        let s = step_script(&cli.command.unwrap(), &mut "x\ny\n".as_bytes()).unwrap();
+        assert_eq!(
+            s.actions,
+            vec![Action::Clipboard {
+                text: "x\ny\n".into()
+            }]
+        );
         // wait-for の --type は find と同じ種類の名前 (未知は使い方の誤り)
         assert!(
             Cli::try_parse_from(["ai-cu", "wait-for", "notepad.exe", "--type", "bogus"]).is_err()

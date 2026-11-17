@@ -26,6 +26,8 @@ pub const SCROLL_NOTCH_INTERVAL_MS: u64 = 20;
 pub const CLOSE_SETTLE_MS: u64 = 1000;
 /// `resize` で大きさの要求を置いた後、狙いの大きさに届くのを読み直して待つ上限 (D-150)。時間の予算にも数える
 pub const RESIZE_SETTLE_MS: u64 = 1000;
+/// `clipboard` で他のアプリが開いているとき、開き直す上限 (D-157)。間隔は実行器の `STOP_POLL_MS`。時間の予算にも数える
+pub const CLIPBOARD_OPEN_MS: u64 = 1000;
 /// `wait_for` が条件を確かめる間隔 (D-068)。UIA の FindAll は重いので 50 ms では回さない。
 /// 最初の判定は待たずに行い、間の待ちは 50 ms ごとに停止要因と期限を見る
 pub const WAIT_FOR_POLL_MS: u64 = 250;
@@ -123,6 +125,34 @@ pub enum Step {
         logical: bool,
         area: ResizeArea,
     },
+    /// クリップボードに文字を置く (D-157)。入力は送らず、前面も Z 順も変えない。`text` は CRLF にそろえた後の文で、
+    /// 計画の出力 (`--dry-run`、validate、MCP の dry_run) には出さない (秘密や長い文を写さない)。`chars` は
+    /// そろえた後の `char` の数、`lines` は `"\r\n"` の数 + 1
+    Clipboard {
+        #[serde(skip_serializing)]
+        text: String,
+        chars: usize,
+        lines: usize,
+    },
+}
+
+/// 単独の LF と単独の CR を CRLF にそろえる (既にある CRLF はそのまま。D-157)
+pub fn normalize_newlines_crlf(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + s.len() / 8);
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\r' => {
+                if chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+                out.push_str("\r\n");
+            }
+            '\n' => out.push_str("\r\n"),
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 fn button(b: Button, down: bool) -> InputEvent {
@@ -459,6 +489,12 @@ pub fn plan(action: &Action) -> Result<Vec<Step>, String> {
             logical: *logical,
             area: *area,
         }],
+        Action::Clipboard { text } => {
+            let text = normalize_newlines_crlf(text);
+            let chars = text.chars().count();
+            let lines = text.matches("\r\n").count() + 1;
+            vec![Step::Clipboard { text, chars, lines }]
+        }
     })
 }
 
@@ -498,7 +534,7 @@ pub fn total_sleep_ms(steps: &[Step]) -> u64 {
 }
 
 /// 時間の予算 (ミリ秒): 待ちの合計に、`focus` が前面になるのを待つ上限、`close` で消えるのを待つ上限、
-/// `resize` で狙いの大きさに届くのを待つ上限、
+/// `resize` で狙いの大きさに届くのを待つ上限、`clipboard` を開き直す上限、
 /// `wait_for`、`wait_stable`、`wait_change` と screenshot の `settle` の `timeout_ms` (全額) を足したもの。実行時の期限の検証に使う。
 pub fn time_budget_ms(steps: &[Step]) -> u64 {
     steps
@@ -508,6 +544,7 @@ pub fn time_budget_ms(steps: &[Step]) -> u64 {
             Step::Focus { .. } => FOCUS_SETTLE_MS,
             Step::Close { .. } => CLOSE_SETTLE_MS,
             Step::Resize { .. } => RESIZE_SETTLE_MS,
+            Step::Clipboard { .. } => CLIPBOARD_OPEN_MS,
             Step::WaitFor { timeout_ms, .. } | Step::WaitScreen { timeout_ms, .. } => *timeout_ms,
             Step::Capture {
                 settle: Some(s), ..
@@ -951,6 +988,53 @@ mod tests {
         assert!(mouse_points(&steps).is_empty());
         assert_eq!(total_sleep_ms(&steps), 0, "待ちではない");
         assert_eq!(time_budget_ms(&steps), CLOSE_SETTLE_MS);
+    }
+
+    /// clipboard の改行は CRLF にそろう (単独の LF と CR だけを変え、既にある CRLF に CR を重ねない。D-157)
+    #[test]
+    fn clipboard_text_normalizes_newlines_to_crlf() {
+        for (src, want) in [
+            ("a\nb", "a\r\nb"),
+            ("a\r\nb", "a\r\nb"),
+            ("a\rb", "a\r\nb"),
+            ("a\r\n\nb", "a\r\n\r\nb"),
+            ("\n", "\r\n"),
+            ("a\r", "a\r\n"),
+            ("ab", "ab"),
+            ("a\tb😀", "a\tb😀"),
+        ] {
+            assert_eq!(normalize_newlines_crlf(src), want, "{src:?}");
+        }
+        let steps = plan(&Action::Clipboard {
+            text: "x\ny\n".into(),
+        })
+        .unwrap();
+        assert_eq!(
+            steps,
+            vec![Step::Clipboard {
+                text: "x\r\ny\r\n".into(),
+                chars: 6,
+                lines: 3,
+            }]
+        );
+        assert!(mouse_points(&steps).is_empty());
+        assert_eq!(total_sleep_ms(&steps), 0, "待ちではない");
+        assert_eq!(time_budget_ms(&steps), CLIPBOARD_OPEN_MS);
+    }
+
+    /// clipboard の計画を JSON にしても文は出ず、chars と lines だけが出る (D-157)
+    #[test]
+    fn clipboard_plan_json_omits_text() {
+        let steps = plan(&Action::Clipboard {
+            text: "秘密\nの文".into(),
+        })
+        .unwrap();
+        let v = serde_json::to_value(&steps).unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!([{"step":"clipboard","chars":6,"lines":2}])
+        );
+        assert!(!v.to_string().contains("秘密"), "{v}");
     }
 
     /// resize は入力のバッチにならず、点も待ちも持たない。予算には読み直しの上限を数える (D-150)

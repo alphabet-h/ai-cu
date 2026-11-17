@@ -91,7 +91,7 @@ pub const INSTRUCTIONS: &str = "ai-cu は Windows のデスクトップを操作
 使っていて困ったこと (拒否や失敗の理由・次の手が読めなかった、結果を読み違えかけた、道具に無い機能を自前のスクリプトで補った。許可の外を読む・動かす回り道はしない) は、頼まれなくても人間に伝える (人間は ai-cu の GitHub の Issues に送れる)。伝える文に画面の文字や窓の題名を写さない (道具の名前、code、reason で足りる)。\n\
 最初に guide (要点版) を読む (全文は guide の full: true)。基本の流れ: windows で対象を知る → (前面でなければ focus。断られたら人間に頼む) → find で要素の中心 (center) を取る (何があるか分からなければ先に tree で木を見る) → click / type / key で操作し、shot オブジェクトで直後に撮る (画面が落ち着いてから撮るなら shot の settle_ms を \"auto\") → 起動やクリックの後に何かを待つなら wait_for (固定の wait と撮り直しの往復を減らす) → text か shot で結果を確かめる。\n\
 座標はすべて物理ピクセルのスクリーン座標。画像の点 (px, py) は画面の (x + px / scale, y + py / scale)。画像から座標を測るより find の center を使う。撮った画像は結果の image に入る (path を書けばファイルにも保存する)。\n\
-失敗は {\"ok\": false, \"error\": {code, exit_code, message, hint}} で返る (理由の reason と補足の detail が付くことがある。設定による拒否なら、設定のキーの rule と人間向けの直し方の fix。fix はそのまま人間に伝え、設定を書き換えない)。失敗でも、操作に入った後なら最上位に executed (どこまで実行したか) と partial (失敗した操作も途中まで行ったか) が付く。executed が 1 以上か partial なら、操作ごと打ち直さない。hint が次の手。focus は、断られて前面があなたの端末なら、補助プロセスで 1 回だけ試し直す。それでも focus_failed (reason=refused_host_front など) なら、繰り返さず人間に前面に出してもらい (対象の窓のクリックでよい)、windows の foreground で確かめてから続ける。user_active や desktop_unavailable で断られたら、再試行の前に status で待つべきか (retry_after_ms) を読む。拒否 (policy_denied、foreground_guard、user_active、focus_failed、window_not_found、desktop_unavailable) や停止 (stopped) を、繰り返しや別の手段で突破しない。クライアントの制限時間で切れた呼び出しを、そのまま再発行しない (windows や shot で状態を見直す)。1 回の run は短く保つ。全画面を撮らない。秘密を type しない。";
+失敗は {\"ok\": false, \"error\": {code, exit_code, message, hint}} で返る (理由の reason と補足の detail が付くことがある。設定による拒否なら、設定のキーの rule と人間向けの直し方の fix。fix はそのまま人間に伝え、設定を書き換えない)。失敗でも、操作に入った後なら最上位に executed (どこまで実行したか) と partial (失敗した操作も途中まで行ったか) が付く。executed が 1 以上か partial なら、操作ごと打ち直さない。hint が次の手。focus は、断られて前面があなたの端末なら、補助プロセスで 1 回だけ試し直す。それでも focus_failed (reason=refused_host_front など) なら、繰り返さず人間に前面に出してもらい (対象の窓のクリックでよい)、windows の foreground で確かめてから続ける。user_active や desktop_unavailable で断られたら、再試行の前に status で待つべきか (retry_after_ms) を読む。拒否 (policy_denied、foreground_guard、user_active、focus_failed、window_not_found、desktop_unavailable) や停止 (stopped) を、繰り返しや別の手段で突破しない。クライアントの制限時間で切れた呼び出しを、そのまま再発行しない (windows や shot で状態を見直す)。1 回の run は短く保つ。全画面を撮らない。秘密を type も clipboard もしない。";
 
 /// ai-cu を起動した側を特定できないときの、実入力の道具の拒否 (D-055、D-056)。focus や再試行では変わらないので、
 /// 専用の理由と次の手を付ける (既定の 7 の次の手は focus を勧めてしまう)
@@ -479,6 +479,11 @@ fn schema_resize_area() -> Value {
     json!({ "type": "string", "enum": ["client", "frame"], "description": "大きさの基準。client (既定) は中身、frame は見えている枠" })
 }
 
+/// clipboard の text (道具と run の操作で共有する。D-157)
+fn schema_clipboard_text() -> Value {
+    json!({ "type": "string", "minLength": 1, "maxLength": crate::script::CLIPBOARD_MAX_CHARS, "description": format!("置く文 (1〜{} 文字。設定の limits.max_text_len も掛かる。改行とタブ以外の制御文字は使えない。改行があれば enter、タブがあれば tab のキーの規則も掛かる)", crate::script::CLIPBOARD_MAX_CHARS) })
+}
+
 fn schema_inline() -> Value {
     json!({ "type": "boolean", "description": "撮った画像を結果の image に入れる (既定 true)。false なら path が要り、ファイルにだけ保存する" })
 }
@@ -620,7 +625,8 @@ fn schema_action() -> Value {
             { "type": "object", "additionalProperties": false, "properties": { "type": t("wait_for"), "process": schema_window(), "title": schema_window_title(), "element": schema_element_filter(), "text": schema_wait_text(), "absent": schema_wait_absent(), "timeout_ms": schema_wait_timeout() }, "required": ["type", "process"] },
             { "type": "object", "additionalProperties": false, "description": "画面が落ち着くまで待つ (直前のフレームとの差が threshold 以下の比較が stable_ms 続けば満たす)", "properties": { "type": t("wait_stable"), "region": schema_region(), "window": schema_capture_window(), "stable_ms": schema_stable_ms(), "threshold": schema_threshold("直前のフレームとの差 (変わった点の割合) の許容 (既定 0)"), "timeout_ms": schema_screen_timeout(MIN_STABLE_MS, DEFAULT_WAIT_FOR_TIMEOUT_MS) }, "required": ["type"] },
             { "type": "object", "additionalProperties": false, "description": "画面が変わるまで待つ (待ち始めの画像との差が threshold を超えれば満たす)", "properties": { "type": t("wait_change"), "region": schema_region(), "window": schema_capture_window(), "threshold": schema_threshold("待ち始めの画像 (基準) との差 (変わった点の割合) の下限 (既定 0.001)。狭い region ではキャレットの点滅でも超えうる"), "timeout_ms": schema_screen_timeout(1, DEFAULT_WAIT_FOR_TIMEOUT_MS) }, "required": ["type"] },
-            { "type": "object", "additionalProperties": false, "description": "窓の大きさを変える (左上は動かさない。前面は変えず入力も送らない。最小化・最大化の窓は断る)。結果の resized[] に実際の frame と client、exact (狙いに届いたか)", "properties": { "type": t("resize"), "process": schema_window(), "title": schema_named_title(), "width": schema_resize_size("幅"), "height": schema_resize_size("高さ"), "logical": schema_resize_logical(), "area": schema_resize_area() }, "required": ["type", "process", "width", "height"] }
+            { "type": "object", "additionalProperties": false, "description": "窓の大きさを変える (左上は動かさない。前面は変えず入力も送らない。最小化・最大化の窓は断る)。結果の resized[] に実際の frame と client、exact (狙いに届いたか)", "properties": { "type": t("resize"), "process": schema_window(), "title": schema_named_title(), "width": schema_resize_size("幅"), "height": schema_resize_size("高さ"), "logical": schema_resize_logical(), "area": schema_resize_area() }, "required": ["type", "process", "width", "height"] },
+            { "type": "object", "additionalProperties": false, "description": "クリップボードに文字を置く (CF_UNICODETEXT。改行は CRLF にそろえる。Win+V の履歴とクラウドの同期から外す。元の中身は戻さない。入力は送らない)。貼るのは key の ctrl+v。入力の前に置く ([clipboard, click 欄, key ctrl+v])。人が操作中なら user_active (ai-cu 自身の入力の直後も含む)。結果の clipboard[] に chars と lines (置いた文は出さない)。秘密を置かない", "properties": { "type": t("clipboard"), "text": schema_clipboard_text() }, "required": ["type", "text"] }
         ]
     })
 }
@@ -834,10 +840,19 @@ pub fn tools() -> Vec<Value> {
             input_tool(true),
         ),
         tool(
+            "clipboard",
+            "クリップボードに文字を置く",
+            &format!(
+                "クリップボードに文字を置く (CF_UNICODETEXT。改行は CRLF にそろえる。Win+V の履歴とクラウドの同期から外す。元の中身は戻らない)。入力は送らず前面も変えない。貼るのは key の ctrl+v。入力の前に置く ([clipboard, click 欄, key ctrl+v])。人が操作中なら user_active (ai-cu 自身の入力の直後も含む)。別のアプリがクリップボードを開いていれば os_error (reason clipboard_busy。中身は変わらない)。結果の clipboard[] に chars と lines (置いた文は出さない)。置いた文は他のアプリから読めるので、秘密を置かない。{STEP_NOTE}。{LEAD_NOTE}"
+            ),
+            json!({ "type": "object", "additionalProperties": false, "properties": step_props(json!({ "text": schema_clipboard_text() })), "required": ["text"] }),
+            input_tool(true),
+        ),
+        tool(
             "run",
             "操作列を実行する",
             &format!(
-                "操作の配列を順に実行する (click、double_click、drag、move、scroll、type、key、wait、screenshot、focus、close、resize、wait_for、wait_stable、wait_change)。wait_stable は画面が落ち着くまで、wait_change は変わるまで待つ (region か window を 100 ms ごとに撮って比べる。UIA に要素を出さないアプリの描画待ちに使う。時間切れは wait_timeout で unmet が stable / change)。決まった短い手順に向く (1 回の呼び出しで済む)。先頭に focus を置く。クライアントの制限時間 (Codex は既定 60 秒) に収まる長さにする。dry_run なら装置に触れず、検証と展開した手順 (plan) だけを返す。screenshot の path に mcp:inline を書くとファイルに保存せず結果の image だけになる。失敗の結果では image を捨てるクライアントがある (撮り直せない画面は path にも保存する)。結果は executed、screenshots (screenshot に settle を付けると、撮る前に落ち着くのを待ち settled と settle_ms が付く)、focused、elapsed_ms (close があれば closed。gone は見える窓から消えたか (破棄とは限らない)、hidden が true なら隠れただけでプロセスは動いている。gone が false なら撮って確かめる。resize があれば resized (exact が false なら実際の大きさを見る)。wait_for、wait_stable、wait_change があれば waited。画面の待ちは rect と、wait_change なら changed_ratio)。失敗でも、操作に入った後なら executed (どこまで実行したか) と partial が返る (無ければ何も送っていない)。1 以上か partial なら操作ごと打ち直さない。{LEAD_NOTE}"
+                "操作の配列を順に実行する (click、double_click、drag、move、scroll、type、key、wait、screenshot、focus、close、resize、clipboard、wait_for、wait_stable、wait_change)。wait_stable は画面が落ち着くまで、wait_change は変わるまで待つ (region か window を 100 ms ごとに撮って比べる。UIA に要素を出さないアプリの描画待ちに使う。時間切れは wait_timeout で unmet が stable / change)。決まった短い手順に向く (1 回の呼び出しで済む)。先頭に focus を置く。クライアントの制限時間 (Codex は既定 60 秒) に収まる長さにする。dry_run なら装置に触れず、検証と展開した手順 (plan) だけを返す。screenshot の path に mcp:inline を書くとファイルに保存せず結果の image だけになる。失敗の結果では image を捨てるクライアントがある (撮り直せない画面は path にも保存する)。結果は executed、screenshots (screenshot に settle を付けると、撮る前に落ち着くのを待ち settled と settle_ms が付く)、focused、elapsed_ms (close があれば closed。gone は見える窓から消えたか (破棄とは限らない)、hidden が true なら隠れただけでプロセスは動いている。gone が false なら撮って確かめる。resize があれば resized (exact が false なら実際の大きさを見る)。clipboard があれば clipboard (chars と lines。置いた文は出さない)。wait_for、wait_stable、wait_change があれば waited。画面の待ちは rect と、wait_change なら changed_ratio)。失敗でも、操作に入った後なら executed (どこまで実行したか) と partial が返る (無ければ何も送っていない)。1 以上か partial なら操作ごと打ち直さない。{LEAD_NOTE}"
             ),
             json!({ "type": "object", "additionalProperties": false, "properties": { "actions": { "type": "array", "minItems": 1, "items": schema_action() }, "dry_run": schema_dry_run(), "inline": schema_inline() }, "required": ["actions"] }),
             input_tool(false),
@@ -1041,6 +1056,16 @@ struct ResizeArgs {
     logical: bool,
     #[serde(default)]
     area: ResizeArea,
+    shot: Option<ShotArgs>,
+    #[serde(default)]
+    dry_run: bool,
+}
+
+/// 道具 `clipboard` の引数 (D-157)。操作列の `clipboard` と同じ項目に、一手ずつの `shot` / `dry_run` が付く
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ClipboardArgs {
+    text: String,
     shot: Option<ShotArgs>,
     #[serde(default)]
     dry_run: bool,
@@ -2004,6 +2029,10 @@ fn run_tool(name: &str, args: &Value, paths: &ConfigPaths, ctx: &mut Context) ->
                     ctx,
                 )
             }
+            "clipboard" => {
+                let a: ClipboardArgs = parse_args(args)?;
+                step(Action::Clipboard { text: a.text }, a.shot, a.dry_run, ctx)
+            }
             "click" | "double_click" => {
                 let a: ClickArgs = parse_args(args)?;
                 let action = if name == "click" {
@@ -2575,7 +2604,7 @@ mod tests {
             .copied()
             .filter(|n| *n != "guide")
             .collect();
-        assert_eq!(all_but_guide.len(), 20);
+        assert_eq!(all_but_guide.len(), 21);
         assert_eq!(marked(&r), all_but_guide);
         let guide = &r["result"]["tools"][0];
         assert_eq!(guide["name"], "guide");
@@ -2614,7 +2643,7 @@ mod tests {
         assert_eq!(marked(&r), ["click"]);
         floor_file(&dir, "[mcp\n");
         let r = reply(&mut s, &modern(2, "tools/list", json!({})));
-        assert_eq!(marked(&r).len(), 20);
+        assert_eq!(marked(&r).len(), 21);
         assert!(!marked(&r).contains(&"guide".to_string()));
         floor_file(&dir, "[mcp]\nrequire_approval = [\"type\"]\n");
         let r = reply(&mut s, &modern(3, "tools/list", json!({})));
@@ -2820,6 +2849,7 @@ mod tests {
                 "key",
                 "close",
                 "resize",
+                "clipboard",
                 "run"
             ]
         );
@@ -2866,7 +2896,7 @@ mod tests {
                 assert_eq!(t["annotations"]["destructiveHint"], true, "{name}");
                 assert_eq!(
                     t["annotations"]["idempotentHint"],
-                    matches!(name, "focus" | "move" | "resize"),
+                    matches!(name, "focus" | "move" | "resize" | "clipboard"),
                     "{name}"
                 );
             }
@@ -6279,6 +6309,72 @@ mod tests {
         assert_eq!(w.foreground.as_ref().unwrap().hwnd, host.hwnd);
     }
 
+    /// clipboard の道具 (D-157): 端末 (ホスト) が前面のままでも置き、結果の clipboard に数だけが出る (文は出さない)。
+    /// dry_run は置かない。text は必須で、未知のフィールドは断る。入力も前面も変えない
+    #[test]
+    fn clipboard_tool_sets_text_with_host_in_front() {
+        let dir = unique_temp_dir("mcp-clipboard");
+        let floor = floor_file(&dir, ENABLED);
+        let mut f = Fixture::new(MapEnv::default());
+        let world = f.world.clone();
+        let host = window("Zed.exe", "Zed::Window");
+        world.borrow_mut().foreground = Some(host.clone());
+        let mut s = f.server(paths(&floor));
+        s.host_pids = vec![host.pid];
+        for (id, bad) in [(1, json!({})), (2, json!({ "text": "a", "append": true }))] {
+            let r = reply(&mut s, &call(id, "clipboard", bad));
+            assert!(
+                r.get("error").is_some() || r["result"]["isError"] == true,
+                "{r}"
+            );
+        }
+        assert!(world.borrow().clipboard_sets.is_empty());
+        // dry_run は計画だけで、文を出さず置かない
+        let r = reply(
+            &mut s,
+            &call(
+                3,
+                "clipboard",
+                json!({ "text": "ひみつ\nb", "dry_run": true }),
+            ),
+        );
+        let v = text_json(&r);
+        assert_eq!(v["ok"], true, "{v}");
+        assert_eq!(v["dry_run"], true, "{v}");
+        assert!(!r.to_string().contains("ひみつ"), "{r}");
+        assert!(world.borrow().clipboard_sets.is_empty());
+        // 置く
+        let r = reply(
+            &mut s,
+            &call(4, "clipboard", json!({ "text": "ひみつ\nb" })),
+        );
+        assert_eq!(r["result"]["isError"], false, "{r}");
+        let v = text_json(&r);
+        assert_eq!(v["ok"], true, "{v}");
+        assert_eq!(v["executed"], 1, "{v}");
+        assert_eq!(v["clipboard"][0]["action_index"], 0, "{v}");
+        assert_eq!(v["clipboard"][0]["chars"], 6, "{v}");
+        assert_eq!(v["clipboard"][0]["lines"], 2, "{v}");
+        assert_eq!(v["clipboard"][0]["history_excluded"], true, "{v}");
+        assert!(!r.to_string().contains("ひみつ"), "{r}");
+        let w = world.borrow();
+        assert_eq!(w.clipboard_sets, vec!["ひみつ\r\nb".to_string()]);
+        assert!(w.focus_calls.is_empty() && w.sent.is_empty());
+        assert_eq!(w.foreground.as_ref().unwrap().hwnd, host.hwnd);
+    }
+
+    /// clipboard の道具の説明は、入力の前に置く順と、貼るのは key の ctrl+v であることを書く (D-157)
+    #[test]
+    fn clipboard_tool_description_says_place_before_input() {
+        let list = tools();
+        let t = list.iter().find(|t| t["name"] == "clipboard").unwrap();
+        let d = t["description"].as_str().unwrap();
+        assert!(d.contains("入力の前に置く"), "{d}");
+        assert!(d.contains("ctrl+v"), "{d}");
+        assert!(d.contains("秘密を置かない"), "{d}");
+        assert_eq!(t["inputSchema"]["required"], json!(["text"]));
+    }
+
     /// D-152 の端から端まで: 撮影の許可が無い床では、title つきの focus / resize と close は 4 (rule は撮影の軸、
     /// fix つき、hint は専用の文) で窓に何もしない。title なしの focus と resize は成功し、結果の title は null で、
     /// 応答のどこにも窓の題名を出さない
@@ -6598,7 +6694,15 @@ mod tests {
         assert!(LEAD_NOTE.contains(&secs), "{LEAD_NOTE}");
         assert!(LEAD_NOTE.contains("input_busy (16"), "{LEAD_NOTE}");
         let list = tools();
-        for name in ["click", "type", "focus", "close", "resize", "run"] {
+        for name in [
+            "click",
+            "type",
+            "focus",
+            "close",
+            "resize",
+            "clipboard",
+            "run",
+        ] {
             let t = list.iter().find(|t| t["name"] == name).unwrap();
             assert!(
                 t["description"].as_str().unwrap().contains(LEAD_NOTE),

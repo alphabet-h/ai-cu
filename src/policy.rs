@@ -59,7 +59,7 @@ pub fn tui_label(rule: &str) -> Option<&'static str> {
         "deny.classes" => "拒否リスト (deny) > ウィンドウクラス",
         "limits.max_actions" => "上限 > 最大の操作数",
         "limits.max_duration_ms" => "上限 > 最大の実行時間 (ms)",
-        "limits.max_text_len" => "上限 > 最大の文字数 (type)",
+        "limits.max_text_len" => "上限 > 最大の文字数 (type・clipboard)",
         "capture.full_screen" => "撮影の制限 > 全画面の撮影",
         "capture.save_dirs" => "撮影の制限 > 撮影の保存先のフォルダ",
         _ => return None,
@@ -239,6 +239,18 @@ impl Policy {
                     );
                     d
                 });
+        }
+        // clipboard は、置いた文を key の ctrl+v で貼れば type と同じく文字を入れられる。type を断った設定
+        // (deny.actions の type、type の無い allow.actions) で回り道にならないよう、自分の名前の許可に加えて
+        // type の許可も求める (D-157 の追記。D-153 と同じ形で、type を断った軸の rule と fix を写す)
+        if kind == ActionKind::Clipboard {
+            return self.check_action_kind(ActionKind::Type).map_err(|mut d| {
+                d.message = format!(
+                    "clipboard は貼り付けで文字を入れられるので type と同じ許可が要る: {}",
+                    d.message
+                );
+                d
+            });
         }
         Ok(())
     }
@@ -549,7 +561,7 @@ impl Policy {
                 "limits.max_duration_ms",
                 format!("を {need} 以上にする"),
                 format!(
-                    "待ちの合計 {total_sleep_ms} ms (focus、close、resize、wait_for、wait_stable、wait_change、screenshot の settle の待ちの上限を含む) と実行の余裕 {margin_ms} ms が limits.max_duration_ms ({limit}) を超える"
+                    "待ちの合計 {total_sleep_ms} ms (focus、close、resize、clipboard、wait_for、wait_stable、wait_change、screenshot の settle の待ちの上限を含む) と実行の余裕 {margin_ms} ms が limits.max_duration_ms ({limit}) を超える"
                 ),
             ));
         }
@@ -1242,6 +1254,67 @@ mod tests {
         }
     }
 
+    /// clipboard は、自分の名前の許可に加えて type の許可も要る (D-157 の追記)。type を断った軸の rule と
+    /// fix を写し、自分の名前で断るときの文は今までどおり
+    #[test]
+    fn policy_clipboard_also_needs_type_permission() {
+        let head = "clipboard は貼り付けで文字を入れられるので type と同じ許可が要る";
+        let kind = ActionKind::Clipboard;
+        // (a) clipboard だけを並べた allow.actions は、type の軸 (allow.actions) で断る
+        let d = policy(&[&format!("{ENABLED}[allow]\nactions = [\"clipboard\"]\n")])
+            .check_action_kind(kind)
+            .unwrap_err();
+        assert_eq!(d.rule, Some("allow.actions"));
+        assert!(
+            d.fix.as_deref().unwrap().contains("に type を足す"),
+            "{:?}",
+            d.fix
+        );
+        assert!(d.message.starts_with(head), "{}", d.message);
+        // (b) clipboard と type の両方を並べれば通る
+        assert!(
+            policy(&[&format!(
+                "{ENABLED}[allow]\nactions = [\"clipboard\", \"type\"]\n"
+            )])
+            .check_action_kind(kind)
+            .is_ok()
+        );
+        // (c) deny.actions の type でも断る (allow.actions を書かない設定の回り道を塞ぐ)
+        let d = policy(&[&format!("{ENABLED}[deny]\nactions = [\"type\"]\n")])
+            .check_action_kind(kind)
+            .unwrap_err();
+        assert_eq!(d.rule, Some("deny.actions"));
+        assert!(d.message.contains(head), "{}", d.message);
+        assert!(
+            d.fix.as_deref().unwrap().contains("から type を外す"),
+            "{:?}",
+            d.fix
+        );
+        // (d) clipboard 自身が deny.actions に当たるなら、今までどおり自分の名前の文
+        let d = policy(&[&format!("{ENABLED}[deny]\nactions = [\"clipboard\"]\n")])
+            .check_action_kind(kind)
+            .unwrap_err();
+        assert_eq!(d.rule, Some("deny.actions"));
+        assert!(!d.message.contains(head), "{}", d.message);
+        assert!(
+            d.fix.as_deref().unwrap().contains("から clipboard を外す"),
+            "{:?}",
+            d.fix
+        );
+        // (e) allow.actions を書かず実入力の総スイッチだけなら通る
+        assert!(
+            policy(&["[general]\ninput_enabled = true\n"])
+                .check_action_kind(kind)
+                .is_ok()
+        );
+        // (f) 追加の層が type を外しても断る (層の合成は D-153 と同じ)
+        let d = policy(&[ENABLED, &format!("{ENABLED}[deny]\nactions = [\"type\"]\n")])
+            .check_action_kind(kind)
+            .unwrap_err();
+        assert_eq!(d.rule, Some("deny.actions"));
+        assert!(d.message.contains(head), "{}", d.message);
+    }
+
     /// 画面を読む待ちの撮影の判定 (D-153) は全ての層に掛かり、撮影を断った層の rule と fix を写す。
     /// 基本の層が待ちと screenshot を許しても、追加の層が screenshot を外せば (allow.actions に無い、
     /// deny.actions にある) 断り、fix は追加の層を指す。基本の層が screenshot を外せば、追加の層が何を
@@ -1719,7 +1792,7 @@ mod tests {
         assert_eq!(
             d.fix.as_deref(),
             Some(
-                format!("{FLOOR_FIX_HEAD}上限 > 最大の文字数 (type)」か、設定ファイル F.toml の limits.max_text_len を 60 以上にする").as_str()
+                format!("{FLOOR_FIX_HEAD}上限 > 最大の文字数 (type・clipboard)」か、設定ファイル F.toml の limits.max_text_len を 60 以上にする").as_str()
             )
         );
         // 判定は今までどおり最小値 (40) で、文もそれを言う

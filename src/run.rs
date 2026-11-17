@@ -4,8 +4,9 @@
 use serde::Serialize;
 
 use crate::device::{
-    BackendError, Clock, CoverTraits, Desktop, HelperOutcome, Image, Indicator, InputDesktop,
-    InputEvent, InputLock, InputSink, StackWindow, TopWindow, WindowInfo, WindowPresence,
+    BackendError, ClipboardSet, Clock, CoverTraits, Desktop, HelperOutcome, Image, Indicator,
+    InputDesktop, InputEvent, InputLock, InputSink, StackWindow, TopWindow, WindowInfo,
+    WindowPresence,
 };
 use crate::elements::{
     ElementQuery, UiElement, element_json, first_text, normalize_newlines, parse_control_type,
@@ -16,8 +17,8 @@ use crate::estop::{StopReason, StopSet};
 use crate::geometry::{Point, Rect, bounding, visible_parts};
 use crate::hint::{Hint, Surface, hint};
 use crate::plan::{
-    CLOSE_SETTLE_MS, FOCUS_SETTLE_MS, OCCLUDED_GRACE_MS, RESIZE_SETTLE_MS, Step, Target, Until,
-    WAIT_FOR_POLL_MS, WAIT_SCREEN_POLL_MS,
+    CLIPBOARD_OPEN_MS, CLOSE_SETTLE_MS, FOCUS_SETTLE_MS, OCCLUDED_GRACE_MS, RESIZE_SETTLE_MS, Step,
+    Target, Until, WAIT_FOR_POLL_MS, WAIT_SCREEN_POLL_MS,
 };
 use crate::policy::Policy;
 use crate::script::{Button, ElementFilter, RESIZE_MAX, ResizeArea, Script, Settle, WindowTarget};
@@ -720,7 +721,22 @@ pub struct RunReport {
     /// `resize` で大きさを変えたウィンドウ (操作の順。D-150)。無ければ出力に出さない
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub resized: Vec<ResizeInfo>,
+    /// `clipboard` で文字を置いた記録 (操作の順。D-157)。無ければ出力に出さない。置いた文は入れない
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub clipboard: Vec<ClipboardInfo>,
     pub elapsed_ms: u64,
+}
+
+/// `clipboard` で文字を置いた記録 (D-157)。置いた文そのものは入れない (秘密や長い文を出力に写さない)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ClipboardInfo {
+    pub action_index: usize,
+    /// 置いた文字数 (改行を CRLF にそろえた後の `char` の数)
+    pub chars: usize,
+    /// 行数 (`"\r\n"` の数 + 1)
+    pub lines: usize,
+    /// Win+V の履歴とクラウドの同期から外す印を付けたか (置けたときは常に真)
+    pub history_excluded: bool,
 }
 
 /// 幅と高さ (物理ピクセル)
@@ -1304,6 +1320,7 @@ struct Ctx<'h> {
     closed: Vec<CloseInfo>,
     waited: Vec<WaitInfo>,
     resized: Vec<ResizeInfo>,
+    clipboard: Vec<ClipboardInfo>,
 }
 
 impl Ctx<'_> {
@@ -1316,6 +1333,7 @@ impl Ctx<'_> {
             closed: std::mem::take(&mut self.closed),
             waited: std::mem::take(&mut self.waited),
             resized: std::mem::take(&mut self.resized),
+            clipboard: std::mem::take(&mut self.clipboard),
             elapsed_ms: now_ms.saturating_sub(self.start_ms),
         }
     }
@@ -1478,7 +1496,7 @@ impl Executor<'_> {
     /// `execute_with` に加えて、失敗の次の手 (hint) の文を `opts.surface` (CLI か MCP か) で選び (D-056)、
     /// 画面を変える操作の前に枠と予告の間を入れる (D-093。残す時間と予告の省略は `opts`)。
     /// 判定と送るものは `surface` に依らない。
-    /// 画面を変える操作 (入力のバッチ、focus、close、resize) を含む実行は、検証の後で入力の錠 (別の ai-cu との排他) を取ってから
+    /// 画面を変える操作 (入力のバッチ、focus、close、resize、clipboard) を含む実行は、検証の後で入力の錠 (別の ai-cu との排他) を取ってから
     /// 操作の前の判定に進み、成否によらず終わりに解く (D-113)
     pub fn execute_on(
         &mut self,
@@ -1490,10 +1508,16 @@ impl Executor<'_> {
         if let Some(e) = validation_error(&v) {
             return Err(e);
         }
+        // clipboard は画面を変えないが、人の環境 (クリップボード) を変えるので仲間に入れる: 錠で別の ai-cu の
+        // [clipboard, key ctrl+v] の間に割り込まず、枠で予告する (D-157)
         let changes_screen = v.plans.iter().flatten().any(|s| {
             matches!(
                 s,
-                Step::Batch { .. } | Step::Focus { .. } | Step::Close { .. } | Step::Resize { .. }
+                Step::Batch { .. }
+                    | Step::Focus { .. }
+                    | Step::Close { .. }
+                    | Step::Resize { .. }
+                    | Step::Clipboard { .. }
             )
         });
         // 内側が枠を出して自分で解いたか (枠の解放を 1 回にする)
@@ -1599,13 +1623,13 @@ impl Executor<'_> {
                 state.prev = Some(cursor);
                 state.expected = Some(cursor);
             }
-            // close、resize、wait、wait_for だけの操作列は、入力デスクトップが使えない (ロック中) ときもマウスの監視なしで進む。
+            // close、resize、clipboard、wait、wait_for だけの操作列は、入力デスクトップが使えない (ロック中) ときもマウスの監視なしで進む。
             // 読めるようになったら check_stop が監視を始める (D-066、D-068)
             Err(BackendError::DesktopUnavailable(_)) if !needs_desktop => {}
             Err(e) => return Err(backend_error(e)),
         }
-        // 枠と予告の間 (D-093)。画面を変える操作 (入力のバッチ、focus、close、resize) があり、始めのカーソルが読めた
-        // (マウスの監視がある) ときだけ。ロック中に監視なしで始まる close や resize だけの操作列では出さない
+        // 枠と予告の間 (D-093)。画面を変える操作 (入力のバッチ、focus、close、resize、clipboard) があり、始めのカーソルが読めた
+        // (マウスの監視がある) ときだけ。ロック中に監視なしで始まる close や resize や clipboard だけの操作列では出さない
         let shown = changes_screen && self.policy.indicator_enabled() && state.prev.is_some();
         if shown {
             let lead_ms = self.policy.indicator_lead_ms();
@@ -1654,6 +1678,7 @@ impl Executor<'_> {
             closed: Vec::new(),
             waited: Vec::new(),
             resized: Vec::new(),
+            clipboard: Vec::new(),
         };
         let result = self.run_plans(&v.plans, &mut state, &mut ctx);
         // 失敗や停止の後でも、押したままのキーとボタンを必ず離す
@@ -1813,6 +1838,10 @@ impl Executor<'_> {
                         };
                         self.resize(i, &spec, state, ctx).map_err(|e| e.at(i))?
                     }
+                    // close と同じく入力を送らないので、入力デスクトップの判定は通さない (D-157)
+                    Step::Clipboard { text, chars, lines } => self
+                        .clipboard(i, text, (*chars, *lines), state, ctx)
+                        .map_err(|e| e.at(i))?,
                     // 読むだけなので、入力デスクトップの判定は通さない (ロック中も読める。D-068)
                     Step::WaitFor {
                         process,
@@ -1909,7 +1938,7 @@ impl Executor<'_> {
     /// 別の所へ動かしたなら人の操作)。範囲が読めないか絞られていなければ今どおり人の操作の 6。
     /// 閾値の内のずれと、移動を送る前 (予告の間、待ちだけの経路) は範囲を読まない
     fn check_user_mouse(&mut self, state: &mut State, surface: Surface) -> Result<(), AppError> {
-        // 監視なしで始めた (ロック中の close、resize、wait、wait_for だけの操作列。D-066、D-068、D-150): 読めるようになった時点の点から監視を始める
+        // 監視なしで始めた (ロック中の close、resize、clipboard、wait、wait_for だけの操作列。D-066、D-068、D-150、D-157): 読めるようになった時点の点から監視を始める
         if state.prev.is_none() && state.expected.is_none() {
             match self.desktop.cursor_pos() {
                 Ok(p) => {
@@ -2397,6 +2426,74 @@ impl Executor<'_> {
             .with_reason(why)
             .with_detail(detail)
             .with_hint(hint(situation, ctx.surface)))
+    }
+
+    /// クリップボードに文字を置く (D-157)。入力は送らず、前面も変えないので、前面のガードは掛けない。
+    /// 人が操作中なら、どのアプリが前面でも 10 で何も置かない (クリップボードは窓口で 1 つ)。他のアプリが開いていれば
+    /// `STOP_POLL_MS` ごとに停止要因を見ながら `CLIPBOARD_OPEN_MS` まで試し直し、尽きたら 8 (`clipboard_busy`。
+    /// 中身は変わらない)。空にした後に置けなければ 8 と partial (元の中身は失われた)。`counts` は Step の
+    /// (chars, lines)
+    fn clipboard(
+        &mut self,
+        i: usize,
+        text: &str,
+        counts: (usize, usize),
+        state: &mut State,
+        ctx: &mut Ctx<'_>,
+    ) -> Result<(), AppError> {
+        let surface = ctx.surface;
+        if let Some((e, idle, min_idle)) = idle_refusal(
+            self.policy,
+            &|| self.desktop.idle_ms(),
+            "クリップボードを書き換えない",
+        )? {
+            return Err(e
+                .with_detail(idle_detail(idle, min_idle))
+                .with_hint(hint(Hint::ClipboardUserActive, surface)));
+        }
+        let start = self.clock.now_ms();
+        loop {
+            match self
+                .desktop
+                .set_clipboard_text(text)
+                .map_err(backend_error)?
+            {
+                ClipboardSet::Set => break,
+                ClipboardSet::Busy(code) => {
+                    let waited = self.clock.now_ms().saturating_sub(start);
+                    if waited >= CLIPBOARD_OPEN_MS {
+                        return Err(AppError::new(
+                            ErrorKind::OsError,
+                            format!(
+                                "クリップボードは書き換えていない。別のアプリがクリップボードを開いていて、{waited} ms 試し直しても開けなかった (最後の OpenClipboard の GetLastError={code})"
+                            ),
+                        )
+                        .with_reason(reason::CLIPBOARD_BUSY)
+                        .with_hint(hint(Hint::ClipboardBusy, surface)));
+                    }
+                    self.clock.sleep_ms(STOP_POLL_MS);
+                    self.check_stop(state, ctx)?;
+                }
+                ClipboardSet::Emptied(why) => {
+                    // 人の元の中身を消した後の失敗なので、書き換えていないとは言わない (D-065 の partial)
+                    ctx.partial = true;
+                    return Err(AppError::new(
+                        ErrorKind::OsError,
+                        format!("元の中身は失われ、クリップボードは空 ({why})"),
+                    )
+                    .with_hint(hint(Hint::ClipboardEmptied, surface)));
+                }
+            }
+        }
+        ctx.partial = true;
+        let (chars, lines) = counts;
+        ctx.clipboard.push(ClipboardInfo {
+            action_index: i,
+            chars,
+            lines,
+            history_excluded: true,
+        });
+        Ok(())
     }
 
     /// 許可されたウィンドウに `WM_CLOSE` を 1 回置く (D-062)。入力は送らず、前面も変えないので、前面のガードは
@@ -8850,6 +8947,7 @@ mod tests {
             closed: Vec::new(),
             waited: Vec::new(),
             resized: Vec::new(),
+            clipboard: Vec::new(),
         };
         let mouse = Target::Mouse {
             points: vec![Point::new(600, 100)],
@@ -11837,6 +11935,396 @@ mod tests {
         assert_eq!(w.shows.len(), 1, "枠を出す");
         assert_eq!(w.releases, vec![0]);
         assert!(w.sent.is_empty());
+    }
+
+    // --- clipboard (D-157) ---
+
+    const CLIP_AB: &str = r#"{"type":"clipboard","text":"a\nb"}"#;
+
+    /// 改行を CRLF にそろえて置き、結果に chars・lines・history_excluded を出す (文は出さない)。入力は送らない
+    #[test]
+    fn clipboard_sets_crlf_text_and_reports_counts() {
+        let world = World::new().shared();
+        let (r, _) = exec(
+            &world,
+            &policy(ENABLED),
+            &mut StopSet::new(),
+            &script(CLIP_AB),
+        );
+        let report = r.unwrap();
+        assert_eq!(report.executed, 1);
+        assert_eq!(
+            report.clipboard,
+            vec![ClipboardInfo {
+                action_index: 0,
+                chars: 4,
+                lines: 2,
+                history_excluded: true,
+            }]
+        );
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(
+            json["clipboard"],
+            serde_json::json!([{"action_index":0,"chars":4,"lines":2,"history_excluded":true}])
+        );
+        assert!(!json.to_string().contains("a\\r\\nb"), "{json}");
+        let w = world.borrow();
+        assert_eq!(w.clipboard_sets, vec!["a\r\nb".to_string()]);
+        assert!(w.sent.is_empty(), "入力は送らない");
+        drop(w);
+        // clipboard の無い操作列の出力には clipboard を出さない (今までの出力を変えない)
+        let world = World::new().shared();
+        let (r, _) = exec(
+            &world,
+            &policy(ENABLED),
+            &mut StopSet::new(),
+            &script(r#"{"type":"wait","ms":0}"#),
+        );
+        assert!(
+            serde_json::to_value(r.unwrap())
+                .unwrap()
+                .get("clipboard")
+                .is_none()
+        );
+    }
+
+    /// 人が操作中なら、前面が端末 (許可の外) でも 10 で何も置かない
+    #[test]
+    fn clipboard_refuses_when_user_active_without_setting() {
+        let mut w = World::new();
+        w.idle_ms = 100;
+        w.foreground = Some(terminal());
+        let world = w.shared();
+        let p = policy(&format!("{ENABLED}[capture]\nmin_idle_ms = 3000\n"));
+        let (r, _) = exec(&world, &p, &mut StopSet::new(), &script(CLIP_AB));
+        let e = r.unwrap_err();
+        assert_eq!(e.kind, ErrorKind::UserActive, "{e}");
+        assert!(e.message.contains("クリップボードを書き換えない"), "{e}");
+        assert_eq!(detail(&e)["idle_ms"], 100);
+        assert_eq!(detail(&e)["min_idle_ms"], 3000);
+        assert_eq!(
+            e.hint.as_deref(),
+            Some(hint(Hint::ClipboardUserActive, Surface::Cli))
+        );
+        assert_eq!(progress(&e)["partial"], false);
+        assert!(world.borrow().clipboard_sets.is_empty());
+    }
+
+    /// ai-cu 自身の入力の直後も人の操作に数える: [move, clipboard] は 10 で、hint が置く順を案内する。
+    /// [clipboard, move] は通る
+    #[test]
+    fn clipboard_after_own_input_in_same_run_is_10() {
+        let mut w = World::new();
+        w.input_resets_idle = true;
+        let world = w.shared();
+        let (r, _) = exec(
+            &world,
+            &policy(ENABLED),
+            &mut StopSet::new(),
+            &script(&format!(r#"{{"type":"move","x":10,"y":10}},{CLIP_AB}"#)),
+        );
+        let e = r.unwrap_err();
+        assert_eq!(e.kind, ErrorKind::UserActive, "{e}");
+        assert_eq!(e.action_index, Some(1));
+        assert!(
+            e.hint.as_deref().unwrap().contains("入力の前に置く"),
+            "{e:?}"
+        );
+        assert!(world.borrow().clipboard_sets.is_empty());
+
+        let mut w = World::new();
+        w.input_resets_idle = true;
+        let world = w.shared();
+        let (r, _) = exec(
+            &world,
+            &policy(ENABLED),
+            &mut StopSet::new(),
+            &script(&format!(r#"{CLIP_AB},{{"type":"move","x":10,"y":10}}"#)),
+        );
+        assert_eq!(r.unwrap().executed, 2);
+        let w = world.borrow();
+        assert_eq!(w.clipboard_sets.len(), 1);
+        assert_eq!(w.sent.len(), 1);
+    }
+
+    /// 設定の limits.max_text_len を超える文は 4 (type と同じ判定)。何も置かない
+    #[test]
+    fn clipboard_over_max_text_len_is_4() {
+        let world = World::new().shared();
+        let p = policy(&format!("{ENABLED}[limits]\nmax_text_len = 5\n"));
+        let (r, _) = exec(
+            &world,
+            &p,
+            &mut StopSet::new(),
+            &script(r#"{"type":"clipboard","text":"abcdef"}"#),
+        );
+        let e = r.unwrap_err();
+        assert_eq!(e.kind, ErrorKind::PolicyDenied, "{e}");
+        assert_eq!(e.deny.as_ref().map(|d| d.rule), Some("limits.max_text_len"));
+        assert!(world.borrow().clipboard_sets.is_empty());
+        let (r, _) = exec(
+            &world,
+            &p,
+            &mut StopSet::new(),
+            &script(r#"{"type":"clipboard","text":"abcde"}"#),
+        );
+        r.unwrap();
+    }
+
+    /// 改行を含む文は enter、タブを含む文は tab のキーの規則に通す (type と同じ判定)。断れば 4 で何も置かない
+    #[test]
+    fn clipboard_newline_refused_when_enter_denied_is_4() {
+        for (deny, bad, ok) in [
+            ("enter", r#""a\nb""#, r#""ab""#),
+            ("enter", r#""a\rb""#, r#""a\tb""#),
+            ("tab", r#""a\tb""#, r#""a\nb""#),
+        ] {
+            let p = policy(&format!("{ENABLED}[deny]\nkeys=[\"{deny}\"]\n"));
+            let world = World::new().shared();
+            let (r, _) = exec(
+                &world,
+                &p,
+                &mut StopSet::new(),
+                &script(&format!(r#"{{"type":"clipboard","text":{bad}}}"#)),
+            );
+            let e = r.unwrap_err();
+            assert_eq!(e.kind, ErrorKind::PolicyDenied, "{deny} {bad}: {e}");
+            assert_eq!(e.deny.as_ref().map(|d| d.rule), Some("deny.keys"));
+            assert!(world.borrow().clipboard_sets.is_empty());
+            let (r, _) = exec(
+                &world,
+                &p,
+                &mut StopSet::new(),
+                &script(&format!(r#"{{"type":"clipboard","text":{ok}}}"#)),
+            );
+            r.unwrap_or_else(|e| panic!("{deny} {ok}: {e}"));
+        }
+    }
+
+    /// 他のアプリが開いていれば試し直し、開けたら置く
+    #[test]
+    fn clipboard_busy_retries_then_sets() {
+        let mut w = World::new();
+        w.clipboard_busy = 2;
+        let world = w.shared();
+        let (r, _) = exec(
+            &world,
+            &policy(ENABLED),
+            &mut StopSet::new(),
+            &script(CLIP_AB),
+        );
+        assert_eq!(r.unwrap().clipboard.len(), 1);
+        let w = world.borrow();
+        assert_eq!(w.clipboard_sets.len(), 1);
+        assert_eq!(w.now_ms, 2 * STOP_POLL_MS, "50 ms ごとに 2 回待った");
+    }
+
+    /// 試し直しの上限まで開けなければ 8 (`clipboard_busy`)。最後の GetLastError を message に添える。partial は偽
+    #[test]
+    fn clipboard_busy_times_out_with_reason() {
+        let mut w = World::new();
+        w.clipboard_busy = u32::MAX;
+        let world = w.shared();
+        let (r, _) = exec(
+            &world,
+            &policy(ENABLED),
+            &mut StopSet::new(),
+            &script(CLIP_AB),
+        );
+        let e = r.unwrap_err();
+        assert_eq!(e.kind, ErrorKind::OsError, "{e}");
+        assert_eq!(e.reason, Some(reason::CLIPBOARD_BUSY));
+        assert!(
+            e.message.starts_with("クリップボードは書き換えていない。"),
+            "{e}"
+        );
+        assert!(
+            e.message.contains(&format!(
+                "GetLastError={}",
+                crate::testing::MOCK_CLIPBOARD_BUSY_ERROR
+            )),
+            "{e}"
+        );
+        assert_eq!(
+            e.hint.as_deref(),
+            Some(hint(Hint::ClipboardBusy, Surface::Cli))
+        );
+        assert_eq!(progress(&e)["partial"], false);
+        let w = world.borrow();
+        assert!(w.clipboard_sets.is_empty());
+        assert!(
+            w.now_ms >= CLIPBOARD_OPEN_MS,
+            "上限まで待った: {}",
+            w.now_ms
+        );
+        assert!(w.now_ms < CLIPBOARD_OPEN_MS + 2 * STOP_POLL_MS);
+    }
+
+    /// 前の手の後の 8 の hint は、D-065 の前置き (操作ごと打ち直さない) と clipboard の手だけの案内の両方を持つ
+    #[test]
+    fn clipboard_busy_after_prior_action_hint_says_only_clipboard() {
+        let mut w = World::new();
+        w.clipboard_busy = u32::MAX;
+        let world = w.shared();
+        let (r, _) = exec(
+            &world,
+            &policy(ENABLED),
+            &mut StopSet::new(),
+            &script(&format!(r#"{{"type":"wait","ms":0}},{CLIP_AB}"#)),
+        );
+        let e = r.unwrap_err();
+        assert_eq!(e.reason, Some(reason::CLIPBOARD_BUSY));
+        let h = e.hint.as_deref().unwrap();
+        assert!(h.contains("操作ごと打ち直さない"), "{h}");
+        assert!(h.contains("clipboard の手だけ"), "{h}");
+        assert_eq!(progress(&e)["executed"], 1);
+        assert_eq!(progress(&e)["partial"], false);
+    }
+
+    /// 試し直しの待ちの間も停止要因を見る (6)
+    #[test]
+    fn clipboard_busy_wait_honors_stop_sources() {
+        let mut w = World::new();
+        w.clipboard_busy = u32::MAX;
+        let world = w.shared();
+        let mut stops = StopSet::new();
+        stops.push(Box::new(StopAfterPolls(3)));
+        let (r, _) = exec(&world, &policy(ENABLED), &mut stops, &script(CLIP_AB));
+        let e = r.unwrap_err();
+        assert_eq!(e.kind, ErrorKind::Stopped, "{e}");
+        let w = world.borrow();
+        assert!(w.clipboard_sets.is_empty());
+        assert!(w.now_ms < CLIPBOARD_OPEN_MS, "上限より前に止まる");
+    }
+
+    /// 空にした後に置けなければ 8 と partial (元の中身は失われた)。前の手の後なら前置きと clipboard の手だけの
+    /// 案内の両方を持つ
+    #[test]
+    fn clipboard_failure_after_empty_is_8_with_partial() {
+        let mut w = World::new();
+        w.clipboard_fail = Some(crate::testing::ClipboardFail::AfterEmpty);
+        let world = w.shared();
+        let (r, _) = exec(
+            &world,
+            &policy(ENABLED),
+            &mut StopSet::new(),
+            &script(&format!(r#"{{"type":"wait","ms":0}},{CLIP_AB}"#)),
+        );
+        let e = r.unwrap_err();
+        assert_eq!(e.kind, ErrorKind::OsError, "{e}");
+        assert!(
+            e.message.contains("元の中身は失われ、クリップボードは空"),
+            "{e}"
+        );
+        assert!(!e.message.contains("書き換えていない"), "{e}");
+        assert_eq!(progress(&e)["partial"], true);
+        let h = e.hint.as_deref().unwrap();
+        assert!(
+            h.ends_with(hint(Hint::ClipboardEmptied, Surface::Cli)),
+            "{h}"
+        );
+        assert!(h.contains("操作ごと打ち直さない"), "{h}");
+        assert!(h.contains("clipboard の手だけ"), "{h}");
+        assert!(world.borrow().clipboard_sets.is_empty());
+    }
+
+    /// 開く前の失敗は 8 で、partial は偽 (中身は変わらない)
+    #[test]
+    fn clipboard_failure_before_open_is_8_without_partial() {
+        let mut w = World::new();
+        w.clipboard_fail = Some(crate::testing::ClipboardFail::BeforeOpen);
+        let world = w.shared();
+        let (r, _) = exec(
+            &world,
+            &policy(ENABLED),
+            &mut StopSet::new(),
+            &script(CLIP_AB),
+        );
+        let e = r.unwrap_err();
+        assert_eq!(e.kind, ErrorKind::OsError, "{e}");
+        assert_eq!(e.reason, None);
+        assert_eq!(progress(&e)["partial"], false);
+        assert!(world.borrow().clipboard_sets.is_empty());
+    }
+
+    /// deny.actions の clipboard は 4 で、何も置かない
+    #[test]
+    fn clipboard_denied_by_policy_is_4() {
+        let world = World::new().shared();
+        let p = policy(&format!("{ENABLED}[deny]\nactions=[\"clipboard\"]\n"));
+        let (r, _) = exec(&world, &p, &mut StopSet::new(), &script(CLIP_AB));
+        let e = r.unwrap_err();
+        assert_eq!(e.kind, ErrorKind::PolicyDenied, "{e}");
+        assert_eq!(e.deny.as_ref().map(|d| d.rule), Some("deny.actions"));
+        assert!(world.borrow().clipboard_sets.is_empty());
+    }
+
+    /// allow.actions に clipboard が無ければ 4
+    #[test]
+    fn clipboard_not_in_allow_actions_is_4() {
+        let world = World::new().shared();
+        let p = policy(&format!("{ENABLED}[allow]\nactions=[\"key\"]\n"));
+        let (r, _) = exec(&world, &p, &mut StopSet::new(), &script(CLIP_AB));
+        let e = r.unwrap_err();
+        assert_eq!(e.kind, ErrorKind::PolicyDenied, "{e}");
+        assert_eq!(e.deny.as_ref().map(|d| d.rule), Some("allow.actions"));
+        assert!(world.borrow().clipboard_sets.is_empty());
+    }
+
+    /// general.input_enabled が偽の設定と、層が空の既定では 4 (resize と同じく実入力の側)
+    #[test]
+    fn clipboard_refused_when_input_disabled_is_4() {
+        for p in [
+            policy("[general]\ninput_enabled = false\ncapture_enabled = true\n"),
+            Policy::closed(),
+        ] {
+            let world = World::new().shared();
+            let (r, _) = exec(&world, &p, &mut StopSet::new(), &script(CLIP_AB));
+            let e = r.unwrap_err();
+            assert_eq!(e.kind, ErrorKind::PolicyDenied, "{e}");
+            assert!(world.borrow().clipboard_sets.is_empty());
+        }
+    }
+
+    /// clipboard だけの操作列も、人の環境を変えるので入力の錠を取り枠を出す (D-157)
+    #[test]
+    fn input_lock_and_overlay_taken_for_clipboard_only() {
+        let world = World::new().shared();
+        let (r, _) = exec(
+            &world,
+            &policy(ENABLED),
+            &mut StopSet::new(),
+            &script(CLIP_AB),
+        );
+        assert_eq!(r.unwrap().clipboard.len(), 1);
+        let w = world.borrow();
+        assert_eq!(w.lock_try_calls, 1, "clipboard だけ");
+        assert_eq!(lock_releases(&w), 1);
+        assert_eq!(w.shows.len(), 1, "枠を出す");
+        assert!(w.sent.is_empty());
+    }
+
+    /// [clipboard, key ctrl+v] がパスワード欄に向かうと、key の束のパスワード欄の判定 (D-090) で 4。clipboard は済んでいる
+    #[test]
+    fn clipboard_then_paste_into_password_field_is_refused_by_key_guard() {
+        let world = pw_world(Ok(Some(true)));
+        let (r, _) = exec(
+            &world,
+            &policy(ENABLED),
+            &mut StopSet::new(),
+            &script(&format!(r#"{CLIP_AB},{{"type":"key","keys":"ctrl+v"}}"#)),
+        );
+        let e = r.unwrap_err();
+        assert_eq!(e.kind, ErrorKind::PolicyDenied, "{e}");
+        assert_eq!(
+            e.deny.as_ref().map(|d| d.rule),
+            Some("general.password_input")
+        );
+        assert_eq!(e.action_index, Some(1));
+        assert_eq!(progress(&e)["executed"], 1);
+        let w = world.borrow();
+        assert_eq!(w.clipboard_sets.len(), 1);
+        assert!(w.sent.is_empty(), "ctrl+v は送っていない");
     }
 
     /// 撮影だけ、待ちだけ、wait_for だけの操作列は画面を変えないので錠を取らない

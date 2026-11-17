@@ -22,9 +22,11 @@ README の「終了コード」の詳細。[README に戻る](../../README.md#�
 
 `resize` の `logical: true` で、窓の画面の DPI で物理に換算した大きさが 16384 を超えたときも 3 で、何も送っていない。倍率は窓を見つけた後に分かるので、実行時に出る (`validate` と `--dry-run` では見えない)。論理の値を下げるか、物理で指定する (D-150)
 
+`clipboard` の文が空のとき、65536 文字 (`char` の数) を超えるとき、改行 (LF・CR) とタブ以外の制御文字を含むときも 3 で、何も置いていない (D-157)
+
 ### `policy_denied`
 
-設定による拒否 (総スイッチ、allow / deny、組み込みの拒否、上限、撮影の保存先の規則、パスワード欄への入力。保存先の形と既存ファイルの規則は設定では緩められないので path を直す)。窓の名指し (`find`、`tree`、`text`、`shot --window`、操作列の検証) で実行ファイル名が許可の外なら、窓が無くても 4 (名前だけの判定で、窓を探す前に断る。D-139)。パスワード欄の上の右クリックとパスワード欄へのドロップの 4 (`rule` が `general.password_input`) は、何も押していない。`detail.point` が読んだ点 (右クリックは押す点、ドロップは `drag` の `to`) で、`detail.window` は無い (D-149)。撮影の許可が無いときの `focus` / `resize` の `title` の指定と `close` も 4 (`rule` は撮影を断った軸。`general.capture_enabled`、`allow.actions`、`deny.actions` のどれか。D-152)。画面を読む待ち (`wait_for` / `wait_stable` / `wait_change`) も、撮影の許可が無ければ検証で 4 (自分の名前の許可に加えて撮影の許可が要る。`rule` は撮影を断った軸。D-153)
+設定による拒否 (総スイッチ、allow / deny、組み込みの拒否、上限、撮影の保存先の規則、パスワード欄への入力。保存先の形と既存ファイルの規則は設定では緩められないので path を直す)。窓の名指し (`find`、`tree`、`text`、`shot --window`、操作列の検証) で実行ファイル名が許可の外なら、窓が無くても 4 (名前だけの判定で、窓を探す前に断る。D-139)。パスワード欄の上の右クリックとパスワード欄へのドロップの 4 (`rule` が `general.password_input`) は、何も押していない。`detail.point` が読んだ点 (右クリックは押す点、ドロップは `drag` の `to`) で、`detail.window` は無い (D-149)。撮影の許可が無いときの `focus` / `resize` の `title` の指定と `close` も 4 (`rule` は撮影を断った軸。`general.capture_enabled`、`allow.actions`、`deny.actions` のどれか。D-152)。画面を読む待ち (`wait_for` / `wait_stable` / `wait_change`) も、撮影の許可が無ければ検証で 4 (自分の名前の許可に加えて撮影の許可が要る。`rule` は撮影を断った軸。D-153)。`clipboard` の文にも `type` と同じ `limits.max_text_len` と、改行を含めば `enter`、タブを含めば `tab` のキーの規則が掛かり、断れば 4 で何も置いていない (D-157)
 
 ### `config`
 
@@ -52,6 +54,8 @@ OS の呼び出しの失敗 (`SendInput`、撮影、保存)。UIA の読み取�
 
 `resize` では、`logical: true` で窓の画面の DPI を読めないとき、窓の大きさの読みが物理と見なせない (中身か枠が外側より大きい) とき、読みそのものに失敗したときも 8 で、大きさの要求を置いていない。窓を見つけた後に分かるので、`validate` と `--dry-run` では見えない (D-150)
 
+`clipboard` では、別のアプリがクリップボードを開いていて、50 ミリ秒おきに 1 秒試し直しても開けなければ 8 (`reason` が `clipboard_busy`。message の末尾に最後の `GetLastError` が付く) で、中身は変わらない。少し待って `clipboard` の手だけを 1 回置き直す。印の登録や置き場の確保に失敗したときも、開く前なので中身は変わらない 8。中身を空にした後に置けなかったときは 8 で `partial` が true になり、クリップボードは空 (元の中身は失われている。D-157)
+
 ### `forbidden_dev_env`
 
 開発シェル (`AI_CU_DEV_FORBID_REAL_INPUT`) での実入力と実画面の撮影の拒否
@@ -59,6 +63,8 @@ OS の呼び出しの失敗 (`SendInput`、撮影、保存)。UIA の読み取�
 ### `user_active`
 
 人が操作中 (最後の入力から `capture.min_idle_ms` 未満) なので、`shot` を撮らなかった、`pixel` で色を読まなかった (D-146)、`focus` で前面にしなかった、または前面にある対象を `close` で閉じなかった、`resize` で大きさを変えなかった (対象かその所有するダイアログが前面のときだけ判定する。D-150)。`reason` が `keys_held` なら、キーかマウスのボタンが押されたままなので、操作列の入力を何も送らなかった (押されたままのキーを人に確かめる。D-066)。`reason` が `lead_input` なら、操作の前の予告の間 (画面の縁に枠を出してから動かすまで) に人がマウスかキーボードに触れたので、何も送らずに止めた (`detail` に `idle_ms` と `lead_ms`。人が離れるのを待って 1 回だけやり直す。MCP では `status` の `retry_after_ms`。D-093)
+
+`clipboard` は前面によらず判定し、人が操作中ならクリップボードに置かずに 10 で止まる。ai-cu 自身の入力の直後も操作中に数えるので、置く順は `[clipboard, click 欄, key ctrl+v]` にする (入力の後に置くなら 3 秒以上の `wait` を挟むか、呼び出しを分ける。D-157)
 
 ### `focus_failed`
 

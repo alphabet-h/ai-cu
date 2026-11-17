@@ -116,10 +116,17 @@ pub enum Hint {
     /// 撮影の許可が無いときの、題名での名指し (focus / resize の title、close) の拒否 (4。D-152)。
     /// 検証と実行器の守りの重ねが共有する。CLI と MCP で同じ文
     TitleNamingDenied,
+    /// clipboard: 人が操作中 (10。D-157)。前面によらず掛ける。ai-cu 自身の入力の直後も当たるので、置く順を案内する
+    ClipboardUserActive,
+    /// clipboard: 他のアプリがクリップボードを開いていて、試し直しの上限まで開けなかった (8、`reason: clipboard_busy`。
+    /// D-157)。中身は変わっていない。CLI と MCP で同じ文
+    ClipboardBusy,
+    /// clipboard: 空にした後に置けず、空にして閉じた (8、partial。D-157)。人の元の中身は失われた。CLI と MCP で同じ文
+    ClipboardEmptied,
 }
 
 impl Hint {
-    pub const ALL: [Hint; 43] = [
+    pub const ALL: [Hint; 46] = [
         Hint::MouseGuard,
         Hint::KeyboardGuard,
         Hint::Elevated,
@@ -163,8 +170,21 @@ impl Hint {
         Hint::OffMonitor,
         Hint::CursorClipped,
         Hint::TitleNamingDenied,
+        Hint::ClipboardUserActive,
+        Hint::ClipboardBusy,
+        Hint::ClipboardEmptied,
     ];
 }
+
+/// clipboard: 人が操作中 (CLI。D-157)。close の `CLOSE_USER_ACTIVE_HINT` の言い方にそろえる
+pub const CLIPBOARD_USER_ACTIVE_HINT: &str = "クリップボードは書き換えていない。人がマウスやキーボードを使っている最中 (ai-cu 自身の入力の直後も含む) なので置かなかった (クリップボードは前面のアプリによらず 1 つなので、人のコピーと貼り付けを壊さない)。clipboard は入力の前に置く ([clipboard, click 欄, key ctrl+v])。入力の後に置くなら、前に 3 秒以上の wait を置くか、clipboard を別の呼び出しにする。そうでなければ数秒待って 1 回だけ再試行し、だめなら人間に確かめる";
+/// clipboard: 人が操作中 (MCP。D-073、D-157)。待つ時間は `status` の `retry_after_ms`
+const MCP_CLIPBOARD_USER_ACTIVE_HINT: &str = "クリップボードは書き換えていない。人がマウスやキーボードを使っている最中 (ai-cu 自身の入力の直後も含む) なので置かなかった (クリップボードは前面のアプリによらず 1 つなので、人のコピーと貼り付けを壊さない)。clipboard は入力の前に置く ([clipboard, click 欄, key ctrl+v])。入力の後に置くなら、前に 3 秒以上の wait を置くか、clipboard を別の呼び出しにする。そうでなければ status の道具の retry_after_ms だけ待って 1 回だけ再試行し、だめなら人間に確かめる";
+/// clipboard: 他のアプリが開いていた (CLI と MCP で同じ文。D-157)。D-065 の前置きの後に読まれても食い違わないよう、
+/// 打ち直すのは clipboard の手だけと書く
+pub const CLIPBOARD_BUSY_HINT: &str = "クリップボードは書き換えていない。別のアプリがクリップボードを開いていた (最後の失敗の値は message)。少し待って clipboard の手だけを 1 回置き直す (前の手は打ち直さない)。続くなら人間に確かめる";
+/// clipboard: 空にした後に置けなかった (CLI と MCP で同じ文。D-157)
+pub const CLIPBOARD_EMPTIED_HINT: &str = "クリップボードは空になった (元の中身は戻らない)。置き直すなら clipboard の手だけを 1 回 (前の手は打ち直さない)。だめなら人間に伝える";
 
 /// 撮影の許可が無いときの、題名での名指し (focus / resize の title、close) の拒否 (4。D-152)。
 /// 検証は呼ばれ方を知らないので、CLI と MCP で同じ文 (道具とキーの名前だけで書く。`BUILTIN_HINT` と同じ形)
@@ -366,6 +386,11 @@ pub fn hint(kind: Hint, surface: Surface) -> &'static str {
         Hint::CursorClipped => CURSOR_CLIPPED_HINT,
         // 検証は呼ばれ方を知らないので、CLI と MCP で同じ (D-152)
         Hint::TitleNamingDenied => TITLE_NAMING_HINT,
+        Hint::ClipboardUserActive if mcp => MCP_CLIPBOARD_USER_ACTIVE_HINT,
+        Hint::ClipboardUserActive => CLIPBOARD_USER_ACTIVE_HINT,
+        // 道具やサブコマンドの名前を含まない文なので、CLI と MCP で同じ (D-157)
+        Hint::ClipboardBusy => CLIPBOARD_BUSY_HINT,
+        Hint::ClipboardEmptied => CLIPBOARD_EMPTIED_HINT,
     }
 }
 
@@ -690,6 +715,9 @@ mod tests {
                 Hint::OffMonitor => 40,
                 Hint::CursorClipped => 41,
                 Hint::TitleNamingDenied => 42,
+                Hint::ClipboardUserActive => 43,
+                Hint::ClipboardBusy => 44,
+                Hint::ClipboardEmptied => 45,
             }
         }
         let mut seen: Vec<usize> = Hint::ALL.iter().map(|h| index(*h)).collect();
@@ -738,6 +766,7 @@ mod tests {
             Hint::ResizeDisabled,
             Hint::ResizeUserActive,
             Hint::ResizeNotResponding,
+            Hint::ClipboardUserActive,
         ] {
             assert_ne!(hint(h, Surface::Cli), hint(h, Surface::Mcp), "{h:?}");
         }
@@ -789,6 +818,10 @@ mod tests {
                 hint(Hint::ResizeUserActive, Surface::Mcp),
                 hint(Hint::ResizeUserActive, Surface::Cli),
             ),
+            (
+                hint(Hint::ClipboardUserActive, Surface::Mcp),
+                hint(Hint::ClipboardUserActive, Surface::Cli),
+            ),
         ];
         for (mcp, cli) in pairs {
             assert!(mcp.contains("status"), "{mcp}");
@@ -801,6 +834,7 @@ mod tests {
             Hint::LeadUserActive,
             Hint::PixelUserActive,
             Hint::ResizeUserActive,
+            Hint::ClipboardUserActive,
         ] {
             assert!(hint(h, Surface::Mcp).contains("retry_after_ms"), "{h:?}");
         }
@@ -920,6 +954,44 @@ mod tests {
         ] {
             assert_eq!(hint(h, Surface::Cli), hint(h, Surface::Mcp), "{h:?}");
         }
+    }
+
+    /// clipboard の文 (D-157): 人が操作中と開けなかった文は書き換えていないと言い、空にした文は言わない。置く順の
+    /// 案内 (入力の前に置く) を人が操作中の文に、打ち直すのは clipboard の手だけを 2 つの失敗の文に書く
+    #[test]
+    fn clipboard_hints_say_what_changed_and_next_steps() {
+        for s in SURFACES {
+            let active = hint(Hint::ClipboardUserActive, s);
+            assert!(
+                active.starts_with("クリップボードは書き換えていない。"),
+                "{active}"
+            );
+            for word in [
+                "ai-cu 自身の入力の直後も含む",
+                "入力の前に置く",
+                "[clipboard, click 欄, key ctrl+v]",
+                "3 秒以上の wait",
+            ] {
+                assert!(active.contains(word), "{word}: {active}");
+            }
+            let busy = hint(Hint::ClipboardBusy, s);
+            assert!(
+                busy.starts_with("クリップボードは書き換えていない。"),
+                "{busy}"
+            );
+            let emptied = hint(Hint::ClipboardEmptied, s);
+            assert!(!emptied.contains("書き換えていない"), "{emptied}");
+            assert!(emptied.contains("元の中身は戻らない"), "{emptied}");
+            for h in [busy, emptied] {
+                for word in ["clipboard の手だけ", "前の手は打ち直さない"] {
+                    assert!(h.contains(word), "{word}: {h}");
+                }
+            }
+        }
+        for h in [Hint::ClipboardBusy, Hint::ClipboardEmptied] {
+            assert_eq!(hint(h, Surface::Cli), hint(h, Surface::Mcp), "{h:?}");
+        }
+        assert_eq!(Hint::ALL.len(), 46);
     }
 
     /// 途中で前面が変わった (D-100): 途中まで送ったと言い、残りだけを送るよう勧め、全文の送り直しを止める

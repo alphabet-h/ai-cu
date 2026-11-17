@@ -8,9 +8,9 @@ use std::time::{Duration, Instant};
 
 use crate::config::{EnvLookup, ProcessEnv, dev_forbid_active};
 use crate::device::{
-    BackendError, CoverTraits, Desktop, FrameState, HeldInputs, HelperOutcome, HiddenWindow, Image,
-    Indicator, InputDesktop, InputEvent, InputLock, InputSink, StackWindow, TopWindow,
-    WindowGeometry, WindowInfo, WindowOwner, WindowPresence,
+    BackendError, ClipboardSet, CoverTraits, Desktop, FrameState, HeldInputs, HelperOutcome,
+    HiddenWindow, Image, Indicator, InputDesktop, InputEvent, InputLock, InputSink, StackWindow,
+    TopWindow, WindowGeometry, WindowInfo, WindowOwner, WindowPresence,
 };
 use crate::geometry::{Point, Rect};
 use crate::win32;
@@ -432,6 +432,12 @@ impl Desktop for Win32Desktop {
         set_size_result(win32::window::set_size(hwnd, w, h))
     }
 
+    fn set_clipboard_text(&self, text: &str) -> Result<ClipboardSet, BackendError> {
+        // 門を先に通す (resize と同じ形)。開発シェルでは Win32 を呼ばずに断る (D-157)
+        clipboard_allowed(self.fixture_hwnd.is_some(), &ProcessEnv)?;
+        win32::clipboard::set_text(text).map_err(BackendError::Os)
+    }
+
     fn window_presence(&self, hwnd: usize, pid: u32) -> Result<WindowPresence, BackendError> {
         focus_allowed(self.fixture_hwnd, &ProcessEnv)?;
         Ok(win32::window::presence_of(hwnd, pid))
@@ -583,6 +589,21 @@ pub fn resize_allowed(
         ))),
         None => Ok(()),
     }
+}
+
+/// `clipboard` の最下層の拒否 (D-157)。開発シェルではクリップボードを書き換えない。フィクスチャ専用の装置では通す
+/// (窓を持たない操作なので「フィクスチャの hwnd だけ」の絞りが当たらない)。純粋な判定なので単体でテストする。
+pub fn clipboard_allowed(fixture_only: bool, env: &dyn EnvLookup) -> Result<(), BackendError> {
+    if fixture_only {
+        return Ok(());
+    }
+    if dev_forbid_active(env) {
+        return Err(BackendError::Forbidden(format!(
+            "開発シェル ({}) ではクリップボードを書き換えない。フィクスチャ限定のテストを使う",
+            crate::config::ENV_DEV_FORBID
+        )));
+    }
+    Ok(())
 }
 
 /// `SetWindowPos` の失敗の `GetLastError` の値のうち、窓が無い (無効なハンドル) を表すもの (`ERROR_INVALID_WINDOW_HANDLE`)
@@ -1491,6 +1512,20 @@ mod tests {
             desktop.post_close(0xDEAD),
             Err(BackendError::OutOfScope(_))
         ));
+    }
+
+    /// clipboard の最下層 (D-157): 開発シェルでは書き換えない。フィクスチャ専用の装置は通す。変数が無ければ通す。
+    /// 実装置 (`Win32Desktop`) は env を差し込めず Ok の腕が実のクリップボードに届くので、ここでは門だけを撃つ
+    #[test]
+    fn clipboard_allowed_refuses_dev_shell_and_allows_fixture_only() {
+        let dev = MapEnv::new(&[(ENV_DEV_FORBID, "1")]);
+        assert!(matches!(
+            clipboard_allowed(false, &dev),
+            Err(BackendError::Forbidden(m)) if m.contains("クリップボードを書き換えない")
+        ));
+        assert!(clipboard_allowed(true, &dev).is_ok());
+        assert!(clipboard_allowed(false, &MapEnv::default()).is_ok());
+        assert!(clipboard_allowed(true, &MapEnv::default()).is_ok());
     }
 
     /// resize の最下層 (D-150): 開発シェルでは大きさを変えない。フィクスチャ専用の装置はフィクスチャの hwnd だけ
