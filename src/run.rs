@@ -857,6 +857,16 @@ fn helper_detail(helper: Option<&HelperOutcome>) -> serde_json::Value {
     })
 }
 
+/// focus が refused_other_app で断られたときの、前面が端末のアプリかの判定 (D-159)。プロセス名だけを見る
+/// (大文字小文字を問わない完全一致)。既定のターミナルがコンソールのアプリのために開いた、対象自身のコンソールの
+/// 窓のことがあると診断の文で言うためだけに使う。`src/win32/process.rs` の `CONSOLE_EXES` とは意味が違う
+/// (あちらは祖先をたどってホストを決める一覧で WindowsTerminal.exe を含まない) ので共有しない
+fn is_console_host(process: &str) -> bool {
+    ["WindowsTerminal.exe", "OpenConsole.exe", "conhost.exe"]
+        .iter()
+        .any(|exe| process.eq_ignore_ascii_case(exe))
+}
+
 /// ガードが断ったウィンドウの `error.detail.window` (D-065)。ガードが既に読んだ値だけで、題名は入れない
 fn window_detail(w: &WindowInfo) -> serde_json::Value {
     serde_json::json!({
@@ -2526,13 +2536,20 @@ impl Executor<'_> {
                 reason::REFUSED_HOST_FRONT,
                 Hint::FocusHostFront,
             ),
-            Some(_) => (
-                format!(
+            Some(_) => {
+                let mut message = format!(
                     "対象 ({describe}) を前面にできなかった (SetForegroundWindow={set_foreground}。前面 (キーの届く窓) は {now})。前面が別のアプリにある (人が使っている、または前面のまま置かれている)。対象の窓が一番手前に見えていても、前面とは限らない"
-                ),
-                reason::REFUSED_OTHER_APP,
-                Hint::FocusRefused,
-            ),
+                );
+                // 前面が端末のアプリなら、既定のターミナルが開いた対象自身のコンソールの窓のことがある (D-159)。
+                // reason と detail は変えず、message と MCP の hint だけを替える
+                let situation = if is_console_host(&now) {
+                    message.push_str("。前面が端末なら、対象がコンソールのアプリのとき、Windows の既定のターミナルが対象自身のコンソールの窓を開いて前面を取ったことがある (起動し直すなら新しいコンソールを作らせない。PowerShell なら Start-Process -NoNewWindow)");
+                    Hint::FocusRefusedConsole
+                } else {
+                    Hint::FocusRefused
+                };
+                (message, reason::REFUSED_OTHER_APP, situation)
+            }
             None => (
                 format!(
                     "対象 ({describe}) を前面にできなかった (SetForegroundWindow={set_foreground}。前面のウィンドウを確かめられない)"
@@ -5591,6 +5608,94 @@ mod tests {
             "foreground が true",
         ] {
             assert!(h.contains(part), "{part}: {h}");
+        }
+    }
+
+    /// 前面が端末のアプリ (ホストでない) なら、reason は refused_other_app のまま、message と MCP の hint が
+    /// 既定のターミナルが開いた対象自身のコンソールの窓のことがあると言い、起こし直しの手を言う。
+    /// CLI の hint は FOCUS_REFUSED_HINT のまま (D-056 の固定)。判定は名前の大文字小文字を問わない完全一致 (D-159)
+    #[test]
+    fn focus_refused_with_console_host_in_front_suggests_no_new_window() {
+        let s = script(r#"{"type":"focus","process":"notepad.exe"}"#);
+        for exe in [
+            "WindowsTerminal.exe",
+            "windowsterminal.exe",
+            "OpenConsole.exe",
+            "conhost.exe",
+        ] {
+            let world = refused_world(Some(other(exe, 0x12, 3)));
+            let e = exec_on(&world, &mut StopSet::new(), &s, &[1], Surface::Cli).unwrap_err();
+            assert_eq!(e.kind, ErrorKind::FocusFailed, "{exe}");
+            assert_eq!(e.reason, Some(reason::REFUSED_OTHER_APP), "{exe}");
+            assert_eq!(e.hint.as_deref(), Some(FOCUS_REFUSED_HINT), "{exe}");
+            for part in [
+                exe,
+                "既定のターミナル",
+                "-NoNewWindow",
+                "一番手前に見えていても",
+            ] {
+                assert!(e.message.contains(part), "{part}: {}", e.message);
+            }
+            let d = e.detail.clone().expect("detail");
+            assert_eq!(d["foreground_process"], exe);
+            assert_eq!(d["foreground_is_host"], false);
+            assert_eq!(world.borrow().focus_calls, vec![0x20], "繰り返さない");
+            let world = refused_world(Some(other(exe, 0x12, 3)));
+            let e = exec_on(&world, &mut StopSet::new(), &s, &[1], Surface::Mcp).unwrap_err();
+            assert_eq!(e.reason, Some(reason::REFUSED_OTHER_APP), "{exe}");
+            assert!(e.message.contains("-NoNewWindow"), "{}", e.message);
+            let h = hint(Hint::FocusRefusedConsole, Surface::Mcp);
+            assert_eq!(e.hint.as_deref(), Some(h), "{exe}");
+        }
+        let h = hint(Hint::FocusRefusedConsole, Surface::Mcp);
+        for part in [
+            "-NoNewWindow",
+            "1 回クリック",
+            "foreground が true",
+            "click、他のツールで前面にしようとしない",
+            "一番手前に見えていても",
+            "人が使っている",
+            "前面のまま置かれている",
+            "起動した側としては見つかっていない",
+        ] {
+            assert!(h.contains(part), "{part}: {h}");
+        }
+        assert!(!h.contains("起動した側ではない"), "{h}");
+    }
+
+    /// 名前が端末を含むだけの別物は端末と見なさない (完全一致。D-159)
+    #[test]
+    fn focus_refused_with_console_like_name_keeps_focus_refused_hint() {
+        let s = script(r#"{"type":"focus","process":"notepad.exe"}"#);
+        let fg = other("WindowsTerminalHelper.exe", 0x12, 3);
+        let world = refused_world(Some(fg.clone()));
+        let e = exec_on(&world, &mut StopSet::new(), &s, &[1], Surface::Cli).unwrap_err();
+        assert_eq!(e.reason, Some(reason::REFUSED_OTHER_APP));
+        assert!(!e.message.contains("-NoNewWindow"), "{}", e.message);
+        assert!(!e.message.contains("既定のターミナル"), "{}", e.message);
+        let world = refused_world(Some(fg));
+        let e = exec_on(&world, &mut StopSet::new(), &s, &[1], Surface::Mcp).unwrap_err();
+        assert_eq!(
+            e.hint.as_deref(),
+            Some(hint(Hint::FocusRefused, Surface::Mcp))
+        );
+    }
+
+    /// 前面の端末がホスト (ai-cu を起動した側) なら refused_host_front のまま、端末の文は出ない (D-159)
+    #[test]
+    fn focus_refused_with_console_host_as_host_stays_host_front() {
+        let s = script(r#"{"type":"focus","process":"notepad.exe"}"#);
+        for surface in [Surface::Cli, Surface::Mcp] {
+            let world = refused_world(Some(other("WindowsTerminal.exe", 0x12, 1)));
+            let e = exec_on(&world, &mut StopSet::new(), &s, &[1], surface).unwrap_err();
+            assert_eq!(e.reason, Some(reason::REFUSED_HOST_FRONT), "{surface:?}");
+            assert!(!e.message.contains("-NoNewWindow"), "{}", e.message);
+            assert!(!e.message.contains("既定のターミナル"), "{}", e.message);
+            assert_eq!(
+                e.hint.as_deref(),
+                Some(hint(Hint::FocusHostFront, surface)),
+                "{surface:?}"
+            );
         }
     }
 

@@ -48,6 +48,9 @@ pub enum Hint {
     /// focus: 前面 (キーの届く窓) が別のアプリで断られた (11。`reason: refused_other_app`。人が使っている、
     /// または前面のまま置かれている。D-156)
     FocusRefused,
+    /// focus: 前面が端末のアプリ (ホストでない) で断られた (11。`reason` は `refused_other_app`。
+    /// 既定のターミナルが開いた対象自身のコンソールの窓のことがある。D-159)
+    FocusRefusedConsole,
     /// focus: 前面は ai-cu を起動した側なのに断られた (11。`reason: refused_host_front`)
     FocusHostFront,
     /// focus: 断られ、前面を確かめられない (11。`reason: refused_unknown`)
@@ -126,7 +129,7 @@ pub enum Hint {
 }
 
 impl Hint {
-    pub const ALL: [Hint; 46] = [
+    pub const ALL: [Hint; 47] = [
         Hint::MouseGuard,
         Hint::KeyboardGuard,
         Hint::Elevated,
@@ -139,6 +142,7 @@ impl Hint {
         Hint::FocusNotFound,
         Hint::FocusMinimized,
         Hint::FocusRefused,
+        Hint::FocusRefusedConsole,
         Hint::FocusHostFront,
         Hint::FocusRefusedUnknown,
         Hint::FocusDenied,
@@ -288,6 +292,9 @@ const MCP_CAPTURE_SENSITIVE_HINT: &str = "何も撮っていない。撮る矩�
 const MCP_HOST_UNKNOWN_HINT: &str = "何も送っていない。ai-cu を起動した側のプロセスを特定できないので、実入力をすべて止めている。focus や再試行では変わらない。読むだけの道具 (windows、shot、pixel、find、tree、text、status) は使える。人間に ai-cu の起動のしかたを確かめてもらう";
 const MCP_FOCUS_NOT_FOUND_HINT: &str = "何も送っていない。その実行ファイル名 (と題名) の見えているウィンドウが無い。windows の道具で名前と題名を確かめる。起動した直後なら数秒待って windows を見直す";
 const MCP_FOCUS_REFUSED_HINT: &str = "何も送っていない。前面 (キーの届く窓) が別のアプリ (前面のプロセスは message と error.detail にある) なので、Windows が前面の切り替えを断った (人が使っている、または前面のまま置かれている。対象の窓が一番手前に見えていても前面とは限らない)。focus を繰り返さず、人間に対象の窓を 1 回クリックしてもらい、windows で対象の foreground が true になったのを確かめてから続ける。タスクバー、Alt+Tab、click、他のツールで前面にしようとしない";
+/// 前面が端末のアプリ (ホストでない) で断られた (MCP。D-159)。判定はプロセス名だけなので、
+/// 起こし直しの手を先に置き、従来の人に 1 回クリックしてもらう手と D-156 の句を残す
+const MCP_FOCUS_REFUSED_CONSOLE_HINT: &str = "何も送っていない。前面 (キーの届く窓) は端末のアプリ (前面のプロセスは message と error.detail にある) で、ai-cu を起動した側としては見つかっていない (人が使っている、または前面のまま置かれている。対象の窓が一番手前に見えていても前面とは限らない)。対象がコンソールのアプリなら、Windows の既定のターミナルが対象自身のコンソールの窓を開き、それが前面を取ったことがある。対象を起動し直せるなら、新しいコンソールを作らせずに起動する (PowerShell なら Start-Process -NoNewWindow)。そうでなければ focus を繰り返さず、人間に対象の窓を 1 回クリックしてもらい、windows で対象の foreground が true になったのを確かめてから続ける。タスクバー、Alt+Tab、click、他のツールで前面にしようとしない";
 const MCP_FOCUS_HOST_FRONT_HINT: &str = "何も送っていない。前面はあなたの端末なのに、Windows が前面の切り替えを断った (前面化の補助プロセスを試したかと、その結果は error.detail の helper と helper_result にある)。focus を繰り返さず、人間に対象のウィンドウを前面に出してもらい (クリックでよい)、windows で対象の foreground が true になったのを確かめてから続ける。タスクバー、Alt+Tab、click、他のツールで前面にしようとしない。find と text は前面でなくても読める";
 const MCP_FOCUS_REFUSED_UNKNOWN_HINT: &str = "何も送っていない。Windows が前面の切り替えを断った (前面のウィンドウを確かめられない)。focus を繰り返さず、人間に対象を前面に出してもらい、windows で対象の foreground が true になったのを確かめてから続ける。タスクバー、Alt+Tab、click、他のツールで前面にしようとしない";
 const MCP_CLOSE_NOT_FOUND_HINT: &str = "何も閉じていない。その実行ファイル名と題名の見えているウィンドウが無い (もう閉じている場合を含む)。windows の道具で名前と題名を確かめる";
@@ -326,6 +333,8 @@ pub fn hint(kind: Hint, surface: Surface) -> &'static str {
         Hint::FocusMinimized => FOCUS_MINIMIZED_HINT,
         Hint::FocusRefused if mcp => MCP_FOCUS_REFUSED_HINT,
         Hint::FocusRefused => FOCUS_REFUSED_HINT,
+        Hint::FocusRefusedConsole if mcp => MCP_FOCUS_REFUSED_CONSOLE_HINT,
+        Hint::FocusRefusedConsole => FOCUS_REFUSED_HINT,
         Hint::FocusHostFront if mcp => MCP_FOCUS_HOST_FRONT_HINT,
         Hint::FocusHostFront => FOCUS_HOST_FRONT_HINT,
         Hint::FocusRefusedUnknown if mcp => MCP_FOCUS_REFUSED_UNKNOWN_HINT,
@@ -573,6 +582,7 @@ mod tests {
             (Hint::FocusNotFound, FOCUS_NOT_FOUND_HINT),
             (Hint::FocusMinimized, FOCUS_MINIMIZED_HINT),
             (Hint::FocusRefused, FOCUS_REFUSED_HINT),
+            (Hint::FocusRefusedConsole, FOCUS_REFUSED_HINT),
             (Hint::FocusDenied, FOCUS_DENIED_HINT),
             (Hint::FocusUserActive, FOCUS_USER_ACTIVE_HINT),
             (Hint::ScreenWait, SCREEN_WAIT_HINT),
@@ -719,6 +729,7 @@ mod tests {
                 Hint::ClipboardUserActive => 43,
                 Hint::ClipboardBusy => 44,
                 Hint::ClipboardEmptied => 45,
+                Hint::FocusRefusedConsole => 46,
             }
         }
         let mut seen: Vec<usize> = Hint::ALL.iter().map(|h| index(*h)).collect();
@@ -746,6 +757,7 @@ mod tests {
             Hint::HostUnknown,
             Hint::FocusNotFound,
             Hint::FocusRefused,
+            Hint::FocusRefusedConsole,
             Hint::FocusHostFront,
             Hint::FocusRefusedUnknown,
             Hint::CloseNotFound,
@@ -992,7 +1004,7 @@ mod tests {
         for h in [Hint::ClipboardBusy, Hint::ClipboardEmptied] {
             assert_eq!(hint(h, Surface::Cli), hint(h, Surface::Mcp), "{h:?}");
         }
-        assert_eq!(Hint::ALL.len(), 46);
+        assert_eq!(Hint::ALL.len(), 47);
     }
 
     /// 途中で前面が変わった (D-100): 途中まで送ったと言い、残りだけを送るよう勧め、全文の送り直しを止める
