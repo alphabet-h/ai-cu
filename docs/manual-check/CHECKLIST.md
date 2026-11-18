@@ -524,11 +524,14 @@ hook は python の客の引数にある ai-cu のパスを起動として見る
 (変数だと起動先が分からないとして止まる。debug のパスは opt-in しても止まる)。Bash ツールから送るときはパスをスラッシュ区切りで書く
 (`\\` を含む文字列は照合に合わず止まる)。
 ```powershell
-python <repo>\docs\manual-check\mcp_client.py <repo>\target\release\ai-cu.exe mcp -- <repo>\docs\manual-check\mcp-requests.jsonl --save-images <repo>\target\manual-check
+python <repo>\docs\manual-check\mcp_client.py <repo>\target\release\ai-cu.exe mcp -- <repo>\docs\manual-check\mcp-requests.jsonl --save-images <repo>\target\manual-check --save-replies <repo>\target\manual-check\replies
 ```
+表示は応答を切ることがあり、切った行の末尾には `…(全 N 字のうち L 字)` が付く。
+切らない全文は、その回の下位フォルダ (出力の最初の `replies:` の行のパス) の reply-<id>.json で読める (id 2 なら reply-2.json)。
+その回のフォルダにファイルが無い id は、応答が届かなかった。
 - [ ] 標準エラーの最初の行に `host: [...]` (python.exe、シェル、端末が並ぶ)
 - [ ] id 1 (`server/discover`): `supportedVersions` が `["2026-07-28"]`、`resultType` が `complete`、`ttlMs` と `cacheScope` がある
-- [ ] id 2 (`tools/list`): 道具が 20 個 (`pixel` に `readOnlyHint` が付く)。この流れでは `pixel` を呼ばない (固定の要求にはメモ帳の座標を書けず、撮って読んでよいのはメモ帳の矩形の中だけのため)。MCP で点の色を読む確かめは手順 34 の (a) で行う (D-146)
+- [ ] id 2 (`tools/list`): 要約の行 (`--- tools: N 個 / readOnlyHint: …`) の N が `src/config.rs` の `MCP_TOOL_NAMES` の `[&str; N]` と同じ (`grep -n "MCP_TOOL_NAMES: " src/config.rs`)、readOnlyHint に `pixel` が入る (道具の数はここに写さない)。この流れでは `pixel` を呼ばない (固定の要求にはメモ帳の座標を書けず、撮って読んでよいのはメモ帳の矩形の中だけのため)。MCP で点の色を読む確かめは手順 34 の (a) で行う (D-146)
 - [ ] id 3 (`config`): 基本の層 (`paths.floor.kind`) が `default` で `input_enabled` が true。id 4 (`windows`): メモ帳が出て端末は出ない (`other_windows` に数えられる)
 - [ ] id 5、6 (`find`、`text`): 本文の要素と文字列。id 7 (`shot`): `isError` が false で `image` が 1 つ (保存した png にメモ帳だけが写る。隠れていれば 7)
 - [ ] id 8 (`click` の dry_run): `dry_run` true、`plan` がある。id 9 (`alt+f4`): `isError` true で `exit_code` 4。id 10 (`ping`): `{}`

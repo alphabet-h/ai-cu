@@ -87,7 +87,7 @@ verify.py ごと外から止められた (メモリ不足などで、まとめ�
 
 `python scripts/install.py` は release を `~/.cargo/bin/ai-cu.exe` に配置する開発者向けの道具 (D-064、D-069)。プロジェクト外への書き込みなので、利用者の承認 (CLAUDE.local.md などに書かれたもの) が無ければ確認してから打つ。/verify を通っていない release は配置しない。install.py は、未コミットの変更がある木と、HEAD と違うコミットや dirty の印を持つ release を断る (D-069)。AI が CLI で行う手動確認は、配置したものではなく `target/release/ai-cu.exe` を使う (ガード hook はそのパスだけを通す)。`scripts/install.py` を変えたら `python scripts/test_install.py` と `python scripts/test_verify.py` も走らせる (verify.py が clean の判定を import するため。D-083)。
 
-`scripts/make_icon.py` は assets/icon/ の SVG から exe に埋め込む ICO を作り直す開発者の道具で、CI でもビルドでも走らせない (D-127)。`scripts/make_icon.py` を変えたら `python scripts/test_make_icon.py` も走らせる。
+`scripts/make_icon.py` は assets/icon/ の SVG から exe に埋め込む ICO を作り直す開発者の道具で、CI でもビルドでも走らせない (D-127)。`scripts/make_icon.py` を変えたら `python scripts/test_make_icon.py` も走らせる。`docs/manual-check/mcp_client.py` (手動確認の MCP の客) を変えたら `python docs/manual-check/test_mcp_client.py` も走らせる (D-055)。
 
 ## 完成の定義
 
