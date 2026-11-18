@@ -2223,6 +2223,11 @@ impl Executor<'_> {
         Ok(())
     }
 
+    /// パスワード欄の判定が時間切れで断るときの文の末尾 (D-163)。起きやすい場面と次の手を言う。3 つの時間切れ
+    /// (UIA 自身、上限の待ち、返らない判定の上限) に共通の 1 文で、どれかは前の内側の文が言う。送り済みの扱いは
+    /// hint の頭 (D-065) が言うので、ここには書かない
+    const PASSWORD_CHECK_TIMEOUT_NEXT: &'static str = "UIA の時間切れ (HRESULT つき) なら、開いた直後のダイアログなど前面のアプリが忙しいと起きる。1 秒ほど待ってから、hint のとおり 1 回だけ再試行する (上の文が ai-cu の起動し直しを言っていれば、再試行せずにそれに従う)。続けて同じ文なら再試行を重ねない";
+
     /// パスワード欄の判定の振り分け (D-090、D-149。キーの経路とマウスの経路が共有する)。戻り値は UIA を読んだか。
     /// 全層が `general.password_input` を許していれば読まない (`read` も呼ばない)。`read` が `None` を返せば読まずに
     /// 飛ばす (ドロップの点が許可の外。D-149)。パスワードの要素なら 4 (`refuse_hint` と `detail`)。時間切れ
@@ -2256,7 +2261,10 @@ impl Executor<'_> {
             Err(e @ BackendError::TimedOut(_)) => {
                 return Err(AppError::new(
                     ErrorKind::OsError,
-                    format!("パスワード欄かの判定 (UIA) が時間切れのため、{refused}断った: {e}"),
+                    format!(
+                        "パスワード欄かの判定 (UIA) が時間切れのため、{refused}断った: {e}。{}",
+                        Self::PASSWORD_CHECK_TIMEOUT_NEXT
+                    ),
                 ));
             }
             _ => {}
@@ -8369,6 +8377,11 @@ mod tests {
                 "{action}: {}",
                 e.message
             );
+            assert!(
+                e.message.contains(Executor::PASSWORD_CHECK_TIMEOUT_NEXT),
+                "{action}: {}",
+                e.message
+            );
             let w = world.borrow();
             assert!(w.sent.is_empty(), "{action}: {:?}", w.sent);
             assert_eq!(w.focused_password_calls, 1, "{action}");
@@ -8481,6 +8494,36 @@ mod tests {
                 "以下は actions[0] の止まった所から先について (それより前に起こしたことはそのまま): {}",
                 hint(Hint::PasswordField, Surface::Cli)
             )),
+            "{h}"
+        );
+    }
+
+    /// Tab の後の 2 回目の判定が時間切れなら、"a" と Tab を送った後に 8 で断る。message は場面と次の手を言い
+    /// (D-163)、送り済みの扱いは hint の頭 (D-065) が言う
+    #[test]
+    fn password_focus_timeout_after_tab_refuses_with_next_step() {
+        let world = pw_world(Ok(Some(false)));
+        world.borrow_mut().password_after_calls =
+            Some((1, Err(BackendError::TimedOut("時間切れ".into()))));
+        let (r, _) = exec(
+            &world,
+            &policy(ENABLED),
+            &mut StopSet::new(),
+            &script(r#"{"type":"type","text":"a\tb"}"#),
+        );
+        let e = r.unwrap_err();
+        assert_eq!(e.kind, ErrorKind::OsError, "{e}");
+        assert!(
+            e.message.contains(Executor::PASSWORD_CHECK_TIMEOUT_NEXT),
+            "{}",
+            e.message
+        );
+        assert_eq!(progress(&e)["executed"], 0);
+        assert_eq!(progress(&e)["partial"], true);
+        assert_eq!(world.borrow().sent.len(), 2, "a と Tab だけ");
+        let h = e.hint.as_deref().unwrap();
+        assert!(
+            h.starts_with("actions[0] も途中まで行った (partial=true)。操作ごと打ち直さない。"),
             "{h}"
         );
     }
@@ -9715,6 +9758,11 @@ mod tests {
         assert_eq!(e.kind, ErrorKind::OsError, "{e}");
         assert!(
             e.message.contains("パスワード欄かの判定") && e.message.contains("押さずに断った"),
+            "{}",
+            e.message
+        );
+        assert!(
+            e.message.contains(Executor::PASSWORD_CHECK_TIMEOUT_NEXT),
             "{}",
             e.message
         );
