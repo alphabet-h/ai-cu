@@ -1953,6 +1953,7 @@
 - 根拠: 形を変える案 (B、C) は外に見える結果の形を変える。A は形を変えずに、画像が見えないときの理由と回り道 (path にも保存する、失敗しうる操作の前で run を分ける) を、結果だけで読めるようにする。サーバー側が画像を捨てていないことはモックのテストで固定する
 - 覆る条件: Claude Code が `isError` の結果の画像を出すようになったとき (文を外す)。他のクライアントで困った報告が来たとき。path の画像でも困った報告が来たとき。形を変えてよいと利用者が決めたとき (B を見直す)。一手ずつの道具に撮影の後の段が増えたとき。要点版に余裕ができたとき (要点版にも書く)
 - 状態: 採用 (2026-11-10)
+- 追記 (2026-11-18): D-158 の `shot.on_error` で、一手ずつの道具の失敗の結果にも mcp:inline の画像が載りうる (「対象は実質 run だけ」は古くなった)。判定は変えず、注記の文を道具を問わない形 (撮影の path、一手ずつなら shot.path) に直した。手引きでは on_error に path を書くよう勧める
 
 ### D-137 `click` / `double_click` に `modifiers` (ctrl、shift、alt) を足し、修飾キーを押したままのクリックを 1 回の SendInput で送る
 - 日付: 2026-11-10
@@ -2464,3 +2465,30 @@
   - win32-reviewer の指摘と直した所 (must-fix 0、2026-11-18): (S1) 形式の列挙・`CF_UNICODETEXT` の写し (`Vec<u16>` のまま)・`GetClipboardSequenceNumber` を 1 回の `open_for_read` の中でまとめて取る `snapshot` (結果の型 `Snapshot`) にし、`list_formats` をやめた。テストは `Fixture::open` を確かめより前に移し、`execute` の直前に `sequence_number` を読み直して違えば `FIXTURE clipboard skipped (changed)` で抜ける。残る間 (読み直しから実行器を通って `set_text` が `OpenClipboard` するまで) に書き換えられると、その中身は失われ、書き戻すのは古い写しになるが、短い間なので許容する (○。閉じるには置くのと確かめるのを同じ開きの中で行う口が要り、製品の口を実機テストのために広げない)。(S2) `execute` の直後の番号を `RestoreClipboard` に記録し、Drop ではその値と今の値が同じときだけ書き戻す。違えば `FIXTURE clipboard restore_skipped (changed after set)`。置く前に panic したら記録が無いので書き戻さない (`restore_skipped (not set)`)。置いた後の読みで番号が進むかは確かめていないので、読めた文と印が置いたとおりのときだけ、読みの後の番号を取り直す (違えば古い記録のまま、書き戻さない側に倒れる)。(N1) 元の文は `Vec<u16>` のまま持ち、`String::from_utf16` が失敗したら書き換えずに `restore_skipped (not valid UTF-16)`。(N2) 元に文が無ければ `restore_skipped (no text before; the test text stays on the clipboard)` を印字する。(N3) 文の断言の失敗の文は読めた文を写さず、長さと一致したかだけ。(N4) `EnumClipboardFormats` のループに上限 4096 (`ENUM_FORMATS_LIMIT`) を置き、超えたら Err。(N5) `OpenClipboardGuard` に `PhantomData<*const ()>` を持たせて `!Send` にした。(N6) `CountClipboardFormats` の SAFETY を「開いていなくても呼べる」に直した。(余談) 元の中身に印 `ExcludeClipboardContentFromMonitorProcessing` があれば (パスワード管理ソフトの秘密の可能性)、書き換えずに `FIXTURE clipboard skipped (monitor-excluded content present)` で抜け、`snapshot` もその文を写さない。どれも実機では未実行
 - 追記 (自動のセキュリティレビューの指摘、2026-11-18): `clipboard` に自分の名前の許可に加えて `type` の許可も求める (`Policy::check_action_kind` の末尾。D-153 と同じ形で、`type` を断った軸の rule と fix を写し、message の頭に「clipboard は貼り付けで文字を入れられるので type と同じ許可が要る」を足す)。それまでは、`allow.actions` を書かず `deny.actions = ["type"]` で文字の入力を止めた設定でも、[clipboard, key ctrl+v] で同じ文を入れられた (回り道)。`allow.actions` に `clipboard` だけを並べた設定も断るようになる。本人が決めた「操作の種類 `clipboard` として許可」を狭める向きの足し算で、覆さない。細部は推奨で決めた (○)。テスト: src/policy.rs の `policy_clipboard_also_needs_type_permission` (allow.actions に clipboard だけ / deny.actions の type / clipboard 自身の deny / 総スイッチだけ / 追加の層の type の deny)。文書: docs/reference/config.md と src/guide.md の clipboard の節。覆る条件: `type` を断りつつ貼り付けだけを許したい利用者の要望 (そのときは clipboard 専用の旗を足す)
 - 追記 (win32-reviewer の見直し、2026-11-18): 実機テストの後始末の穴を 2 つ塞いだ。(S-a) 実行器が失敗したとき (空にした後の失敗の Emptied を含む) に、番号を記録する前に panic して書き戻さなかった。実行の結果を受けた直後に番号を読み、置く前と違えば記録してから expect する (置く前と同じなら何も書き換わっていないので記録しない)。(S-b) `GetClipboardSequenceNumber` が 0 (窓口のクリップボードの権利が無い) だと変化の確かめがすべて素通りになるので、置く前の番号が 0 なら `FIXTURE clipboard skipped (sequence unavailable)` で抜ける。nit (読みを閉じてから番号を取り直すまでの短い間、書き戻しで CF_LOCALE と元の印の値が戻らない点) は記録だけにした。細部は推奨で決めた (○)
+
+### D-158 操作列に `on_error` (失敗したとき撮る 1 枚) を足す (撮る窓は呼ぶ側が決め、撮影の規則をそのまま通す)
+- 日付: 2026-11-18
+- 場面: 操作が失敗した直後に、AI が `windows` と `shot` で撮り直す往復が入る。撮り直す間に画面が変わりうるので、失敗の時点の画面が残らない
+- 本人 (利用者) が決めたこと:
+  - 形は「操作列の最上位に `on_error: {screenshot: {...}}` を足す」。撮る窓は呼ぶ側が決める。結果は失敗の JSON の最上位に `error_shot` (撮れなければその理由)。一手ずつの道具は既存の `shot` オブジェクトに `on_error: true`
+  - CLI の一手ずつにも `--shot-on-error` (`--shot` が要る。MCP の `shot.on_error: true` と同じ意味) を足す
+- 選択肢: A 操作列の `on_error` (撮る窓は呼ぶ側が書く) / B CLI の旗だけで、撮る窓を道具が推す / C 失敗した操作の窓を自動で撮る
+- 判断: A (○、本人の選択)。B と C は、道具が撮る窓を推すので許可の外を撮りうる (目標外)。細部は推奨で決めた (○)
+- 細部 (自分で決めたこと):
+  - `on_error.screenshot` の項目は `screenshot` の操作と同じ (path、region、window、scale、max_edge、settle)。検証の前段で `Action::Screenshot` に写し、1 操作の検査の関数に通す。許可 (`allow.actions` の screenshot、`capture_enabled`)、全画面の禁止、保存先 (D-075)、`mcp:inline` の規則がそのまま効く
+  - 検証は操作に入る前に済ませ、何も送らずに断る。形の誤りは 3 (`invalid_script`)、設定による拒否は 4。誤りの `action_index` は null で、文の頭に「on_error.screenshot: 」
+  - 撮るのは実行器が操作に入った後の失敗 (最上位に `executed` が付く失敗) だけ。6 (停止)、10 (人が操作中)、14 (ロック・セーバー) では撮らない。6 は理由によらず撮らない (`cursor_clipped` (D-151) は人の操作ではないが、撮る前の停止の判定が同じずれを拾い直して撮れないので、撮らない側に倒す)。判定は `AppError::skips_error_shot` の 1 か所 (kind が Stopped、UserActive、DesktopUnavailable)
+  - 失敗した操作が `screenshot` で、その region と window が on_error と同じなら撮らない (同じ理由で断られる撮影と隠れの待ちを繰り返さない)
+  - 撮る時点は、押したままのキーとボタンを離した後、枠を解く前 (錠は持ったまま)。撮る前に停止の判定 (停止の目印、取り消し、時間の上限、人のマウス) を通し、続けて撮影の守り (入力デスクトップ、窓の解決と隠れの待ち、領域、機密の窓) をそのまま通す
+  - 撮る前の停止の判定か撮影の途中で人による停止に当たったら、撮らずに `error_shot.ok: false` を出し、後始末を停止と同じにする (枠は `release(0)` で即座に解き、MCP は停止のクールダウンを立てて枠を延ばさない。D-093、D-107)。判定は実行器の中で閉じ、JSON を読み直さない。MCP の判定は `error` に加えて `error_shot` も見る (`cursor_clipped` の ok: false は reason で外れる)
+  - 結果は最上位の `error_shot` 1 つ。撮れたら `{"ok": true, ...}` (成功の `screenshots` の 1 要素と同じ項目)、撮れなければ `{"ok": false, "code", "exit_code", "message"}` と、値があるときだけ `reason`、`rule`、`fix` (元の失敗の error と同じ規則。D-079)。hint は付けない (元の失敗の hint が次の手)。元の失敗は変えない
+  - 撮れた 1 枚の `action_index` は失敗した操作の添字。`screenshots` と `executed` (D-065) には数えない。成功と、撮らない失敗では `error_shot` のキーごと出さない
+  - 時間の上限: on_error の settle の `timeout_ms` も検証の時間の見積もりに足す。上限を過ぎていれば撮る前の停止の判定が 6 を返し、`error_shot` の ok: false に出る
+  - MCP の `run`: `on_error` を受け、max_edge の既定と、`inline: false` × `mcp:inline` の拒否を、actions の撮影と同じ判定で掛ける。inline の画像は既存の仕組みで content に入り、D-136 の注記も付く。注記の文は道具を問わない形 (撮影の path、一手ずつなら shot.path) に直す
+  - 一手ずつ: CLI は `--shot-on-error` (`--shot` が要る)、MCP は `shot.on_error: true`。真なら操作列の `on_error` に同じ撮影を入れる (成功なら今までどおり操作の後に撮り、失敗なら on_error で撮る)。`settle_ms: "auto"` は on_error の撮影に既定の settle を付け、数の待ちは on_error に入れない (失敗の後に固定で待たない)
+  - dry-run と validate の出力は変えない (on_error の検証は掛かり、誤りは issues に出る)。TUI の実行の確認には「失敗のとき撮る → <path>」の 1 行を出す (撮影の枚数には数えない)
+  - `schema` の top_level に on_error を書く。SCRIPT_VERSION は 1 のまま (省略できる項目の追加は版を上げていない。D-137、D-150、D-157)
+  - 手引きは全文だけの「操作列 JSON」の節に書く (要点版は上限 21000 バイトのほぼ上限。D-136)。実機のテスト (`#[ignore]`) と手動確認の手順は足さない (撮影の経路は既存の実機テストで撃たれていて、足すのは「いつ呼ぶか」の論理なのでモックで撃つ)
+- 根拠: 撮る窓を呼ぶ側が書けば、許可の外を道具が撮ることがない。撮影の規則を 2 つ持たず、既存の 1 操作の検査と撮影の経路を通すので、許可と守りが抜けない。失敗した後に「撮れない設定だった」と分かるのでは遅いので、検証は操作の前に掛ける。止めた人と使っている人の画面、ロック画面は撮らない (人の意思と画面の中身を尊重)
+- 覆る条件: on_error だけに別の規則 (例: 全画面を許す) が要る事例。操作の前の失敗でも撮りたい事例。誤りの位置を機械で読みたい客 (`at: "on_error"` を足す)。同じ対象の撮影の失敗でも撮り直すと撮れる事例が目立ったとき。枠が撮影に写る環境が見つかったとき。撮れなかった理由ごとの次の手が要る事例。撮らなかった理由を機械で読みたい事例。成功と失敗で撮る窓を分けたい事例。Claude Code が失敗の結果の画像を出すようになったとき (D-136)。古い ai-cu に新しい操作列を渡す運用が問題になったとき (版を上げる)
+- 状態: 採用 (D-136 の「対象は実質 run だけ」を古くした。D-136 の状態の追記を参照)
