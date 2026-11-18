@@ -2374,8 +2374,8 @@ mod tests {
     };
     use crate::device::{BackendError, InputDesktop, InputEvent};
     use crate::testing::{
-        DesktopOnly, MemoryImages, MockDevices, NoDevices, World, assert_real_clock_timeout_checks,
-        unique_temp_dir, window,
+        DesktopOnly, MemoryImages, MockDevices, NoDevices, SendHook, World,
+        assert_real_clock_timeout_checks, unique_temp_dir, window,
     };
 
     const ENABLED: &str = "[general]\ninput_enabled = true\ncapture_enabled = true\n";
@@ -5527,11 +5527,12 @@ mod tests {
         let world = f.world.clone();
         let mut s = f.server(paths(&floor));
         let inbox = s.inbox.clone();
-        // 実行の途中 (200 ms 後) に取り消しが届く
-        let pusher = std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(200));
-            inbox.push(cancel(json!(9)));
-        });
+        // ボタンを押した束 (drag の 2 回目の send) の後に取り消しが届く。時間で待つと、
+        // 負荷の重いときに最初の送信より先に届いて何も送らずに止まる (D-160)
+        world.borrow_mut().hooks_after_sends.push((
+            1,
+            SendHook(std::rc::Rc::new(move || inbox.push(cancel(json!(9))))),
+        ));
         let line = call(
             9,
             "drag",
@@ -5544,9 +5545,19 @@ mod tests {
             "{:?}",
             started.elapsed()
         );
-        pusher.join().unwrap();
         let w = world.borrow();
-        assert!(w.sent.len() < 40, "途中で止まった: {}", w.sent.len());
+        // 押した後に取り消しが届いた (drag の展開が変わればここで落ちる)
+        assert!(
+            w.sent.get(1).is_some_and(|b| b
+                .iter()
+                .any(|e| matches!(e, InputEvent::Button { down: true, .. }))),
+            "2 回目の束でボタンを押す: {:?}",
+            w.sent
+        );
+        // 移動・押下の後、hook の次の手順の前の停止の確かめで止まり、後始末が
+        // 最後に確かめた点へ戻す移動とボタンの離しを別々に送る (run.rs の release_batches)
+        assert_eq!(w.sent.len(), 4, "途中で止まった: {:?}", w.sent);
+        assert_eq!(w.sent[2], vec![InputEvent::move_to(Point::new(10, 10))]);
         let last = w.sent.last().unwrap();
         assert!(
             last.iter()
