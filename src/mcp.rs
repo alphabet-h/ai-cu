@@ -797,7 +797,7 @@ pub fn tools() -> Vec<Value> {
             "focus",
             "ウィンドウを前面にする",
             &format!(
-                "許可されたアプリのウィンドウを前面にする (キーと文字は前面のウィンドウに届く)。SetForegroundWindow を 1 回呼ぶだけで、最小化は復元しない。常駐の MCP サーバーは人の入力で前面化の権利を失うので、断られて前面があなたの端末なら、使い捨ての補助プロセスに 1 回だけ頼む。それでも断られたら focus_failed (error.reason=refused_host_front)。前面 (キーの届く窓) が別のアプリなら OS が断り focus_failed (refused_other_app。対象が一番手前に見えていても前面とは限らない。前面が別のアプリなら補助は起動しない。補助を使ったかは error.detail の helper)。どちらも繰り返さず人間に頼む (対象の窓のクリックでよい。windows の foreground で確かめてから続ける)。人が操作中なら user_active。{STEP_NOTE}。{LEAD_NOTE}"
+                "許可されたアプリのウィンドウを前面にする (キーと文字は前面のウィンドウに届く)。SetForegroundWindow を 1 回呼ぶだけで、最小化は復元しない。常駐の MCP サーバーは人の入力で前面化の権利を失うので、断られて前面があなたの端末なら、使い捨ての補助プロセスに 1 回だけ頼む。それでも断られたら focus_failed (error.reason=refused_host_front)。前面 (キーの届く窓) が別のアプリなら OS が断り focus_failed (refused_other_app。対象が一番手前に見えていても前面とは限らない。前面が別のアプリなら補助は起動しない。補助を使ったかは error.detail の helper。前面が端末なら対象のコンソールのアプリ自身の窓のことがあり、起こし直しの手を hint が言う)。どちらも繰り返さず hint の手を取る (人間に頼むなら対象の窓のクリックでよい。windows の foreground で確かめてから続ける)。人が操作中なら user_active。{STEP_NOTE}。{LEAD_NOTE}"
             ),
             json!({ "type": "object", "additionalProperties": false, "properties": step_props(json!({ "process": schema_window(), "title": schema_named_title() })), "required": ["process"] }),
             input_tool(true),
@@ -6954,6 +6954,9 @@ mod tests {
         assert!(d.contains("refused_host_front"), "{d}");
         assert!(d.contains("常駐"), "{d}");
         assert!(d.contains("人間に頼む"), "{d}");
+        // 前面が端末のときの起こし直しの手は hint が言う (D-159)
+        assert!(d.contains("コンソール"), "{d}");
+        assert!(d.contains("起こし直し"), "{d}");
         assert!(d.chars().count() <= 2048);
         // 補助プロセスで効くようになったこと (D-057)
         assert!(d.contains("補助プロセス"), "{d}");
