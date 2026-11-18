@@ -255,6 +255,19 @@ pub struct World {
     /// `(n, r)`: n 回のカーソルの読みの後 (0 始まりで n 番目の読みの前) に `clip` を r にし、今のカーソルを範囲に寄せる
     /// (移動を送る前、待ちの途中に別のアプリが範囲を掛けたことを模す。D-151)。既定は空
     pub clip_after_reads: Vec<(usize, Rect)>,
+    /// n 回目 (0 始まり) の send の後に、この関数を呼ぶ (送った後に外から何かが届くのを模す。
+    /// 呼ぶときは World の借用を落としている。D-160)。既定は空
+    pub hooks_after_sends: Vec<(usize, SendHook)>,
+}
+
+/// `World::hooks_after_sends` の関数 (D-160)。`World` の `Debug` が通るように包む
+#[derive(Clone)]
+pub struct SendHook(pub Rc<dyn Fn()>);
+
+impl std::fmt::Debug for SendHook {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SendHook(..)")
+    }
 }
 
 /// `MockDesktop::set_clipboard_text` が `Busy` に載せる `GetLastError` の値 (`ERROR_ACCESS_DENIED`。D-157)
@@ -403,6 +416,7 @@ impl World {
             clip_fail: None,
             clip_after_sends: Vec::new(),
             clip_after_reads: Vec::new(),
+            hooks_after_sends: Vec::new(),
         }
     }
 
@@ -485,6 +499,17 @@ impl InputSink for MockSink {
             .map(|(_, info)| info.clone());
         if let Some(fg) = fg {
             w.foreground = Some(fg);
+        }
+        let hooks: Vec<Rc<dyn Fn()>> = w
+            .hooks_after_sends
+            .iter()
+            .filter(|(k, _)| *k == n)
+            .map(|(_, h)| h.0.clone())
+            .collect();
+        // 呼ばれた関数が World を借りても panic しないよう、借用を落としてから呼ぶ (D-160)
+        drop(w);
+        for h in hooks {
+            h();
         }
         Ok(())
     }
@@ -1507,6 +1532,42 @@ mod tests {
             Point::new(0, 699),
             "掛けた後の移動も寄る"
         );
+    }
+
+    /// `hooks_after_sends` は添字が合う send の後にだけ呼ばれ、呼ばれた中で World を借りられる。
+    /// `refuse` で失敗した send では呼ばない (D-160)
+    #[test]
+    fn mock_sink_calls_hooks_after_matching_send_without_holding_world() {
+        use std::cell::Cell;
+        let ev = [InputEvent::MoveTo { x: 1, y: 1 }];
+
+        let w = World::new().shared();
+        let calls = Rc::new(Cell::new(0usize));
+        let (c, w2) = (calls.clone(), w.clone());
+        let hook = SendHook(Rc::new(move || {
+            c.set(c.get() + 1);
+            // 借用を持ったまま呼ばれれば already borrowed で panic する
+            w2.borrow_mut().idle_ms = 7;
+        }));
+        w.borrow_mut().hooks_after_sends.push((1, hook));
+        let mut sink = MockSink(w.clone());
+        sink.send(&ev).unwrap();
+        assert_eq!(calls.get(), 0, "0 回目の後は呼ばない");
+        sink.send(&ev).unwrap();
+        assert_eq!(calls.get(), 1, "1 回目の後に呼ぶ");
+        assert_eq!(w.borrow().idle_ms, 7, "呼ばれた中で World を書ける");
+        sink.send(&ev).unwrap();
+        assert_eq!(calls.get(), 1, "2 回目の後は呼ばない");
+
+        let w = World::new().shared();
+        let calls = Rc::new(Cell::new(0usize));
+        let c = calls.clone();
+        w.borrow_mut().refuse = Some(BackendError::DesktopUnavailable("x".into()));
+        w.borrow_mut()
+            .hooks_after_sends
+            .push((0, SendHook(Rc::new(move || c.set(c.get() + 1)))));
+        assert!(MockSink(w.clone()).send(&ev).is_err());
+        assert_eq!(calls.get(), 0, "失敗した send では呼ばない");
     }
 
     /// `cursor_fail_after_reads = (n, e)` は n 回目までは読め、その後は e を返す
