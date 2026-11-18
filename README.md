@@ -133,7 +133,7 @@ codex mcp add ai-cu -- C:\Users\<名前>\.cargo\bin\ai-cu.exe mcp    # Codex CLI
 
 ## 操作列 JSON
 
-最上位は `{"version": 1, "actions": [...]}`。各操作は `"type"` で種類を表し、未知のフィールド、種類、版は拒否する (終了コード 3)。
+最上位は `{"version": 1, "actions": [...]}`。各操作は `"type"` で種類を表し、未知のフィールド、種類、版は拒否する (終了コード 3)。最上位に省略可の `on_error` (`{"screenshot": {...}}`) を書くと、操作に入った後に失敗したとき 1 枚撮り、失敗の結果の `error_shot` に入れる (詳しくは [操作列 JSON](docs/reference/actions.md#失敗したとき撮る-1-枚-on_error))。
 
 | type | 何をするか |
 |---|---|

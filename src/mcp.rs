@@ -48,7 +48,8 @@ use crate::script::{
     Action, ActionKind, Button, ClickModifier, DEFAULT_DRAG_MS, DEFAULT_DRAG_STEPS,
     DEFAULT_SETTLE_TIMEOUT_MS, DEFAULT_SHOT_SCALE, DEFAULT_STABLE_MS, DEFAULT_TYPE_INTERVAL_MS,
     DEFAULT_WAIT_FOR_TIMEOUT_MS, ElementFilter, MAX_SCROLL_CLICKS, MAX_SINGLE_WAIT_MS,
-    MAX_STABLE_MS, MIN_STABLE_MS, Pos, Region, ResizeArea, SCRIPT_VERSION, Script, WindowTarget,
+    MAX_STABLE_MS, MIN_STABLE_MS, OnError, Pos, Region, ResizeArea, SCRIPT_VERSION, Script,
+    WindowTarget,
 };
 
 pub const SERVER_NAME: &str = "ai-cu";
@@ -504,7 +505,8 @@ fn schema_shot() -> Value {
                 "description": format!("操作から撮影までの待ち (ミリ秒。既定 {DEFAULT_STEP_SETTLE_MS}。0 なら待たない)。\"auto\" なら固定の待ちの代わりに、画面が落ち着くのを待ってから撮る (最大 {DEFAULT_SETTLE_TIMEOUT_MS} ミリ秒。結果の screenshots[] に settled と settle_ms が付き、時間切れでも撮る)"),
             },
             "path": { "type": "string", "description": "png の保存先 (.png に限る)。省くとファイルには保存せず、結果の image だけ" },
-            "inline": schema_inline()
+            "inline": schema_inline(),
+            "on_error": { "type": "boolean", "description": "真なら操作が失敗しても同じ指定で 1 枚撮り、結果の error_shot に入れる (既定 false。停止、user_active、desktop_unavailable、操作の前の失敗と、後ろの撮影そのものの失敗では撮らない)。失敗の結果の image を捨てるクライアントがあるので path も書く" }
         }
     })
 }
@@ -603,6 +605,42 @@ fn schema_capture_window() -> Value {
     json!({ "type": "object", "additionalProperties": false, "properties": { "process": schema_window(), "title": schema_window_title() }, "required": ["process"] })
 }
 
+/// screenshot の項目 (操作列の screenshot と run の on_error.screenshot が共有する。D-158)。
+/// `kind` があれば操作の種類の `type` を先頭に足す
+fn screenshot_props(kind: Option<Value>) -> Value {
+    let mut props = serde_json::Map::new();
+    if let Some(k) = kind {
+        props.insert("type".into(), k);
+    }
+    for (k, v) in [
+        (
+            "path",
+            json!({ "type": "string", "description": "png の保存先 (.png に限る。mcp:inline なら保存せず結果の image だけ)" }),
+        ),
+        ("region", schema_region()),
+        ("window", schema_capture_window()),
+        ("scale", schema_scale()),
+        ("max_edge", schema_max_edge()),
+        ("settle", schema_settle()),
+    ] {
+        props.insert(k.into(), v);
+    }
+    Value::Object(props)
+}
+
+/// run の on_error (D-158)。撮る項目は screenshot の操作と同じ
+fn schema_on_error() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "description": "操作に入った後に失敗したら 1 枚撮り、結果の error_shot に入れる (撮れたら ok: true と screenshots[] と同じ項目、撮れなければ ok: false と code と message)。停止、user_active、desktop_unavailable、操作の前の失敗と、失敗した操作が同じ対象の screenshot のときは撮らない。撮影の許可と守りは screenshot と同じで、誤りは操作の前に断る",
+        "properties": {
+            "screenshot": { "type": "object", "additionalProperties": false, "properties": screenshot_props(None), "required": ["path"] }
+        },
+        "required": ["screenshot"]
+    })
+}
+
 /// 操作列 (`run`) の 1 操作の書式。
 fn schema_action() -> Value {
     let point = json!({ "type": "object", "additionalProperties": false, "properties": { "x": schema_int("X"), "y": schema_int("Y") }, "required": ["x", "y"] });
@@ -619,7 +657,7 @@ fn schema_action() -> Value {
             { "type": "object", "additionalProperties": false, "properties": { "type": t("type"), "text": { "type": "string", "description": format!("改行は Enter、タブは Tab。{TYPE_IME_NOTE}") }, "interval_ms": { "type": "integer", "minimum": 0, "maximum": 1000, "description": "文字の間の待ち (既定 20)" } }, "required": ["type", "text"] },
             { "type": "object", "additionalProperties": false, "properties": { "type": t("key"), "keys": { "type": "string", "description": "例 ctrl+s、alt+tab、enter、f5、kanji (半角/全角) (反応は IME とアプリに依る)。未知のキーの失敗の issues の message に使える名前が出る" } }, "required": ["type", "keys"] },
             { "type": "object", "additionalProperties": false, "properties": { "type": t("wait"), "ms": { "type": "integer", "minimum": 0, "maximum": 600000 } }, "required": ["type", "ms"] },
-            { "type": "object", "additionalProperties": false, "properties": { "type": t("screenshot"), "path": { "type": "string", "description": "png の保存先 (.png に限る。mcp:inline なら保存せず結果の image だけ)" }, "region": schema_region(), "window": schema_capture_window(), "scale": schema_scale(), "max_edge": schema_max_edge(), "settle": schema_settle() }, "required": ["type", "path"] },
+            { "type": "object", "additionalProperties": false, "properties": screenshot_props(Some(t("screenshot"))), "required": ["type", "path"] },
             { "type": "object", "additionalProperties": false, "properties": { "type": t("focus"), "process": schema_window(), "title": schema_named_title() }, "required": ["type", "process"] },
             { "type": "object", "additionalProperties": false, "properties": { "type": t("close"), "process": schema_window(), "title": schema_close_title() }, "required": ["type", "process", "title"] },
             { "type": "object", "additionalProperties": false, "properties": { "type": t("wait_for"), "process": schema_window(), "title": schema_window_title(), "element": schema_element_filter(), "text": schema_wait_text(), "absent": schema_wait_absent(), "timeout_ms": schema_wait_timeout() }, "required": ["type", "process"] },
@@ -852,9 +890,9 @@ pub fn tools() -> Vec<Value> {
             "run",
             "操作列を実行する",
             &format!(
-                "操作の配列を順に実行する (click、double_click、drag、move、scroll、type、key、wait、screenshot、focus、close、resize、clipboard、wait_for、wait_stable、wait_change)。wait_stable は画面が落ち着くまで、wait_change は変わるまで待つ (region か window を 100 ms ごとに撮って比べる。UIA に要素を出さないアプリの描画待ちに使う。時間切れは wait_timeout で unmet が stable / change)。決まった短い手順に向く (1 回の呼び出しで済む)。先頭に focus を置く。クライアントの制限時間 (Codex は既定 60 秒) に収まる長さにする。dry_run なら装置に触れず、検証と展開した手順 (plan) だけを返す。screenshot の path に mcp:inline を書くとファイルに保存せず結果の image だけになる。失敗の結果では image を捨てるクライアントがある (撮り直せない画面は path にも保存する)。結果は executed、screenshots (screenshot に settle を付けると、撮る前に落ち着くのを待ち settled と settle_ms が付く)、focused、elapsed_ms (close があれば closed。gone は見える窓から消えたか (破棄とは限らない)、hidden が true なら隠れただけでプロセスは動いている。gone が false なら撮って確かめる。resize があれば resized (exact が false なら実際の大きさを見る)。clipboard があれば clipboard (chars と lines。置いた文は出さない)。wait_for、wait_stable、wait_change があれば waited。画面の待ちは rect と、wait_change なら changed_ratio)。失敗でも、操作に入った後なら executed (どこまで実行したか) と partial が返る (無ければ何も送っていない)。1 以上か partial なら操作ごと打ち直さない。{LEAD_NOTE}"
+                "操作の配列を順に実行する (click、double_click、drag、move、scroll、type、key、wait、screenshot、focus、close、resize、clipboard、wait_for、wait_stable、wait_change)。wait_stable は画面が落ち着くまで、wait_change は変わるまで待つ (region か window を 100 ms ごとに撮って比べる。UIA に要素を出さないアプリの描画待ちに使う。時間切れは wait_timeout で unmet が stable / change)。決まった短い手順に向く (1 回の呼び出しで済む)。先頭に focus を置く。クライアントの制限時間 (Codex は既定 60 秒) に収まる長さにする。dry_run なら装置に触れず、検証と展開した手順 (plan) だけを返す。screenshot の path に mcp:inline を書くとファイルに保存せず結果の image だけになる。失敗の結果では image を捨てるクライアントがある (撮り直せない画面は path にも保存する)。結果は executed、screenshots (screenshot に settle を付けると、撮る前に落ち着くのを待ち settled と settle_ms が付く)、focused、elapsed_ms (close があれば closed。gone は見える窓から消えたか (破棄とは限らない)、hidden が true なら隠れただけでプロセスは動いている。gone が false なら撮って確かめる。resize があれば resized (exact が false なら実際の大きさを見る)。clipboard があれば clipboard (chars と lines。置いた文は出さない)。wait_for、wait_stable、wait_change があれば waited。画面の待ちは rect と、wait_change なら changed_ratio)。失敗でも、操作に入った後なら executed (どこまで実行したか) と partial が返る (無ければ何も送っていない)。1 以上か partial なら操作ごと打ち直さない。on_error を書けば失敗の後に 1 枚撮り error_shot に入る。{LEAD_NOTE}"
             ),
-            json!({ "type": "object", "additionalProperties": false, "properties": { "actions": { "type": "array", "minItems": 1, "items": schema_action() }, "dry_run": schema_dry_run(), "inline": schema_inline() }, "required": ["actions"] }),
+            json!({ "type": "object", "additionalProperties": false, "properties": { "actions": { "type": "array", "minItems": 1, "items": schema_action() }, "on_error": schema_on_error(), "dry_run": schema_dry_run(), "inline": schema_inline() }, "required": ["actions"] }),
             input_tool(false),
         ),
     ]
@@ -902,6 +940,8 @@ struct ShotArgs {
     path: Option<String>,
     #[serde(default = "default_true")]
     inline: bool,
+    /// 真なら操作が失敗しても同じ指定で 1 枚撮る (操作列の on_error。D-158)
+    on_error: Option<bool>,
 }
 
 impl ShotArgs {
@@ -933,6 +973,7 @@ impl ShotArgs {
             scale: self.scale,
             max_edge: mcp_max_edge(self.max_edge),
             settle_ms,
+            on_error: self.on_error.unwrap_or(false),
         })
     }
 }
@@ -1075,6 +1116,8 @@ struct ClipboardArgs {
 #[serde(deny_unknown_fields)]
 struct RunArgs {
     actions: Vec<Action>,
+    /// 失敗したとき撮る 1 枚 (D-158)
+    on_error: Option<OnError>,
     #[serde(default)]
     dry_run: bool,
     #[serde(default = "default_true")]
@@ -1789,11 +1832,9 @@ impl<'a> Server<'a> {
         // 失敗の結果に mcp:inline の画像を入れるなら、捨てるクライアントがあることを hint に足す (D-136)。
         // 既定の文の置き換えの後に置く (前だと hint が既定の文と一致しなくなり、置き換えが効かない)
         note_inline_images_on_failure(&mut outcome, &images.taken, inline);
-        // 人か停止の仕組みが止めた (6。cursor_clipped を除く。D-151) か、予告の間に人の入力があった (10 の lead_input)。判定は error.rs の 1 か所 (D-093)
-        let stopped_by_user = matches!(
-            &outcome,
-            Outcome::Json { value, .. } if stopped_by_user_json(&value["error"])
-        );
+        // 人か停止の仕組みが止めた (6。cursor_clipped を除く。D-151) か、予告の間に人の入力があった (10 の lead_input)。
+        // on_error の 1 枚の撮影の停止 (D-158) も含む。判定は error.rs の 1 か所 (D-093)
+        let stopped_by_user = outcome_stopped_by_user(&outcome);
         let ms = started.elapsed().as_millis();
         // 取り消された (実行器が拾った、または読み取りの道具の実行中に届いた) か、標準入力が閉じた: 応答を送らない。
         // 実入力なら、人が離れるまで次の実入力を断る (取り消しも停止として扱う)
@@ -2104,15 +2145,22 @@ fn run_tool(name: &str, args: &Value, paths: &ConfigPaths, ctx: &mut Context) ->
             "run" => {
                 let mut a: RunArgs = parse_args(args)?;
                 // 長辺の上限の既定 (D-072)。dry_run でも入れるので plan に実際の値が見える。Some(0) は形の確認が断る
+                // on_error の撮影 (D-158) も操作列の screenshot と同じ扱い
                 for x in a.actions.iter_mut() {
                     if let Action::Screenshot { max_edge, .. } = x {
                         *max_edge = mcp_max_edge(*max_edge);
                     }
                 }
+                if let Some(oe) = a.on_error.as_mut() {
+                    oe.screenshot.max_edge = mcp_max_edge(oe.screenshot.max_edge);
+                }
                 let inline_shot = a
                     .actions
                     .iter()
-                    .any(|x| matches!(x, Action::Screenshot { path, .. } if path == INLINE_PATH));
+                    .any(|x| matches!(x, Action::Screenshot { path, .. } if path == INLINE_PATH))
+                    || a.on_error
+                        .as_ref()
+                        .is_some_and(|oe| oe.screenshot.path == INLINE_PATH);
                 if !a.inline && inline_shot {
                     return Err(usage(format!(
                         "inline を false にするなら、screenshot の path に {INLINE_PATH} は書けない (保存先が無い)"
@@ -2121,6 +2169,7 @@ fn run_tool(name: &str, args: &Value, paths: &ConfigPaths, ctx: &mut Context) ->
                 let s = Script {
                     version: SCRIPT_VERSION,
                     actions: a.actions,
+                    on_error: a.on_error,
                 };
                 with_policy(paths, |policy| run_script(&s, a.dry_run, policy, ctx))
             }
@@ -2140,6 +2189,17 @@ fn run_tool(name: &str, args: &Value, paths: &ConfigPaths, ctx: &mut Context) ->
             value: e.to_json(),
         },
     }
+}
+
+/// 結果が人か停止の仕組みに止められたか (クールダウンを立て、枠を延ばさない。D-093、D-107)。元の失敗の
+/// `error` に加えて、on_error の 1 枚の撮影の停止 (`error_shot` の ok: false。D-158) も見る。
+/// cursor_clipped の 6 は `stopped_by_user_json` が reason で外す (D-151)
+fn outcome_stopped_by_user(outcome: &Outcome) -> bool {
+    matches!(
+        outcome,
+        Outcome::Json { value, .. }
+            if stopped_by_user_json(&value["error"]) || stopped_by_user_json(&value["error_shot"])
+    )
 }
 
 /// 結果が MCP の失敗 (`isError: true`) になるか。`tool_output` と、失敗の結果の画像の但し書き (D-136) が共有する
@@ -5111,6 +5171,254 @@ mod tests {
             !text.contains(crate::hint::MCP_INLINE_IMAGE_ON_FAILURE_NOTE),
             "{text}"
         );
+    }
+
+    // ---- 失敗のとき撮る 1 枚 (run の on_error、一手ずつの shot.on_error。D-158) ----
+
+    /// 窓が見つからずに 12 で失敗する run の actions (操作に入った後の失敗)
+    fn failing_actions() -> Value {
+        json!([{ "type": "screenshot", "path": "b.png", "window": { "process": "nothing.exe" } }])
+    }
+
+    /// run の on_error にも長辺の上限の既定 (1568) が入る。inline: false と on_error の mcp:inline の組は、
+    /// actions の mcp:inline と同じ誤り (code と文) で断る
+    #[test]
+    fn mcp_run_on_error_defaults_max_edge_and_refuses_inline_false() {
+        let dir = unique_temp_dir("mcp-run-on-error-max-edge");
+        let floor = floor_file(&dir, ENABLED);
+        let mut f = Fixture::new(MapEnv::default());
+        let world = f.world.clone();
+        let mut s = f.server(paths(&floor));
+        let on_error = json!({ "screenshot": { "path": "mcp:inline", "region": { "x": 0, "y": 0, "w": 2000, "h": 1000 } } });
+        let r = reply(
+            &mut s,
+            &call(
+                1,
+                "run",
+                json!({ "actions": failing_actions(), "on_error": on_error }),
+            ),
+        );
+        assert_eq!(r["result"]["isError"], true, "{r}");
+        let v = text_json(&r);
+        assert_eq!(v["error"]["code"], "window_not_found", "{v}");
+        let shot = &v["error_shot"];
+        assert_eq!(shot["ok"], true, "{v}");
+        assert_eq!(
+            (shot["width"].as_u64(), shot["height"].as_u64()),
+            (Some(1568), Some(784)),
+            "{v}"
+        );
+        // inline: false と mcp:inline の組: actions の screenshot と on_error で同じ誤り
+        let refused = |s: &mut Server, id: i64, args: Value| {
+            let r = reply(s, &call(id, "run", args));
+            assert_eq!(exit_code(&r), 2, "{r}");
+            let v = text_json(&r);
+            (v["error"]["code"].clone(), v["error"]["message"].clone())
+        };
+        let by_on_error = refused(
+            &mut s,
+            2,
+            json!({ "inline": false, "actions": [{ "type": "wait", "ms": 1 }], "on_error": on_error }),
+        );
+        let by_action = refused(
+            &mut s,
+            3,
+            json!({ "inline": false, "actions": [{ "type": "screenshot", "path": "mcp:inline", "region": { "x": 0, "y": 0, "w": 2, "h": 2 } }] }),
+        );
+        assert_eq!(by_on_error, by_action);
+        assert_eq!(by_on_error.0, "usage");
+        assert!(world.borrow().sent.is_empty());
+    }
+
+    /// 失敗する run の on_error の mcp:inline の 1 枚は content の image に入り、hint の末尾に D-136 の但し書きが付く
+    #[test]
+    fn mcp_run_on_error_inline_image_is_in_content_with_failure_note() {
+        let dir = unique_temp_dir("mcp-run-on-error-inline");
+        let floor = floor_file(&dir, ENABLED);
+        let mut f = Fixture::new(MapEnv::default());
+        let mut s = f.server(paths(&floor));
+        let r = reply(
+            &mut s,
+            &call(
+                1,
+                "run",
+                json!({ "actions": failing_actions(), "on_error": { "screenshot": { "path": "mcp:inline", "region": { "x": 0, "y": 0, "w": 4, "h": 2 } } } }),
+            ),
+        );
+        assert_eq!(r["result"]["isError"], true, "{r}");
+        let content = r["result"]["content"].as_array().unwrap();
+        let images: Vec<_> = content.iter().filter(|c| c["type"] == "image").collect();
+        assert_eq!(images.len(), 1, "{r}");
+        let v = text_json(&r);
+        assert_eq!(v["error_shot"]["ok"], true, "{v}");
+        assert_eq!(v["error_shot"]["path"], INLINE_PATH, "{v}");
+        assert_eq!(v["screenshots"], json!([]), "{v}");
+        let hint = v["error"]["hint"].as_str().unwrap();
+        assert!(
+            hint.ends_with(crate::hint::MCP_INLINE_IMAGE_ON_FAILURE_NOTE),
+            "{hint}"
+        );
+    }
+
+    /// 一手ずつの道具の shot.on_error: true は、操作が失敗しても同じ指定で 1 枚撮り error_shot に入れる。
+    /// 但し書きは道具を問わない文 (shot.path)。schema_shot に on_error があり、未知の項目は断ったまま
+    #[test]
+    fn mcp_shot_on_error_flag_sets_script_on_error() {
+        let dir = unique_temp_dir("mcp-step-on-error");
+        let floor = floor_file(
+            &dir,
+            &format!("{ENABLED}[allow]\nprocesses=[\"notepad\"]\n"),
+        );
+        let mut f = Fixture::new(MapEnv::default());
+        let world = f.world.clone();
+        // (2000, 2000) の下は許可外の chrome。検証は通り、実行時のガードで 7 になる
+        world.borrow_mut().windows_at = vec![(
+            crate::geometry::Rect::new(1990, 1990, 50, 50),
+            crate::testing::window("chrome.exe", "Chrome_WidgetWin_1"),
+        )];
+        let mut s = f.server(paths(&floor));
+        let r = reply(
+            &mut s,
+            &call(
+                1,
+                "click",
+                json!({ "x": 2000, "y": 2000, "shot": { "region": { "x": 0, "y": 0, "w": 4, "h": 4 }, "settle_ms": 0, "on_error": true } }),
+            ),
+        );
+        assert_eq!(exit_code(&r), 7, "{r}");
+        let v = text_json(&r);
+        assert_eq!(v["error"]["code"], "foreground_guard", "{v}");
+        assert_eq!(v["error_shot"]["ok"], true, "{v}");
+        assert_eq!(v["error_shot"]["path"], INLINE_PATH, "{v}");
+        assert_eq!(v["error_shot"]["action_index"], 0, "{v}");
+        let hint = v["error"]["hint"].as_str().unwrap();
+        assert!(
+            hint.ends_with(crate::hint::MCP_INLINE_IMAGE_ON_FAILURE_NOTE),
+            "{hint}"
+        );
+        assert!(
+            crate::hint::MCP_INLINE_IMAGE_ON_FAILURE_NOTE.contains("shot.path"),
+            "道具を問わない文"
+        );
+        assert!(world.borrow().sent.is_empty());
+        // on_error が偽 (既定) なら撮らない
+        let r = reply(
+            &mut s,
+            &call(
+                2,
+                "click",
+                json!({ "x": 2000, "y": 2000, "shot": { "region": { "x": 0, "y": 0, "w": 4, "h": 4 }, "settle_ms": 0 } }),
+            ),
+        );
+        assert_eq!(exit_code(&r), 7, "{r}");
+        assert!(text_json(&r).get("error_shot").is_none(), "{r}");
+        let schema = schema_shot();
+        assert_eq!(schema["additionalProperties"], false);
+        assert_eq!(schema["properties"]["on_error"]["type"], "boolean");
+    }
+
+    /// run の inputSchema に on_error があり、screenshot の項目は操作列の screenshot と同じ (type を除く)
+    #[test]
+    fn mcp_run_schema_lists_on_error_with_screenshot_fields() {
+        let run = tools().into_iter().find(|t| t["name"] == "run").unwrap();
+        let oe = &run["inputSchema"]["properties"]["on_error"];
+        assert_eq!(oe["additionalProperties"], false, "{oe}");
+        let shot = &oe["properties"]["screenshot"];
+        assert_eq!(shot["additionalProperties"], false, "{oe}");
+        assert_eq!(shot["required"], json!(["path"]), "{oe}");
+        let mut fields: Vec<_> = shot["properties"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        fields.sort();
+        let mut action_fields: Vec<_> = screenshot_props(Some(json!("x")))
+            .as_object()
+            .unwrap()
+            .keys()
+            .filter(|k| *k != "type")
+            .cloned()
+            .collect();
+        action_fields.sort();
+        assert_eq!(fields, action_fields);
+    }
+
+    /// on_error の 1 枚の撮る前の判定で人のマウスの移動に当たれば (error_shot の ok: false、stopped)、元の失敗が
+    /// 別のコードでもクールダウンを立て、終わりに枠を延ばさない (D-158)
+    #[test]
+    fn mcp_error_shot_stopped_by_user_sets_cooldown() {
+        let dir = unique_temp_dir("mcp-error-shot-cooldown");
+        let floor = floor_file(&dir, ENABLED);
+        let actions = json!([{ "type": "click", "x": 1, "y": 1 }, { "type": "screenshot", "path": "b.png", "window": { "process": "nothing.exe" } }]);
+        // 失敗までのカーソルの読みの回数を、on_error の無い同じ呼び出しで数える (次の読みが撮る前の停止の判定)
+        let reads = {
+            let mut f = Fixture::new(MapEnv::default());
+            let world = f.world.clone();
+            let mut s = f.server(paths(&floor));
+            let r = reply(&mut s, &call(1, "run", json!({ "actions": actions })));
+            assert_eq!(exit_code(&r), 12, "{r}");
+            assert_eq!(status_of(&mut s, 2)["cooldown"], false);
+            world.borrow().cursor_reads
+        };
+        let mut f = Fixture::new(MapEnv::default());
+        let world = f.world.clone();
+        world.borrow_mut().cursor_moves_after_reads =
+            vec![(reads, crate::geometry::Point::new(3000, 2000))];
+        let mut s = f.server(paths(&floor));
+        let r = reply(
+            &mut s,
+            &call(
+                1,
+                "run",
+                json!({ "actions": actions, "on_error": { "screenshot": { "path": "e.png", "region": { "x": 0, "y": 0, "w": 8, "h": 6 } } } }),
+            ),
+        );
+        assert_eq!(exit_code(&r), 12, "元の失敗は変えない: {r}");
+        let v = text_json(&r);
+        assert_eq!(v["error_shot"]["ok"], false, "{v}");
+        assert_eq!(v["error_shot"]["code"], "stopped", "{v}");
+        {
+            let w = world.borrow();
+            assert_eq!(w.capture_calls, 0, "撮らない");
+            assert_eq!(w.releases, vec![0], "止められたので枠を残さない");
+            assert_eq!(
+                w.extends,
+                vec![30000],
+                "終わりに延ばさない (始めの 1 回だけ)"
+            );
+        }
+        assert_eq!(status_of(&mut s, 2)["cooldown"], true);
+    }
+
+    /// 止められたかの判定 (D-158): error に加えて error_shot の stopped も見る。cursor_clipped は reason で外れる
+    #[test]
+    fn outcome_stopped_by_user_reads_error_and_error_shot() {
+        let o = |value: Value| Outcome::Json {
+            code: 7,
+            value,
+            stderr: None,
+        };
+        let guard = json!({ "code": "foreground_guard" });
+        for (error_shot, expect) in [
+            (Value::Null, false),
+            (json!({ "ok": true, "path": "a.png" }), false),
+            (json!({ "ok": false, "code": "foreground_guard" }), false),
+            (json!({ "ok": false, "code": "stopped" }), true),
+            (
+                json!({ "ok": false, "code": "stopped", "reason": "cursor_clipped" }),
+                false,
+            ),
+        ] {
+            let mut value = json!({ "ok": false, "error": guard });
+            if !error_shot.is_null() {
+                value["error_shot"] = error_shot.clone();
+            }
+            assert_eq!(outcome_stopped_by_user(&o(value)), expect, "{error_shot}");
+        }
+        assert!(outcome_stopped_by_user(&o(
+            json!({ "ok": false, "error": { "code": "stopped" } })
+        )));
     }
 
     /// 但し書きの判定 (D-136): 失敗で、inline が真で、mcp:inline の画像があるときだけ hint に足す

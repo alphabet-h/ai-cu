@@ -149,7 +149,8 @@ ai-cu pixel 2546,965 2600,965    # 2 点の色を読む (点は X,Y の形。オ
 - 1 回の操作列は短く保つ (数個から十数個)。長い手順は、区切りごとに撮って確かめながら進める
 - `screenshot`、`wait_stable`、`wait_change` の `region` は必ず書く (省略すると全画面になる)。`path` は絶対パスで書く (相対パスは ai-cu を起動した作業ディレクトリが基準)
 - `wait_stable` / `wait_change` は撮るたびに `screenshot` と同じ判定を通す (待つ間に deny の窓が現れたら 7)。動き続ける部分 (動画、スピナー、点滅) は `region` から外すか `threshold` を上げる。狭い `region` の `wait_change` はキャレットの点滅でも満たしうる
-- MCP の `run` の途中で失敗すると、それまでに撮った `mcp:inline` の画像はクライアントに届かないことがある (Claude Code は失敗の結果の画像を捨てる)。撮り直せない画面は `path` にファイルの保存先を書くか、失敗しうる操作の前で run を分ける
+- 最上位に `"on_error": {"screenshot": {...}}` (`screenshot` と同じ項目) を書くと、操作に入った後の失敗で 1 枚撮り、失敗の結果の最上位の `error_shot` に入れる (撮れなければ `ok: false` と理由)。停止 (6)、人が操作中 (10)、ロック (14) と操作の前の失敗では撮らない。一手ずつは `shot` に `on_error: true` (CLI は `--shot-on-error`)
+- 失敗の結果の `mcp:inline` の画像 (`run` の途中までの撮影、`on_error`、一手ずつの `shot.on_error`) はクライアントに届かないことがある (Claude Code は失敗の結果の画像を捨てる)。撮り直せない画面は `path` (一手ずつなら `shot.path`) にファイルの保存先を書くか、失敗しうる操作の前で run を分ける
 - JSON はファイルに書いて `ai-cu run <file>` で渡すのが確実 (シェルによっては、複数行の文字列を標準入力に渡しにくい)
 
 ### 窓の大きさを変える (resize)

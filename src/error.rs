@@ -298,6 +298,15 @@ impl AppError {
             || self.reason == Some(reason::LEAD_INPUT)
     }
 
+    /// 操作列の `on_error` (D-158) の 1 枚を撮らない失敗か: 6 (停止。理由によらない。`cursor_clipped` も撮る前の
+    /// 停止の判定が同じずれを拾い直すので撮らない)、10 (人が操作中)、14 (ロック・セーバー)。判定はここ 1 か所
+    pub fn skips_error_shot(&self) -> bool {
+        matches!(
+            self.kind,
+            ErrorKind::Stopped | ErrorKind::UserActive | ErrorKind::DesktopUnavailable
+        )
+    }
+
     pub fn to_json(&self) -> serde_json::Value {
         let mut v = serde_json::json!({
             "ok": false,

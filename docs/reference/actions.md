@@ -48,5 +48,29 @@ IME のキーの別名: `hankaku` と `zenkaku` は `kanji`、`henkan` は `conv
 `run` の成功時の出力は `{"ok": true, "executed": <実行した操作の数>, "screenshots": [{"action_index", "path", "x", "y", "width", "height", "scale", "window"?, "settled"?, "settle_ms"?}], "focused": [{"action_index", "hwnd", "process", "title", "helper"}], "closed"?: [{"action_index", "hwnd", "process", "title", "gone", "hidden"}], "waited"?: [{"action_index", "elapsed_ms", "checks", "window"?, "element"?, "note"?, "rect"?, "changed_ratio"?}], "resized"?: [{"action_index", "hwnd", "process", "title", "area", "logical", "dpi", "requested": {"width", "height"}, "frame": {"x", "y", "w", "h"}, "client": {"x", "y", "w", "h"}, "exact"}], "clipboard"?: [{"action_index", "chars", "lines", "history_excluded"}], "elapsed_ms": ...}` (`clipboard` は `clipboard` があったときだけ出る。`chars` は CRLF にそろえた後の文字数、`lines` は行数、`history_excluded` は履歴と同期から外す印を付けたか (置けたときは常に true)。置いた文そのものは出さない。D-157。`resized` は `resize` があったときだけ出る。`frame` (DWM の枠) と `client` (中身を画面座標に直したもの) は読み直しの最後の読みで、物理ピクセル。`requested` は物理の狙い (`logical` なら換算した後)、`dpi` は窓が載っている画面の有効 DPI (読めなければ null)。`exact` が false なら狙いに届いていないので、`frame` と `client` を実際の大きさとして読む。D-150。`closed` は `close` があったときだけ出る。`gone` は見える窓から消えたか (破棄とは限らない)、`hidden` は窓が破棄されず隠れただけか (トレイに入るアプリ。プロセスは動いている。false でもプロセスが終わったとは限らない。D-096)。`gone` が false なら保存の確認などが出ていることが多い。`screenshots[].settled` と `settle_ms` は `screenshot` に `settle` があったときだけ出る (落ち着いたかと待った時間。D-081。`settle_ms` は最初の撮影の前の隠れの猶予 (D-082) を含めず、途中の猶予の分だけ `timeout_ms` を超えうる)。`waited` は `wait_for`、`wait_stable`、`wait_change` があったときだけ出る。画面の待ち (`wait_stable`、`wait_change`) の項目には、最後に撮った矩形の `rect` (`x`、`y`、`w`、`h`。次の `shot` や `click` の範囲に使える)、`window` で待ったときの `window`、`wait_change` で満たしたときの基準との差の `changed_ratio` が入り、`element` と `note` は出ない (`elapsed_ms` は最初の撮影の前の隠れの猶予を含めない。D-082)。`wait_for` の項目では `rect` と `changed_ratio` は出ず、`window` (`hwnd`、`process`、`title`) と `element` (`find` と同じ形で `center` つき、`text` は無し。`element.focused` は要素がキーボードのフォーカスを持つか (最上位の `focused` (focus で前面にしたウィンドウ) とは別)。要素の条件なら状態 (`toggle` など) も乗る。D-089) は無ければキーごと省く (`absent` でウィンドウ自身が消えたときは `window` が無く、`element` は「ある」で満たされた要素か文字列の条件のときだけ)。`note` は `absent` が最初の確認で満たされたとき (`timeout_ms` 0 は除く) だけ出る注意で、最初の確認で既に無かったことと次に確かめる道具 (windows / find / text) を書く。UI Automation に要素を出さないアプリでの空振りに気づくためのもの (D-070)。`focused` は `focus` で前面にしたウィンドウ。`focused[].title`、`closed[].title`、`resized[].title` は、撮影の許可 (`general.capture_enabled` と、`allow.actions` / `deny.actions` の `screenshot`) が無いと null (キーは残る)。そのとき `focus` と `resize` の `title` の指定と `close` は 4 (D-152)。`helper` は常駐の `ai-cu mcp` が補助プロセスで前面にしたときだけ true (D-057)、`screenshots[].window` は `window` で指定して撮ったウィンドウ)。最上位の `elapsed_ms` は予告の間 (操作の前に枠を出して待つ間。D-093) を含めず、予告の後から数える。画像の点 (px, py) は画面の (x + px / scale, y + py / scale)。
 `--dry-run` の出力は `{"ok": ..., "dry_run": true, "issues": [...], "plan": [{"index", "steps": [...]}], "batches": ..., "screen": {"x", "y", "w", "h"} | null}` で、各操作がどの `SendInput` のバッチと待ちに展開されるかを示す。`clipboard` の手順 (`"step": "clipboard"`) は置く文を出さず、`chars` と `lines` だけを出す (D-157)。
 
+## 失敗したとき撮る 1 枚 (`on_error`)
+
+最上位に `on_error` (省略可) を書くと、操作に入った後の失敗 (失敗の出力の最上位に `executed` が付く失敗) で 1 枚撮り、失敗の出力の最上位の `error_shot` に入れる (D-158)。
+
+```json
+{
+  "version": 1,
+  "actions": [
+    { "type": "click", "x": 640, "y": 360 },
+    { "type": "key", "keys": "ctrl+s" }
+  ],
+  "on_error": {
+    "screenshot": { "path": "C:\\work\\on-error.png", "window": { "process": "notepad.exe" } }
+  }
+}
+```
+
+- `on_error.screenshot` の項目 (`path`、`region`、`window`、`scale`、`max_edge`、`settle`) と既定、検証は `screenshot` の操作と同じ。撮る窓は呼ぶ側が決める。未知のフィールドは 3
+- 検証は操作に入る前に済ませる。撮影の許可 (`general.capture_enabled`、`allow.actions` / `deny.actions` の `screenshot`)、全画面の禁止、保存先 (`capture.save_dirs`。D-075) に当たれば、何も送らずに断る (形の誤りは 3、設定による拒否は 4)。その誤りの `action_index` は null で、文の頭が `on_error.screenshot: `。`settle` の `timeout_ms` は時間の予算 (`max_duration_ms`) に数える
+- 撮らない失敗: 操作の前の失敗 (検証、錠、操作の前の判定)、停止の 6 (理由によらない。`cursor_clipped` も)、人が操作中の 10、ロック・セーバーの 14。失敗した操作が region と window の同じ `screenshot` なら撮らない (同じ理由で断られる撮影を繰り返さない)。撮らないときは `error_shot` のキーごと無い。成功でも無い
+- 撮る時点は、押したままのキーとボタンを離した後、予告の枠を解く前 (錠は持ったまま)。撮る前に停止の判定 (目印、取り消し、時間の上限、人のマウス) と撮影の守り (入力デスクトップ、窓の解決と隠れの待ち、領域、deny の窓) を通す
+- `error_shot` は、撮れたら `{"ok": true, "action_index", "path", "x", "y", "width", "height", "scale", "window"?, "settled"?, "settle_ms"?}` (`screenshots[]` の 1 要素と同じ項目。`action_index` は失敗した操作の添字)、撮れなければ `{"ok": false, "code", "exit_code", "message", "reason"?, "rule"?, "fix"?}`。`screenshots` と `executed` には数えない。元の失敗の `error` は変えない
+- `--dry-run` と `validate` の出力は変わらない (on_error の誤りは `issues` に出る)。一手ずつの `--shot-on-error` (CLI) と `shot.on_error: true` (MCP) は、`shot` の指定をそのまま `on_error` に入れる
+
 文字入力の速さについて: アプリ (Windows 11 のメモ帳など) は入力を非同期に処理するので、速く送りすぎると文字を落としたり順序を入れ替えたりする。`type` は既定で 1 文字ずつ 20 ミリ秒の間隔で送る (1 秒あたり約 50 文字)。`interval_ms` を小さくすると速くなるが、受け手によっては文字が欠ける。`ok: true` は、ai-cu がすべての入力を OS に渡せたという意味で、アプリが処理し終えたことまでは保証しない。結果は `screenshot` で確かめる。
 入力欄を `click` してすぐ打つと、アプリによっては (gpui など、クリックで移ったフォーカスを次の描画で入力欄に反映するもの) 最初の 1 文字が落ちる。そのため、操作列で `click` / `double_click` の次が `type` か `key` なら、間に 200 ミリ秒待つ (計画に `sleep` として出て、時間の予算に数える。間に `wait` を書けば、その待ちだけにする)。一手ずつの道具を別々に呼ぶときは、呼び出しの間が十分に長いので待たない (D-059)。

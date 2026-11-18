@@ -32,9 +32,9 @@ use crate::runner::{RunOptions, read_script_file, require_dpi};
 use crate::script::{
     Action, ActionKind, Button, CLIPBOARD_MAX_CHARS, ClickModifier, DEFAULT_DRAG_MS,
     DEFAULT_DRAG_STEPS, DEFAULT_SETTLE_TIMEOUT_MS, DEFAULT_SHOT_SCALE, DEFAULT_STABLE_MS,
-    DEFAULT_TYPE_INTERVAL_MS, DEFAULT_WAIT_FOR_TIMEOUT_MS, ElementFilter, MAX_SINGLE_WAIT_MS,
-    MAX_STABLE_MS, MIN_STABLE_MS, Pos, RESIZE_MAX, Region, ResizeArea, SCRIPT_VERSION, Script,
-    Settle, WindowTarget,
+    DEFAULT_TYPE_INTERVAL_MS, DEFAULT_WAIT_FOR_TIMEOUT_MS, ElementFilter, ErrorShot,
+    MAX_SINGLE_WAIT_MS, MAX_STABLE_MS, MIN_STABLE_MS, OnError, Pos, RESIZE_MAX, Region, ResizeArea,
+    SCRIPT_VERSION, Script, Settle, WindowTarget,
 };
 use crate::validate::{Validation, validate};
 
@@ -462,6 +462,11 @@ pub struct StepOpts {
     /// 操作から撮影までの待ち (ミリ秒)。0 なら待たない。auto なら固定の待ちの代わりに、画面が落ち着くのを待ってから撮る (最大 3000 ミリ秒)
     #[arg(long, value_name = "MS|auto", default_value_t = SettleOpt::default(), value_parser = parse_settle, requires = "shot")]
     pub settle_ms: SettleOpt,
+    /// 操作が失敗しても同じ指定で 1 枚撮り、失敗の出力の最上位の error_shot に入れる (D-158)。
+    /// 停止 (6。理由によらない)、人が操作中 (10)、ロック (14)、操作の前の失敗 (設定の拒否など) と、
+    /// 後ろの撮影そのものの失敗では撮らない
+    #[arg(long, requires = "shot")]
+    pub shot_on_error: bool,
     /// 装置に触れず、検証と展開した手順だけを出す
     #[arg(long)]
     pub dry_run: bool,
@@ -787,6 +792,7 @@ pub fn step_script(cmd: &Command, stdin: &mut dyn Read) -> Result<Script, AppErr
             scale: opts.scale,
             max_edge: opts.max_edge,
             settle_ms: opts.settle_ms,
+            on_error: opts.shot_on_error,
         }),
         None => None,
     };
@@ -803,6 +809,8 @@ pub struct ShotSpec {
     /// 長辺の上限 (D-072)。縮尺は scale と max_edge / 長辺 の小さい方
     pub max_edge: Option<u32>,
     pub settle_ms: SettleOpt,
+    /// 真なら操作列の `on_error` に同じ撮影を入れる (`--shot-on-error` と MCP の `shot.on_error`。D-158)
+    pub on_error: bool,
 }
 
 /// 一手ずつの撮影の前の待ち (`--settle-ms` と MCP の `shot.settle_ms`。D-081)。
@@ -845,8 +853,11 @@ impl SettleOpt {
 }
 
 /// 1 操作 (と、撮るなら待ちと撮影) の操作列。CLI の一手ずつのサブコマンドと MCP の道具が同じ形を使う。
+/// `on_error` が真なら、同じ撮影を操作列の `on_error` にも入れる (D-158)。`settle_ms` が auto なら既定の
+/// settle を付け、数の待ちは入れない (失敗の後に固定で待たない)
 pub fn step_with_shot(action: Action, shot: Option<ShotSpec>) -> Script {
     let mut actions = vec![action];
+    let mut on_error = None;
     if let Some(s) = shot {
         let settle = match s.settle_ms {
             SettleOpt::Ms(0) => None,
@@ -856,18 +867,23 @@ pub fn step_with_shot(action: Action, shot: Option<ShotSpec>) -> Script {
             }
             SettleOpt::Auto => Some(Settle::default()),
         };
-        actions.push(Action::Screenshot {
+        let shot = ErrorShot {
             path: s.path,
             region: s.region,
             window: s.window,
             scale: s.scale,
             max_edge: s.max_edge,
             settle,
-        });
+        };
+        actions.push(shot.to_action());
+        if s.on_error {
+            on_error = Some(OnError { screenshot: shot });
+        }
     }
     Script {
         version: SCRIPT_VERSION,
         actions,
+        on_error,
     }
 }
 
@@ -2104,7 +2120,11 @@ pub fn schema() -> Value {
     json!({
         "ok": true,
         "version": SCRIPT_VERSION,
-        "top_level": { "version": SCRIPT_VERSION, "actions": "操作の配列 (順に実行)" },
+        "top_level": {
+            "version": SCRIPT_VERSION,
+            "actions": "操作の配列 (順に実行)",
+            "on_error": { "screenshot": "省略可。screenshot の操作と同じ項目 (path、region、window、scale、max_edge、settle。type は書かない) と同じ規則 (撮影の許可、全画面の禁止、保存先)。誤りは操作の前に issues に出る (action_index は null、文の頭に on_error.screenshot: )", "備考": "操作に入った後の失敗で、同じ守り (停止の判定、ロック、窓の解決と隠れ、deny の窓) を通して 1 枚撮り、失敗の出力の最上位の error_shot に入れる (撮れたら ok: true と screenshots[] の 1 要素と同じ項目 (action_index は失敗した操作)、撮れなければ ok: false と code、exit_code、message)。screenshots と executed には数えない。停止 (6)、人が操作中 (10)、ロック (14)、操作の前の失敗、失敗した操作が同じ対象の screenshot のときは撮らない (error_shot が無い)。一手ずつは --shot-on-error" }
+        },
         "coordinates": "物理ピクセルのスクリーン座標 (仮想デスクトップ。スクリーンショットと同じ)",
         "unknown_fields": "拒否する",
         "actions": {
@@ -2858,8 +2878,10 @@ mod tests {
             scale: 0.5,
             max_edge: None,
             settle_ms: SettleOpt::Ms(300),
+            on_error: false,
         };
         let s = step_with_shot(click.clone(), Some(spec.clone()));
+        assert_eq!(s.on_error, None);
         assert_eq!(s.actions.len(), 3);
         assert_eq!(s.actions[1], Action::Wait { ms: 300 });
         assert!(
@@ -2881,6 +2903,45 @@ mod tests {
         assert!(
             matches!(&s.actions[1], Action::Screenshot { window: Some(w), region: None, .. } if w.process == "notepad.exe")
         );
+    }
+
+    /// shot の on_error (D-158): 真なら同じ撮影を操作列の on_error に入れる。数の待ちは on_error に入れず、
+    /// auto なら既定の settle を付ける (後ろの撮影と同じ)
+    #[test]
+    fn step_with_shot_copies_shot_into_on_error_when_requested() {
+        let click = Action::Click {
+            x: 1,
+            y: 2,
+            button: Button::Left,
+            modifiers: vec![],
+        };
+        let spec = ShotSpec {
+            path: "a.png".into(),
+            region: None,
+            window: Some(WindowTarget {
+                process: "notepad.exe".into(),
+                title: Some("メモ".into()),
+            }),
+            scale: 0.5,
+            max_edge: Some(800),
+            settle_ms: SettleOpt::Ms(300),
+            on_error: true,
+        };
+        let s = step_with_shot(click.clone(), Some(spec.clone()));
+        let oe = s.on_error.as_ref().expect("on_error").screenshot.clone();
+        assert_eq!(s.actions.len(), 3);
+        assert_eq!(oe.settle, None, "数の待ちは on_error に入れない");
+        assert_eq!(oe.to_action(), s.actions[2], "後ろの撮影と同じ指定");
+        let s = step_with_shot(
+            click,
+            Some(ShotSpec {
+                settle_ms: SettleOpt::Auto,
+                ..spec
+            }),
+        );
+        let oe = s.on_error.as_ref().expect("on_error").screenshot.clone();
+        assert_eq!(oe.settle, Some(Settle::default()));
+        assert_eq!(oe.to_action(), s.actions[1]);
     }
 
     const CLICK: &str = r#"{"version":1,"actions":[{"type":"click","x":10,"y":10}]}"#;
@@ -5711,6 +5772,191 @@ mod tests {
         }
         assert_eq!(world.borrow().sent.len(), 1, "クリックは送った後");
         assert!(images.written.is_empty(), "撮っていない");
+    }
+
+    /// 一手ずつのサブコマンドを、設定の床と模擬の世界で走らせる (on_error の CLI のテスト用。D-158)
+    fn step_go(
+        floor: &str,
+        world: &std::rc::Rc<std::cell::RefCell<World>>,
+        args: &[&str],
+    ) -> (Outcome, MemoryImages) {
+        let env = MapEnv::default();
+        let mut devices = MockDevices(world.clone());
+        let mut images = MemoryImages::default();
+        let mut input: &[u8] = b"";
+        let mut ctx = Context {
+            env: &env,
+            locator: &crate::config::FixedLocator(PathBuf::from(floor)),
+            stdin: &mut input,
+            stdin_tty: false,
+            stdout_tty: false,
+            devices: &mut devices,
+            images: &mut images,
+            dpi: Ok(()),
+            host_pids: vec![],
+            surface: Surface::Cli,
+            stops: vec![],
+        };
+        let o = dispatch(parse(args), &mut ctx);
+        (o, images)
+    }
+
+    /// 一手ずつの --shot-on-error (D-158): click が前面のガードの 7 で失敗しても、--shot の指定で 1 枚撮り、
+    /// 最上位の error_shot に入れる。元の失敗は変えず、screenshots には数えない
+    #[test]
+    fn click_cli_shot_on_error_takes_shot_after_failure() {
+        let dir = unique_temp_dir("cli-step-on-error");
+        let floor = floor_file(
+            &dir,
+            &format!("{ENABLED}[allow]\nprocesses=[\"notepad\"]\n"),
+        );
+        let np = top(0x20, "Notepad.exe", Rect::new(100, 100, 800, 600));
+        let mut w = World::new();
+        w.default_window = Some(np.info.clone());
+        w.top = vec![np];
+        // (2000, 2000) の下は許可外の chrome。検証は通り、実行時のガードで 7 になる
+        w.windows_at = vec![(
+            Rect::new(1990, 1990, 50, 50),
+            crate::testing::window("chrome.exe", "Chrome_WidgetWin_1"),
+        )];
+        let world = w.shared();
+        let args = [
+            "click",
+            "2000",
+            "2000",
+            "--shot",
+            "err.png",
+            "--window",
+            "notepad.exe",
+            "--settle-ms",
+            "0",
+            "--shot-on-error",
+        ];
+        let (o, images) = step_go(&floor, &world, &args);
+        match o {
+            Outcome::Json { code, value, .. } => {
+                assert_eq!(code, 7, "{value}");
+                assert_eq!(value["error"]["code"], "foreground_guard", "{value}");
+                assert_eq!(value["executed"], 0, "{value}");
+                let shot = &value["error_shot"];
+                assert_eq!(shot["ok"], true, "{value}");
+                assert_eq!(shot["path"], "err.png", "{value}");
+                assert_eq!(shot["action_index"], 0, "{value}");
+                assert_eq!(shot["window"]["hwnd"], 0x20, "{value}");
+                assert_eq!(value["screenshots"], json!([]), "{value}");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(world.borrow().sent.is_empty(), "click は送っていない");
+        assert_eq!(images.written.len(), 1);
+        assert_eq!(images.written[0].0, "err.png");
+    }
+
+    /// --shot-on-error は --shot が要る。無ければ clap の誤りで、usage (2) になる (D-158)
+    #[test]
+    fn click_cli_shot_on_error_requires_shot() {
+        let args = ["ai-cu", "click", "1", "1", "--shot-on-error"];
+        let err = Cli::try_parse_from(args).unwrap_err();
+        assert_eq!(
+            err.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument,
+            "{err}"
+        );
+        let os: Vec<std::ffi::OsString> = args.iter().map(Into::into).collect();
+        let e = usage_error(&os, err.kind(), err.to_string());
+        assert_eq!(e.kind, ErrorKind::Usage);
+        assert_eq!(e.kind.exit_code(), 2);
+        // --shot と組めば通る
+        let cli = parse(&["click", "1", "1", "--shot", "a.png", "--shot-on-error"]);
+        assert!(step_opts(&cli.command.unwrap()).unwrap().shot_on_error);
+    }
+
+    /// 後ろの撮影そのものが失敗した (deny の窓が見える 7) ときは、同じ指定の on_error で撮り直さない (D-158)
+    #[test]
+    fn click_cli_shot_on_error_does_not_retake_failed_trailing_shot() {
+        let dir = unique_temp_dir("cli-step-on-error-same");
+        let floor = floor_file(&dir, &format!("{ENABLED}{DENY_ZED}"));
+        let mut w = World::new();
+        w.stack = vec![stacked("Zed.exe", 0x10, 1, Rect::new(5, 5, 100, 100))];
+        let world = w.shared();
+        let args = [
+            "click",
+            "300",
+            "300",
+            "--shot",
+            "a.png",
+            "--region",
+            "0,0,10,10",
+            "--settle-ms",
+            "0",
+            "--shot-on-error",
+        ];
+        let (o, images) = step_go(&floor, &world, &args);
+        match o {
+            Outcome::Json { code, value, .. } => {
+                assert_eq!(code, 7, "{value}");
+                assert_eq!(value["executed"], 1, "{value}");
+                assert_eq!(value["error"]["action_index"], 1, "{value}");
+                assert!(value.get("error_shot").is_none(), "{value}");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(world.borrow().sent.len(), 1, "クリックは送った後");
+        assert!(images.written.is_empty(), "撮っていない");
+    }
+
+    /// schema の top_level に on_error がある (D-158)
+    #[test]
+    fn schema_top_level_lists_on_error() {
+        let s = schema();
+        let top = s["top_level"].as_object().unwrap();
+        assert_eq!(
+            top.keys().map(String::as_str).collect::<Vec<_>>(),
+            vec!["actions", "on_error", "version"]
+        );
+        let oe = &top["on_error"];
+        assert!(oe["screenshot"].as_str().unwrap().contains("path"), "{oe}");
+        assert!(oe["備考"].as_str().unwrap().contains("error_shot"), "{oe}");
+    }
+
+    /// dry-run は on_error の撮影の拒否を issues に出し (action_index は無し、文の頭は ON_ERROR_PREFIX)、
+    /// plan は actions の分だけ (D-158。出力の形は変えない)
+    #[test]
+    fn run_dry_run_reports_on_error_issue() {
+        let dir = unique_temp_dir("cli-dry-on-error");
+        let env = MapEnv::new(&[
+            (ENV_DEV_FORBID, "1"),
+            (
+                ENV_DEV_FLOOR,
+                &floor_file(&dir, &format!("{ENABLED}[allow]\nactions = [\"click\"]\n")),
+            ),
+        ]);
+        let script = r#"{"version":1,"actions":[{"type":"click","x":10,"y":10}],"on_error":{"screenshot":{"path":"err.png","window":{"process":"notepad.exe"}}}}"#;
+        match go(
+            &["run", "--dry-run", "-"],
+            &env,
+            script,
+            &mut NoDevices,
+            (false, false),
+        ) {
+            Outcome::Json { code, value, .. } => {
+                assert_eq!(code, 4, "{value}");
+                assert_eq!(value["dry_run"], true, "{value}");
+                let issues = value["issues"].as_array().unwrap();
+                assert_eq!(issues.len(), 1, "{value}");
+                assert!(
+                    issues[0]["message"]
+                        .as_str()
+                        .unwrap()
+                        .starts_with(crate::validate::ON_ERROR_PREFIX),
+                    "{value}"
+                );
+                assert!(issues[0]["action_index"].is_null(), "{value}");
+                assert_eq!(value["plan"].as_array().unwrap().len(), 1, "{value}");
+                assert!(value.get("error_shot").is_none(), "{value}");
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     /// shot --scale (D-053): 画像を縮めて保存し、出力の scale と大きさに反映する

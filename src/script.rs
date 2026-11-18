@@ -19,6 +19,48 @@ pub const INLINE_PATH: &str = "mcp:inline";
 pub struct Script {
     pub version: u32,
     pub actions: Vec<Action>,
+    /// 操作に入った後の失敗で 1 枚撮る (D-158)。省略すると撮らない。撮る窓は呼ぶ側が決める
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_error: Option<OnError>,
+}
+
+/// 操作列の最上位の `on_error` (D-158)。今は撮影 1 枚だけ
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OnError {
+    pub screenshot: ErrorShot,
+}
+
+/// `on_error.screenshot` の項目 (D-158)。`screenshot` の操作と同じ項目、既定、省略の規則で、検証と実行は
+/// `to_action` で `Action::Screenshot` に写して同じ経路に通す (規則を 2 つ持たない)
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ErrorShot {
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub region: Option<Region>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window: Option<WindowTarget>,
+    #[serde(default = "default_scale")]
+    pub scale: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_edge: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settle: Option<Settle>,
+}
+
+impl ErrorShot {
+    /// 同じ項目の `screenshot` の操作に写す
+    pub fn to_action(&self) -> Action {
+        Action::Screenshot {
+            path: self.path.clone(),
+            region: self.region,
+            window: self.window.clone(),
+            scale: self.scale,
+            max_edge: self.max_edge,
+            settle: self.settle,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -874,6 +916,65 @@ mod tests {
                 assert_eq!(*steps, 3);
             }
             other => panic!("{other:?}"),
+        }
+    }
+
+    /// on_error (D-158) は読んで書き戻すと同じになり、無い操作列の出力にはキーが出ない。
+    /// to_action は同じ項目の screenshot に写す
+    #[test]
+    fn script_on_error_round_trips_and_is_omitted_when_none() {
+        let json = r#"{"version":1,"actions":[{"type":"click","x":1,"y":2,"button":"left"}],
+            "on_error":{"screenshot":{"path":"target/err.png","window":{"process":"notepad.exe"},
+            "scale":0.5,"max_edge":800,"settle":{"stable_ms":300,"threshold":0.0,"timeout_ms":3000}}}}"#;
+        let s = Script::from_json(json).unwrap();
+        let shot = &s.on_error.as_ref().expect("on_error").screenshot;
+        assert_eq!(shot.path, "target/err.png");
+        assert_eq!(shot.region, None);
+        assert_eq!(
+            shot.to_action(),
+            Action::Screenshot {
+                path: "target/err.png".into(),
+                region: None,
+                window: Some(WindowTarget {
+                    process: "notepad.exe".into(),
+                    title: None,
+                }),
+                scale: 0.5,
+                max_edge: Some(800),
+                settle: Some(Settle::default()),
+            }
+        );
+        let input: serde_json::Value = serde_json::from_str(json).unwrap();
+        assert_eq!(serde_json::to_value(&s).unwrap(), input);
+
+        let plain =
+            Script::from_json(r#"{"version":1,"actions":[{"type":"wait","ms":1}]}"#).unwrap();
+        assert_eq!(plain.on_error, None);
+        let out = serde_json::to_value(&plain).unwrap();
+        assert!(out.get("on_error").is_none(), "{out}");
+        // scale を省くと screenshot と同じ既定 (1)
+        let defaulted = Script::from_json(
+            r#"{"version":1,"actions":[],"on_error":{"screenshot":{"path":"a.png","region":{"x":0,"y":0,"w":2,"h":2}}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            defaulted.on_error.unwrap().screenshot.scale,
+            DEFAULT_SHOT_SCALE
+        );
+    }
+
+    /// on_error の未知の項目と、screenshot 以外の名前は書式の誤り (終了コード 3 の側)
+    #[test]
+    fn script_on_error_rejects_unknown_field() {
+        for json in [
+            r#"{"version":1,"actions":[],"on_error":{"screenshot":{"path":"a.png","foo":1}}}"#,
+            r#"{"version":1,"actions":[],"on_error":{"shot":{"path":"a.png"}}}"#,
+            r#"{"version":1,"actions":[],"on_error":{}}"#,
+        ] {
+            assert!(
+                matches!(Script::from_json(json), Err(ScriptError::Parse(_))),
+                "{json}"
+            );
         }
     }
 
