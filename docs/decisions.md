@@ -303,7 +303,7 @@
   - テストに、レビューで見つかった素通りと誤検出の全ケースと、`settings.json` の登録の整合 (スクリプトの実在、`Monitor` の網羅) を入れた
 - 根拠: 偶発の誤爆の多くは、直接の起動の周辺の書き方 (出力の取得、待ちの前置き、ループ) で起きる
 - 覆る条件: 正当なコマンドを止めて作業が進まなくなったとき。判定を直し、直した内容を判断ログに残す
-- 状態: 一部置換 (検証済みの release ビルドのパスからの起動は、実入力のサブコマンドでも通す。D-051)
+- 状態: 一部置換 (検証済みの release ビルドのパスからの起動は、実入力のサブコマンドでも通す。D-051)。READ_ONLY の基準 (入力も実キャプチャも呼ばない) は D-162 で「入力を送らない」に改めた (2026-11-19)
 
 ### D-025 Git 運用の補足と、成果物の無視設定
 - 日付: 2026-10-06
@@ -625,7 +625,7 @@
 - 判断: 足す (◎)。`guide` は `src/guide.md` を埋め込んだ文字列を標準出力に書くだけで、入力も実キャプチャも呼ばない (src/cli.rs の `Command::Guide` は `Outcome::Text(GUIDE)` を返す)。D-024 の手順どおり、先に hook のテストに `ai-cu guide` と `target/release/ai-cu.exe guide` を足して落ちることを見てから、一覧に足した
 - 根拠: 読み取り専用の一覧は「入力も撮影もしない」と確かめた名前だけを置く約束で、`guide` はそれを満たす
 - 覆る条件: `guide` の出力に、画面やウィンドウの情報 (撮影や列挙の結果) を混ぜるようになったとき (一覧から外す)
-- 状態: 採用
+- 状態: 一部置換 (一覧の基準は D-162 で改めた。`guide` を足した判断は採用のまま。2026-11-19)
 
 ### D-049 撮影の制限: 全画面の禁止 (設定) と、人の操作中の `shot` の拒否
 - 日付: 2026-10-08
@@ -2154,6 +2154,7 @@
 - 追記 (実装、ステップ 4、2026-11-15): 実機のテストと文書。実機のテスト `fixture_real_pixel_reads_fixture_fill_color` (tests/fixture_real.rs、`#[ignore]`) は、フィクスチャ限定の装置 (`Win32Desktop::for_fixture`) の `Desktop::capture` の 1x1 でフィクスチャの内側の 3 点 (縁から 12 ピクセル内の左上寄り、中央、右下寄り) を撮り、`image::hex_color(&img, 0, 0)` が `FIXTURE_RGB` の `#RRGGBB` と一致することを確かめ、行 `FIXTURE pixel points=3 colors=[...] expected=#RRGGBB` を出す。このテストは `cli::pixel` の経路 (守りの順、点の解析、出力の形) を通らない (`cli::pixel` は `pub(crate)` で tests/ から呼べない)。その経路はモックのテストが受け持ち、release の道具の経路 (CLI と MCP) は手動確認で見る。文書: src/guide.md (find と text の節に pixel の項、終了コード表の 10 の行、MCP の道具の列挙、「ほかのコマンド」)、docs/reference/mcp.md (道具の一覧と数 19 → 20)、docs/reference/cli.md (書式の一覧に `pixel [オプション] X,Y [X,Y ...]` と出力の形)、docs/reference/config.md (`wait_stable` の項の型に倣った pixel の許可の項、`min_idle_ms` の項、`mcp.require_approval` の道具の数)、docs/reference/exit-codes.md (7 と 10)、docs/reference/safety.md (撮影の制限、機密のウィンドウ、DPI の確認)、README (CLI の表、道具の数、設定の例の `min_idle_ms` のコメント、安全機能の撮影の制限と DPI の確認)、CLAUDE.md の「状態」。手動確認: docs/manual-check/CHECKLIST.md の新しい節「34. 点の色 (pixel、D-146)」((a) CLI と MCP でメモ帳の点を読む、(b) 上書き層の `deny.regions` の点が 4、(c) deny の窓が見えている点が 7 で間にあるだけなら読める、(d) 撮影を切った設定で 4) と、手順 19 の B (道具の数を 20 にし、`pixel` の `readOnlyHint` を見る)。plan は docs/manual-check/mcp-requests.jsonl に `pixel` の呼び出しを足すとしていたが、足さない。固定の要求にはメモ帳の座標を書けず、手動確認で AI が撮って読んでよいのはメモ帳の矩形の中だけなので、MCP で点の色を読む確かめは節 34 の (a) (AI がメモ帳の点で書く `s34-mcp.jsonl`) に任せる。Phase 5 の報告の「手動確認が要る手順の番号」は 34 と 19 の B。実機の対照 (`hex_color` の R と B を入れ替えて実機のテストが落ちること) は主エージェントが Phase 5 で行う
 - 追記 (重い検査と実機の対照、2026-11-15): HEAD a443338 で `python scripts/verify.py --ignored` が全段 ok (lib 963 passed、fixture_real 62 passed)。実機のテストは `FIXTURE pixel points=3 colors=["#2288DD", "#2288DD", "#2288DD"] expected=#2288DD` を出した。対照: 作業領域のスクリプトで `hex_color` の R と B を入れ替えて `cargo test --test fixture_real -- --ignored --nocapture --test-threads=1 --exact fixture_real_pixel_reads_fixture_fill_color` を打つと、`colors=["#DD8822", ...]` で tests/fixture_real.rs:1162 の断言が落ち (exit 101)、finally で書き戻して sha256 が前後で一致した (via: target/verify/control-pixel-real.log)
 - 追記 (手動確認、2026-11-15): HEAD aef7ffc の release で docs/manual-check/CHECKLIST.md の節 34 の (a)〜(d) と手順 19 の B を行い、すべて期待どおりだった。(a) CLI と MCP で同じ色が入力の順に返り、点の後ろのオプションは 2。(b) `deny.regions` の点を含むと 4 で、他の点も返さない。(c) deny の窓が見えている点は 7 (`detail.window.process` と `detail.visible`、hint は pixel 用の文) で、窓を挟んだ 2 点は 0。(d) `capture_enabled = false` で 4。19 の B で道具は 20 個、`pixel` に `readOnlyHint`。確認の手順の注意: (c) で人が窓を置く間に対象の窓が動くことがあるので、点を決める前に `windows` を読み直す。実施の記録は手元にある (公開しない)
+- 追記 (ガード hook、2026-11-19): 利用者の許可を受けて、ガード hook (`.claude/hooks/guard_real_input.py`) の読み取りの一覧 `READ_ONLY` に `pixel` を足した (D-162)。上の限界のうち hook の部分 (開発のシェルの `cargo run -- pixel` とデバッグビルドの `pixel` が止められる) は消えた。覆る条件の最後の項に当たる
 
 ### D-147 TUI は開いている間ずっと入力の錠 (D-113) を持ち、持てていない間は Ctrl+C 以外の打鍵を捨てる
 - 日付: 2026-11-15
@@ -2536,3 +2537,18 @@
 - 根拠: 取り消しが実行前の確かめより後に届くことが、負荷によらず決まる。D-160 の欄をそのまま使い、モックにも製品のコードにも新しい口が要らない。B はテスト 1 本のためにモックか `StopSource` の口を増やす。C は下の側の窓が広がるだけで競合が残る (D-160 の C と同じ理由)。wait の 3000 ms は残し、経過時間の確かめは足さない (時間の主張は負荷で揺れる。このテストの主張は「実行の途中の取り消しで cooldown が立つ」だけ)。取り消しが move の後に届いた裏付けに、`sent` が move の束 1 つだけであることを確かめる
 - 覆る条件: move の展開で send の数が変わったとき (`sent` の確かめで落ちる)。許可の床が move を断るとき (応答が返り is_none の確かめで落ちる)。実行器の停止の確かめが取り消しを拾うこと (fired の経路) をこのテストで確かめる必要が出たとき (いまは実行の後の取り消しの確かめで拾われても通る)
 - 状態: 採用 (2026-11-19。D-160 の細部を一部置換)
+
+### D-162 ガード hook の読み取りの一覧 (`READ_ONLY`) の基準を「入力を送らない」に改め、`pixel` を足す (撮影の守りは本体が受け持つ)
+- 日付: 2026-11-19
+- 場面: ガード hook (`.claude/hooks/guard_real_input.py`) の `READ_ONLY` に `pixel` (D-146) が無く、開発のシェルの `cargo run -- pixel` とデバッグビルドの `pixel` が未知の語として止められていた (拒否の文面が「実入力」なので理由を読み違えやすい)。一方で、一覧の基準は D-024 と D-048 で「入力も実キャプチャも呼ばない名前だけ」と決めてあり、`pixel` は点ごとに 1x1 を撮るので満たさない。ただし最初から一覧にある `shot` も撮影するので、基準は既に事実と合っていなかった
+- 選択肢: A 基準を「入力を送らない」に改め、`pixel` を足す / B 基準は変えず、D-146 の追記で `pixel` を例外として足す / C 足さない (開発のシェルの `pixel` は止まったまま。release + opt-in では通る)
+- 判断: A (◎。自走の自己レビューが 3 巡で収束しなかった問いとして、利用者が選んだ)
+  - hook は入力の誤爆を止める層で、撮影の許可と守り (`capture` の許可、deny の窓、全画面の禁止、機密の窓) は本体が受け持つ。`READ_ONLY` に撮影する名前を足すときは、本体の撮影の許可と守りを通ることを判断ログに書く。今それに当たるのは `shot`、`pixel`、`--shot` を付けた `wait-for` (一手ずつの操作として操作列に組まれ、`run` と同じ検証と撮影の経路を通る。src/cli.rs の `step_script`) の 3 つ
+  - 新しい名前を足すときに、その名前のテストを先に書いて落ちるのを見てから足す手順 (D-024) は変えない。今回も `test_guard_real_input.py` の `Allowed` に `pixel` の 4 例 (直の `ai-cu pixel`、`cargo run -- pixel`、デバッグビルドの `--config=` と負の点、release のパスを opt-in なしで) を先に足し、FAILED (failures=4、18 件中) を見てから足した。足した後は 18 件 OK
+  - 同じ行の実入力は今までどおり止める (`ai-cu pixel 1,2; ai-cu click 1,2` を `Denied` に足した。足す前から止まる)
+  - 足す前の挙動 (`guard_real_input.violation` を直に呼んで確かめた): 直・`cargo run`・デバッグビルドの `pixel` は opt-in によらず止まり、release のパスは opt-in でだけ通り、起動先を変数で渡す形 (`& $exe pixel …`) は通っていた。足した後は、`pixel` だけの行はどれも `shot` と同じく opt-in によらず通る
+  - MCP の経路は変わらない。`pixel` の道具は `mcp` の起動の中にあり、`mcp` は `ACTIONS` の語なので、release + opt-in でだけ通る
+  - hook の `READ_ONLY` の上の総論のコメントを、この基準に合わせて直した。docs/manual-check/CHECKLIST.md の節 34 の「開発のシェルの `cargo run -- pixel` とデバッグビルドはガード hook が止める」の文を、CLI の項は opt-in が無くてもよく、(a) の MCP の項は今までどおり opt-in のセッションで行う、の形に直した
+- 根拠: 撮影の守りは本体の側に既にあり、`shot` と同じ守りを通る `pixel` を hook で `shot` より厳しく扱う理由が無い。基準を事実に合わせて書き直すほうが、例外を増やすより後の読み手が迷わない
+- 覆る条件: 撮影する名前も hook で止めたいと利用者が言ったとき。本体の撮影の許可と守りを通らない読み取りの名前を足すことになったとき
+- 状態: 採用 (D-024 と D-048 の `READ_ONLY` の基準を置換)

@@ -57,17 +57,19 @@ import re
 import shlex
 import sys
 
-# 実入力も実キャプチャも行わないと分かっているサブコマンド。足すときは docs/decisions.md に理由を書く。
+# 実入力を行わないと分かっているサブコマンド。実キャプチャを行うのは `shot`、`pixel`、`--shot` を付けた `wait-for`
+# で、撮影の許可と守りは本体が受け持つ (D-162)。足すときは docs/decisions.md に理由を書く。
 # `shot` は画面を撮る (入力は送らない)。出力先の制限は無いので、撮った画像は個人情報を含みうる前提で扱う。
 # `guide` は埋め込んだ手引きの文字列を出すだけ (D-048)
 # `find` と `text` は UI Automation で要素の名前、矩形、文字列を読むだけで、入力は送らない。要素の名前と文字列は
 # 画面上の情報だが、`windows` の題名と同じ扱い。開発シェルでは最下層 (D-022) が拒否する (D-054 の追記)
 # `wait-for` は find / text と同じ読み取り (ウィンドウ、要素、文字列が出る / 消えるまで繰り返し読む) で、入力は送らない (D-068 の追記)
 # `tree` は find と同じ UI Automation の読み取り (要素の木を深さで切って返す) で、入力は送らない (D-084)
+# `pixel` は画面座標の点の色を読むだけで、入力は送らない。撮影と同じ許可と守りを点ごとの 1x1 に掛ける (D-146、D-162)
 READ_ONLY = {
     "shot", "validate", "schema", "info", "help", "version",
     "check", "doctor", "list", "windows", "explain", "completions", "guide",
-    "find", "text", "wait-for", "tree",
+    "find", "text", "wait-for", "tree", "pixel",
 }
 # `config` は下位コマンドで判定する。設定を書き換えるもの (set / init / edit / reset など) は通さない
 CONFIG_READ = {"show", "path", "get", "validate", "list"}
