@@ -1019,6 +1019,7 @@ fn script(actions: Vec<Action>) -> Script {
     Script {
         version: 1,
         actions,
+        on_error: None,
     }
 }
 

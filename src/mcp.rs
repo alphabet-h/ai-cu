@@ -2121,6 +2121,7 @@ fn run_tool(name: &str, args: &Value, paths: &ConfigPaths, ctx: &mut Context) ->
                 let s = Script {
                     version: SCRIPT_VERSION,
                     actions: a.actions,
+                    on_error: None,
                 };
                 with_policy(paths, |policy| run_script(&s, a.dry_run, policy, ctx))
             }

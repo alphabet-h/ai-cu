@@ -122,6 +122,9 @@ pub struct Validation {
     /// 各操作の手順 (ドライランの出力に使う)。形の誤りがある操作は空
     #[serde(skip)]
     pub plans: Vec<Vec<Step>>,
+    /// 失敗のとき撮る 1 枚の計画 (D-158。`Step::Capture`)。on_error が無いか形の誤りなら None
+    #[serde(skip)]
+    pub on_error: Option<Step>,
 }
 
 impl Validation {
@@ -162,46 +165,31 @@ pub fn validate(script: &Script, policy: &Policy, screen: Option<Rect>) -> Valid
     let mut total_sleep: u64 = 0;
     let cwd = current_dir_or_empty();
     for (i, action) in script.actions.iter().enumerate() {
-        if let Some(m) = shape_issue(action) {
-            issues.push(Issue::shape(Some(i), m));
+        let Some(mut steps) = check_one(i, action, policy, screen, &cwd, &mut issues) else {
             plans.push(Vec::new());
             continue;
-        }
-        let mut steps = match plan::plan(action) {
-            Ok(s) => s,
-            Err(m) => {
-                issues.push(Issue::shape(Some(i), m));
-                plans.push(Vec::new());
-                continue;
-            }
         };
-        match policy.check_action_kind(action.kind()) {
-            Err(d) => issues.push(Issue::denied(Some(i), d)),
-            // 修飾キーつきのクリック (D-137): 操作の種類が通ったときだけ見る (input_enabled が偽の設定で、
-            // 同じ理由の issue を 2 つ出さない)
-            Ok(()) => {
-                if let Action::Click { modifiers, .. } | Action::DoubleClick { modifiers, .. } =
-                    action
-                    && let Err(d) = policy.check_click_modifiers(modifiers)
-                {
-                    issues.push(Issue::denied(Some(i), d));
-                }
-            }
-        }
-        check_action_policy(i, action, &steps, policy, screen, &mut issues);
-        // 撮影の保存先 (D-075): region / window / 全画面のどれでも、撮る前に判定する
-        if let Action::Screenshot { path, .. } = action
-            && let Err(r) = check_save_target(policy, path, &cwd)
-        {
-            let mut issue = Issue::policy(Some(i), r.message.clone());
-            issue.hint = r.hint().map(str::to_string);
-            issue.rule = Some(r.rule);
-            issue.fix = r.fix;
-            issues.push(issue);
-        }
         steps.extend(plan::settle_before_next(action, script.actions.get(i + 1)));
         total_sleep = total_sleep.saturating_add(plan::time_budget_ms(&steps));
         plans.push(steps);
+    }
+    // 失敗のとき撮る 1 枚 (D-158): 同じ 1 操作の検査に screenshot として通す。誤りは操作列全体の誤り
+    // (action_index なし) にし、文の頭に ON_ERROR_PREFIX を付ける。次の操作は無いので settle_before_next は呼ばない
+    let mut on_error = None;
+    if let Some(oe) = &script.on_error {
+        let action = oe.screenshot.to_action();
+        let mut own = Vec::new();
+        let steps = check_one(0, &action, policy, screen, &cwd, &mut own);
+        issues.extend(own.into_iter().map(|mut issue| {
+            issue.action_index = None;
+            issue.message = format!("{ON_ERROR_PREFIX}{}", issue.message);
+            issue
+        }));
+        if let Some(steps) = steps {
+            // 撮影の settle の timeout_ms も時間の上限に数える (上限の守りを on_error で抜けさせない)
+            total_sleep = total_sleep.saturating_add(plan::time_budget_ms(&steps));
+            on_error = steps.into_iter().next();
+        }
     }
     // 実行には待ち以外の時間もかかる。検証を通った操作列が実行時の期限で必ず止まることのないよう、余裕を見る
     // (focus が前面になるのを待つ上限、close で消えるのを待つ上限、resize の読み直しの上限、clipboard を開き直す上限、
@@ -209,7 +197,62 @@ pub fn validate(script: &Script, policy: &Policy, screen: Option<Rect>) -> Valid
     if let Err(d) = policy.check_duration(total_sleep, DEADLINE_MARGIN_MS) {
         issues.push(Issue::denied(None, d));
     }
-    Validation { issues, plans }
+    Validation {
+        issues,
+        plans,
+        on_error,
+    }
+}
+
+/// on_error の誤りの文の頭 (D-158)
+pub const ON_ERROR_PREFIX: &str = "on_error.screenshot: ";
+
+/// 1 操作で閉じる検査 (形 → 計画 → 操作の種類 → 設定 → 撮影の保存先)。誤りは `issues` に `Some(i)` で積む。
+/// 計画できなければ None (形の誤り)。次の操作に依る待ち (`settle_before_next`) は呼び手が足す。
+/// 操作列の各操作と on_error の撮影 (D-158) が共有する
+fn check_one(
+    i: usize,
+    action: &Action,
+    policy: &Policy,
+    screen: Option<Rect>,
+    cwd: &Path,
+    issues: &mut Vec<Issue>,
+) -> Option<Vec<Step>> {
+    if let Some(m) = shape_issue(action) {
+        issues.push(Issue::shape(Some(i), m));
+        return None;
+    }
+    let steps = match plan::plan(action) {
+        Ok(s) => s,
+        Err(m) => {
+            issues.push(Issue::shape(Some(i), m));
+            return None;
+        }
+    };
+    match policy.check_action_kind(action.kind()) {
+        Err(d) => issues.push(Issue::denied(Some(i), d)),
+        // 修飾キーつきのクリック (D-137): 操作の種類が通ったときだけ見る (input_enabled が偽の設定で、
+        // 同じ理由の issue を 2 つ出さない)
+        Ok(()) => {
+            if let Action::Click { modifiers, .. } | Action::DoubleClick { modifiers, .. } = action
+                && let Err(d) = policy.check_click_modifiers(modifiers)
+            {
+                issues.push(Issue::denied(Some(i), d));
+            }
+        }
+    }
+    check_action_policy(i, action, &steps, policy, screen, issues);
+    // 撮影の保存先 (D-075): region / window / 全画面のどれでも、撮る前に判定する
+    if let Action::Screenshot { path, .. } = action
+        && let Err(r) = check_save_target(policy, path, cwd)
+    {
+        let mut issue = Issue::policy(Some(i), r.message.clone());
+        issue.hint = r.hint().map(str::to_string);
+        issue.rule = Some(r.rule);
+        issue.fix = r.fix;
+        issues.push(issue);
+    }
+    Some(steps)
 }
 
 fn check_action_policy(
@@ -1059,6 +1102,157 @@ mod tests {
             assert!(v.issues[0].message.contains(".png"), "{:?}", v.issues);
             assert_eq!(v.issues[0].hint.as_deref(), Some(SAVE_PATH_HINT));
         }
+    }
+
+    /// 操作列に on_error (D-158) を足した形。`on_error` は screenshot の項目の JSON
+    fn script_on_error(json_actions: &str, on_error: &str) -> Script {
+        Script::from_json(&format!(
+            "{{\"version\":1,\"actions\":[{json_actions}],\"on_error\":{{\"screenshot\":{on_error}}}}}"
+        ))
+        .unwrap()
+    }
+
+    /// on_error の誤りは 1 つだけで、操作列全体の誤り (action_index なし)、文の頭が ON_ERROR_PREFIX
+    fn only_on_error_issue(v: &Validation) -> &Issue {
+        assert_eq!(v.issues.len(), 1, "{:?}", v.issues);
+        let issue = &v.issues[0];
+        assert_eq!(issue.action_index, None, "{issue:?}");
+        assert!(issue.message.starts_with(ON_ERROR_PREFIX), "{issue:?}");
+        issue
+    }
+
+    /// on_error の撮影が許されない設定 (allow.actions に screenshot が無い) は、actions の screenshot と同じ拒否 (4)。
+    /// 形の誤り (scale) は 3 の側
+    #[test]
+    fn validate_on_error_denied_screenshot_is_policy_issue() {
+        let p = policy(&format!("{ENABLED}[allow]\nactions = [\"click\"]\n"));
+        let shot = r#"{"path":"on-error-denied.png","window":{"process":"notepad.exe"}}"#;
+        let v = validate(
+            &script_on_error(r#"{"type":"click","x":1,"y":1}"#, shot),
+            &p,
+            None,
+        );
+        assert_eq!(v.error_kind(), Some(ErrorKind::PolicyDenied));
+        let issue = only_on_error_issue(&v);
+        // actions に置いた同じ撮影の拒否と、code、rule、文 (頭を除く) が同じ
+        let as_action = validate(
+            &script(
+                r#"{"type":"screenshot","path":"on-error-denied.png","window":{"process":"notepad.exe"}}"#,
+            ),
+            &p,
+            None,
+        );
+        assert_eq!(as_action.issues.len(), 1, "{:?}", as_action.issues);
+        assert_eq!(issue.code, as_action.issues[0].code);
+        assert_eq!(issue.rule, as_action.issues[0].rule);
+        assert_eq!(
+            issue.message,
+            format!("{ON_ERROR_PREFIX}{}", as_action.issues[0].message)
+        );
+        assert_eq!(v.on_error.as_ref().map(|_| ()), Some(()), "計画はできる");
+
+        let bad_scale = r#"{"path":"a.png","region":{"x":0,"y":0,"w":4,"h":4},"scale":2}"#;
+        let v = validate(
+            &script_on_error(r#"{"type":"wait","ms":1}"#, bad_scale),
+            &policy(ENABLED),
+            None,
+        );
+        assert_eq!(v.error_kind(), Some(ErrorKind::InvalidScript));
+        assert!(only_on_error_issue(&v).message.contains("scale"));
+        assert_eq!(v.on_error, None);
+    }
+
+    /// on_error の撮影にも全画面の禁止 (D-049) が効く
+    #[test]
+    fn validate_on_error_full_screen_is_refused() {
+        let screen = Rect::new(0, 0, 3840, 2160);
+        for s in [None, Some(screen)] {
+            let v = validate(
+                &script_on_error(r#"{"type":"wait","ms":1}"#, r#"{"path":"a.png"}"#),
+                &policy(ENABLED),
+                s,
+            );
+            assert_eq!(v.error_kind(), Some(ErrorKind::PolicyDenied), "{s:?}");
+            assert!(
+                only_on_error_issue(&v).message.contains("full_screen"),
+                "{:?}",
+                v.issues
+            );
+        }
+    }
+
+    /// on_error の保存先にも capture.save_dirs (D-075) が効く
+    #[test]
+    fn validate_on_error_save_path_outside_save_dirs_is_refused() {
+        let dir = crate::testing::unique_temp_dir("validate-on-error-save-dirs");
+        let p = policy(&format!(
+            "{ENABLED}[capture]\nsave_dirs = ['{}']\n",
+            dir.display()
+        ));
+        let shot = |path: &str| {
+            serde_json::json!({ "path": path, "region": { "x": 0, "y": 0, "w": 4, "h": 4 } })
+                .to_string()
+        };
+        let v = validate(
+            &script_on_error(r#"{"type":"wait","ms":1}"#, &shot("C:\\elsewhere\\x.png")),
+            &p,
+            None,
+        );
+        assert_eq!(v.error_kind(), Some(ErrorKind::PolicyDenied));
+        let issue = only_on_error_issue(&v);
+        assert!(issue.message.contains("capture.save_dirs"), "{issue:?}");
+        assert_eq!(issue.rule, Some("capture.save_dirs"));
+        let inside = dir.join("x.png");
+        let v = validate(
+            &script_on_error(
+                r#"{"type":"wait","ms":1}"#,
+                &shot(&inside.to_string_lossy()),
+            ),
+            &p,
+            None,
+        );
+        assert!(v.ok(), "{:?}", v.issues);
+    }
+
+    /// on_error は 1 つの Capture に計画され、settle の timeout_ms が時間の上限に数えられる。
+    /// 計画 (plans) は actions の分だけ
+    #[test]
+    fn validate_on_error_plans_one_capture_and_counts_settle_in_budget() {
+        let shot =
+            r#"{"path":"a.png","window":{"process":"notepad.exe"},"settle":{"timeout_ms":5000}}"#;
+        let s = script_on_error(r#"{"type":"wait","ms":1}"#, shot);
+        let v = validate(&s, &policy(ENABLED), None);
+        assert!(v.ok(), "{:?}", v.issues);
+        assert_eq!(v.plans.len(), 1);
+        match &v.on_error {
+            Some(Step::Capture {
+                path,
+                window: Some(w),
+                settle: Some(st),
+                rect: None,
+                ..
+            }) => {
+                assert_eq!(path, "a.png");
+                assert_eq!(w.process, "notepad.exe");
+                assert_eq!(st.timeout_ms, 5000);
+            }
+            other => panic!("{other:?}"),
+        }
+        // wait 1 + settle 5000 + 余裕 1000 = 6001
+        let limit = |ms: u64| policy(&format!("{ENABLED}[limits]\nmax_duration_ms = {ms}\n"));
+        assert!(validate(&s, &limit(6001), None).ok());
+        let v = validate(&s, &limit(6000), None);
+        assert_eq!(
+            v.error_kind(),
+            Some(ErrorKind::PolicyDenied),
+            "{:?}",
+            v.issues
+        );
+        assert_eq!(v.issues[0].action_index, None);
+        // on_error が無ければ同じ上限で通る (数えているのは on_error の settle)
+        let plain = script(r#"{"type":"wait","ms":1}"#);
+        assert!(validate(&plain, &limit(6000), None).ok());
+        assert_eq!(validate(&plain, &limit(6000), None).on_error, None);
     }
 
     /// 保存先の断りの rule と fix (D-079): 形の誤りは save_path で直し方なし、save_dirs の外れはそのキーと直し方

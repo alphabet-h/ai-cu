@@ -868,6 +868,7 @@ pub fn step_with_shot(action: Action, shot: Option<ShotSpec>) -> Script {
     Script {
         version: SCRIPT_VERSION,
         actions,
+        on_error: None,
     }
 }
 

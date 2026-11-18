@@ -12773,6 +12773,7 @@ mod tests {
             let v = crate::validate::Validation {
                 issues: vec![],
                 plans,
+                on_error: None,
             };
             let mut sink = MockSink(world.clone());
             let desktop = MockDesktop(world.clone());
