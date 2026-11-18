@@ -6114,6 +6114,7 @@ mod tests {
                 resized: Vec::new(),
                 clipboard: Vec::new(),
                 elapsed_ms: 1,
+                error_shot: None,
             })
         }
     }
@@ -6188,6 +6189,7 @@ mod tests {
                 resized: Vec::new(),
                 clipboard: Vec::new(),
                 elapsed_ms: 1000,
+                error_shot: None,
             }));
             draw(a, 120, 32)
         };
@@ -6262,6 +6264,7 @@ mod tests {
                 resized: vec![z],
                 clipboard: Vec::new(),
                 elapsed_ms: 1000,
+                error_shot: None,
             }));
             draw(a, 160, 32)
         };
@@ -6343,6 +6346,7 @@ mod tests {
                 history_excluded: true,
             }],
             elapsed_ms: 900,
+            error_shot: None,
         }));
         let text = draw(&a, 160, 32);
         assert!(
@@ -6397,6 +6401,7 @@ mod tests {
             resized: Vec::new(),
             clipboard: Vec::new(),
             elapsed_ms: 1234,
+            error_shot: None,
         }));
         assert!(matches!(a.overlay, Overlay::RunResult { ok: true, .. }));
         let text = draw(&a, 120, 32);

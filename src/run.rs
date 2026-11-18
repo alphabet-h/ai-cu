@@ -725,6 +725,55 @@ pub struct RunReport {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub clipboard: Vec<ClipboardInfo>,
     pub elapsed_ms: u64,
+    /// 操作に入った後の失敗で、操作列の `on_error` の 1 枚を撮ろうとした結果 (D-158)。成功と、撮らない失敗
+    /// (6、10、14、同じ対象の撮影の失敗) ではキーごと無い。失敗の JSON では最上位に出る (D-065 の進み具合と同じ)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_shot: Option<ErrorShotOutcome>,
+}
+
+/// `on_error` の 1 枚の結果 (D-158)。撮れたら `ok: true` と成功の `screenshots` の 1 要素と同じ項目、撮れなければ
+/// `ok: false` と撮影の誤りの code、exit_code、message と、値があるときだけ reason、rule、fix (元の失敗の
+/// error と同じ規則。D-079)。hint は付けない (元の失敗の hint が次の手)
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum ErrorShotOutcome {
+    Taken {
+        /// 常に真
+        ok: bool,
+        #[serde(flatten)]
+        shot: ShotInfo,
+    },
+    Refused {
+        /// 常に偽
+        ok: bool,
+        code: &'static str,
+        exit_code: i32,
+        message: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reason: Option<&'static str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        rule: Option<&'static str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        fix: Option<String>,
+    },
+}
+
+impl ErrorShotOutcome {
+    fn taken(shot: ShotInfo) -> Self {
+        ErrorShotOutcome::Taken { ok: true, shot }
+    }
+
+    fn refused(e: &AppError) -> Self {
+        ErrorShotOutcome::Refused {
+            ok: false,
+            code: e.kind.code(),
+            exit_code: e.kind.exit_code(),
+            message: e.message.clone(),
+            reason: e.reason,
+            rule: e.deny.as_ref().map(|d| d.rule),
+            fix: e.fix().map(str::to_string),
+        }
+    }
 }
 
 /// `clipboard` で文字を置いた記録 (D-157)。置いた文そのものは入れない (秘密や長い文を出力に写さない)
@@ -1301,6 +1350,15 @@ pub struct ExecOptions<'w> {
     pub skip_lead: bool,
 }
 
+/// `execute_checked` から `execute_on` へ返す枠の後始末の印 (D-093、D-158)
+#[derive(Debug, Default)]
+struct Cleanup {
+    /// 枠を出して自分で解いた (外で解き直さない)
+    frame_released: bool,
+    /// 操作に入った後の経路が、人か停止要因に止められて終わった (元の失敗か、on_error の 1 枚の撮影の停止)
+    stopped_after: bool,
+}
+
 struct Ctx<'h> {
     screen: Rect,
     start_ms: u64,
@@ -1335,6 +1393,7 @@ impl Ctx<'_> {
             resized: std::mem::take(&mut self.resized),
             clipboard: std::mem::take(&mut self.clipboard),
             elapsed_ms: now_ms.saturating_sub(self.start_ms),
+            error_shot: None,
         }
     }
 }
@@ -1520,13 +1579,12 @@ impl Executor<'_> {
                     | Step::Clipboard { .. }
             )
         });
-        // 内側が枠を出して自分で解いたか (枠の解放を 1 回にする)
-        let mut frame_released = false;
+        // 内側が枠を自分で解いたか、操作の後に止められたか (枠の後始末を 1 回にする)
+        let mut cleanup = Cleanup::default();
         let result = if changes_screen {
             match self.acquire_input_lock(opts.surface) {
                 Ok(waited) => {
-                    let r =
-                        self.execute_checked(screen, &v, opts, true, waited, &mut frame_released);
+                    let r = self.execute_checked(screen, &v, opts, true, waited, &mut cleanup);
                     // 押したままのキーとボタンを離し、枠を解いた後に解く (成否によらず)
                     self.input_lock.release();
                     r
@@ -1535,11 +1593,15 @@ impl Executor<'_> {
                 Err(e) => Err(e),
             }
         } else {
-            self.execute_checked(screen, &v, opts, false, false, &mut frame_released)
+            self.execute_checked(screen, &v, opts, false, false, &mut cleanup)
         };
         // 止められた実行の後は枠を残さない。枠を出していない実行 (読み取りの wait_for、画面を変えない run、錠の待ちの 6) でも、
-        // 前の呼び出しが残した自分の枠を消す (次の入力が予告と人の入力の判定を省かないように。D-093、D-107、D-113)
-        if !frame_released && result.as_ref().is_err_and(AppError::stopped_by_user) {
+        // 前の呼び出しが残した自分の枠を消す (次の入力が予告と人の入力の判定を省かないように。D-093、D-107、D-113)。
+        // 操作の後の止められ方 (on_error の 1 枚の撮影の停止を含む。D-158) は `cleanup.stopped_after` が持ち、
+        // 操作に入る前の失敗 (錠の待ち、予告の間など) は result で見る
+        let stopped =
+            cleanup.stopped_after || result.as_ref().is_err_and(AppError::stopped_by_user);
+        if !cleanup.frame_released && stopped {
             self.indicator.release(0);
         }
         result
@@ -1578,7 +1640,8 @@ impl Executor<'_> {
 
     /// `execute_on` の本体 (検証の後、錠を取った後): 操作の前の判定、枠と予告の間、操作の実行、押したままを離す、
     /// 枠を解く。`changes_screen` は画面を変える操作を含むか (`execute_on` が検証の直後に決める)、`waited` は錠を
-    /// 待ったか (待った実行は予告の間を縮めない。D-113)。枠を出して自分で解いたら `frame_released` を真にする
+    /// 待ったか (待った実行は予告の間を縮めない。D-113)。枠を出して自分で解いたら `cleanup.frame_released` を、
+    /// 操作に入った後に止められて終わったら (on_error の 1 枚の撮影の停止を含む。D-158) `cleanup.stopped_after` を真にする
     fn execute_checked(
         &mut self,
         screen: Rect,
@@ -1586,7 +1649,7 @@ impl Executor<'_> {
         opts: &ExecOptions<'_>,
         changes_screen: bool,
         waited: bool,
-        frame_released: &mut bool,
+        cleanup: &mut Cleanup,
     ) -> Result<RunReport, AppError> {
         let ExecOptions {
             self_window,
@@ -1658,7 +1721,7 @@ impl Executor<'_> {
                 if let Err(e) = self.lead(wait_ms, lead_ms, &mut state, surface) {
                     self.indicator
                         .release(if e.stopped_by_user() { 0 } else { linger_ms });
-                    *frame_released = true;
+                    cleanup.frame_released = true;
                     return Err(e);
                 }
             }
@@ -1685,13 +1748,24 @@ impl Executor<'_> {
         for batch in state.release_batches() {
             let _ = self.sink.send(&batch);
         }
-        let report = ctx.report(self.clock.now_ms());
-        // 枠は成否にかかわらず解く。人か停止要因に止められた実行の後は残さない (D-093)。
-        // 枠を出していない実行の止められた後の後始末は `execute_on` が 1 か所で行う
+        // 失敗のとき撮る 1 枚 (D-158)。押したままを離した後、枠を解く前 (錠は持ったまま)
+        let error_shot = match &result {
+            Err(e) => self.error_shot(e, v, &mut state, &ctx),
+            Ok(()) => None,
+        };
+        let stopped = result.as_ref().is_err_and(AppError::stopped_by_user)
+            || error_shot
+                .as_ref()
+                .is_some_and(|&(_, shot_stopped)| shot_stopped);
+        let mut report = ctx.report(self.clock.now_ms());
+        report.error_shot = error_shot.map(|(outcome, _)| outcome);
+        // 枠は成否にかかわらず解く。人か停止要因に止められた実行の後は残さない (D-093)。on_error の 1 枚の撮影で
+        // 止められたときも同じ (元の失敗が別のコードでも人の止める意思を尊重する。D-158)。
+        // 枠を出していない実行の止められた後の後始末は `execute_on` が 1 か所で行う (`cleanup.stopped_after` を見る)
+        cleanup.stopped_after = stopped;
         if shown {
-            let stopped = result.as_ref().is_err_and(AppError::stopped_by_user);
             self.indicator.release(if stopped { 0 } else { linger_ms });
-            *frame_released = true;
+            cleanup.frame_released = true;
         }
         match result {
             Ok(()) => Ok(report),
@@ -1732,6 +1806,59 @@ impl Executor<'_> {
             .with_hint(hint(Hint::LeadUserActive, surface)));
         }
         Ok(())
+    }
+
+    /// 操作に入った後の失敗 `e` の後に、操作列の `on_error` の 1 枚を撮る (D-158)。撮らないなら None: on_error が無い、
+    /// 撮らない失敗 (`AppError::skips_error_shot`。6、10、14)、失敗した操作が region と window の同じ撮影
+    /// (同じ理由で断られる撮影と隠れの待ちを繰り返さない)。撮る前に停止の判定 (目印、取り消し、時間の上限、人の
+    /// マウス) を通し、続けて操作列の撮影と同じ経路 (`capture`) で撮る。返すのは結果と、撮る前の判定か撮影の
+    /// 途中で人か停止要因に止められたか (後始末を停止と同じにする)。`executed` と `screenshots` には数えない
+    fn error_shot(
+        &mut self,
+        e: &AppError,
+        v: &crate::validate::Validation,
+        state: &mut State,
+        ctx: &Ctx<'_>,
+    ) -> Option<(ErrorShotOutcome, bool)> {
+        let Some(Step::Capture {
+            rect,
+            window,
+            scale,
+            max_edge,
+            path,
+            settle,
+        }) = &v.on_error
+        else {
+            return None;
+        };
+        if e.skips_error_shot() {
+            return None;
+        }
+        // 失敗した操作の添字 (操作の誤りには添字が付く。無ければ途中の操作)
+        let i = e.action_index.unwrap_or(ctx.executed);
+        let same_shot_failed = v.plans.get(i).is_some_and(|steps| {
+            steps.iter().any(|s| {
+                matches!(s, Step::Capture { rect: r, window: w, .. } if r == rect && w == window)
+            })
+        });
+        if same_shot_failed {
+            return None;
+        }
+        let spec = CaptureSpec {
+            rect: *rect,
+            window: window.as_ref(),
+            scale: *scale,
+            max_edge: *max_edge,
+            path,
+            settle: *settle,
+        };
+        let taken = self
+            .check_stop(state, ctx)
+            .and_then(|()| self.capture(i, &spec, state, ctx));
+        Some(match taken {
+            Ok(shot) => (ErrorShotOutcome::taken(shot), false),
+            Err(se) => (ErrorShotOutcome::refused(&se), se.stopped_by_user()),
+        })
     }
 
     fn run_plans(
@@ -1808,7 +1935,8 @@ impl Executor<'_> {
                             path,
                             settle: *settle,
                         };
-                        self.capture(i, &spec, state, ctx).map_err(|e| e.at(i))?
+                        let shot = self.capture(i, &spec, state, ctx).map_err(|e| e.at(i))?;
+                        ctx.shots.push(shot);
                     }
                     Step::Focus { process, title } => {
                         // ロックの幕の間の focus が 11 (前面化の失敗) にならないよう、直前にも判定を通す (D-067)
@@ -3101,14 +3229,15 @@ impl Executor<'_> {
     }
 
     /// screenshot。`settle` があれば、撮る前に `wait_stable` と同じ判定 (`watch_screen`) で落ち着くのを待ち、
-    /// 落ち着いたときか時間切れのときの最後のフレームを縮めて保存する (撮り直さない。時間切れも成功。D-081)
+    /// 落ち着いたときか時間切れのときの最後のフレームを縮めて保存する (撮り直さない。時間切れも成功。D-081)。
+    /// 撮った 1 枚を返す (操作列の撮影は呼び手が `ctx.shots` に積む。on_error の 1 枚は積まない。D-158)
     fn capture(
         &mut self,
         i: usize,
         spec: &CaptureSpec<'_>,
         state: &mut State,
-        ctx: &mut Ctx<'_>,
-    ) -> Result<(), AppError> {
+        ctx: &Ctx<'_>,
+    ) -> Result<ShotInfo, AppError> {
         let (rect, window, img, settled, settle_ms) = match spec.settle {
             Some(s) => {
                 let watch = ScreenSpec {
@@ -3136,7 +3265,7 @@ impl Executor<'_> {
             .images
             .write_png(spec.path, &img)
             .map_err(|m| AppError::new(ErrorKind::OsError, format!("画像を保存できない: {m}")))?;
-        ctx.shots.push(ShotInfo {
+        Ok(ShotInfo {
             action_index: i,
             path: saved,
             x: rect.x,
@@ -3147,8 +3276,7 @@ impl Executor<'_> {
             window,
             settled,
             settle_ms,
-        });
-        Ok(())
+        })
     }
 
     /// 1 回の撮影 (D-081。screenshot と画面の待ちが共有する)。撮影と同じ判定を順に通す: 入力デスクトップ
@@ -12781,7 +12909,7 @@ mod tests {
             let mut images = MemoryImages::default();
             let mut stops = StopSet::new();
             let screen = desktop.virtual_screen().unwrap();
-            let mut released = false;
+            let mut cleanup = Cleanup::default();
             let e = Executor {
                 policy: &p,
                 sink: &mut sink,
@@ -12798,7 +12926,7 @@ mod tests {
                 &opts(None, &[], Surface::Cli),
                 true,
                 false,
-                &mut released,
+                &mut cleanup,
             )
             .unwrap_err();
             assert_eq!(e.kind, ErrorKind::PolicyDenied, "{json}: {e}");
@@ -12887,5 +13015,335 @@ mod tests {
                 assert!(!json.to_string().contains("メモ帳"), "{json}");
             }
         }
+    }
+
+    // ---- 失敗のとき撮る 1 枚 (on_error。D-158) ----
+
+    /// on_error の撮る矩形 (region)。操作列の `SHOT` とは別の矩形 (同じ撮影の失敗の除外に当たらない)
+    const ERR_REGION: &str = r#"{"path":"err.png","region":{"x":0,"y":0,"w":8,"h":6}}"#;
+
+    /// 操作列に on_error を足した形。`shot` は screenshot の項目の JSON
+    fn script_on_error(actions: &str, shot: &str) -> Script {
+        Script::from_json(&format!(
+            "{{\"version\":1,\"actions\":[{actions}],\"on_error\":{{\"screenshot\":{shot}}}}}"
+        ))
+        .unwrap()
+    }
+
+    /// 条件が真になった poll から止める停止要因 (撮る前の停止の判定を撃つ)
+    struct StopWhen(Rc<RefCell<World>>, fn(&World) -> bool);
+
+    impl StopSource for StopWhen {
+        fn poll(&mut self) -> Option<StopReason> {
+            (self.1)(&self.0.borrow()).then(|| StopReason::External {
+                message: "test".into(),
+            })
+        }
+    }
+
+    /// メモ帳 (許可) が (100, 100, 800, 600) にあり、その外の (1990, 1990, 50, 50) の下は許可外の chrome。
+    /// click (10, 10) はメモ帳に届き、click (2000, 2000) は前面のガードで 7 になる
+    fn on_error_world() -> World {
+        let np = top(0x20, "Notepad.exe", "a.txt - メモ帳");
+        let mut w = World::new();
+        w.default_window = Some(np.info.clone());
+        w.top = vec![np];
+        w.windows_at = vec![(Rect::new(1990, 1990, 50, 50), chrome())];
+        w
+    }
+
+    fn notepad_only() -> Policy {
+        policy(&format!("{ENABLED}[allow]\nprocesses=[\"notepad\"]\n"))
+    }
+
+    const CLICK_THEN_GUARDED: &str =
+        r#"{"type":"click","x":10,"y":10},{"type":"click","x":2000,"y":2000}"#;
+    const ERR_NOTEPAD: &str = r#"{"path":"err.png","window":{"process":"notepad.exe"}}"#;
+
+    /// 操作に入った後の失敗 (2 つ目の click が 7) で on_error の窓を 1 枚撮り、最上位の error_shot に出す。
+    /// executed と screenshots には数えず、action_index は失敗した操作の添字
+    #[test]
+    fn on_error_shot_taken_after_guard_failure() {
+        let world = on_error_world().shared();
+        let s = script_on_error(CLICK_THEN_GUARDED, ERR_NOTEPAD);
+        let (r, images) = exec(&world, &notepad_only(), &mut StopSet::new(), &s);
+        let e = r.unwrap_err();
+        assert_eq!(e.kind, ErrorKind::ForegroundGuard, "{e}");
+        assert_eq!(e.action_index, Some(1));
+        let json = e.to_json();
+        assert_eq!(json["executed"], 1, "{json}");
+        let shot = &json["error_shot"];
+        assert_eq!(shot["ok"], true, "{json}");
+        assert_eq!(shot["path"], "err.png", "{json}");
+        assert_eq!(shot["action_index"], 1, "{json}");
+        assert_eq!(shot["window"]["hwnd"], 0x20, "{json}");
+        assert!(shot.get("hint").is_none(), "{json}");
+        assert_eq!(json["screenshots"], serde_json::json!([]), "{json}");
+        assert_eq!(json["error"]["code"], "foreground_guard", "{json}");
+        assert_eq!(images.written.len(), 1);
+        assert_eq!(images.written[0].0, "err.png");
+    }
+
+    /// 停止の目印の 6 では撮らない (error_shot のキーが無い)
+    #[test]
+    fn on_error_shot_not_taken_on_stop() {
+        let world = World::new().shared();
+        let mut stops = StopSet::new();
+        stops.push(Box::new(StopAfterPolls(1)));
+        let s = script_on_error(
+            r#"{"type":"click","x":10,"y":10},{"type":"wait","ms":5000}"#,
+            ERR_REGION,
+        );
+        let (r, images) = exec(&world, &policy(ENABLED), &mut stops, &s);
+        let e = r.unwrap_err();
+        assert_eq!(e.kind, ErrorKind::Stopped, "{e}");
+        let json = e.to_json();
+        assert!(
+            json.get("executed").is_some(),
+            "操作に入った後の失敗: {json}"
+        );
+        assert!(json.get("error_shot").is_none(), "{json}");
+        assert!(images.written.is_empty());
+        assert_eq!(world.borrow().capture_calls, 0);
+    }
+
+    /// 実行の途中の 10 (自分の入力の直後の clipboard) では撮らない。撮影は無操作を見ないので、除外が無ければ撮れてしまう
+    #[test]
+    fn on_error_shot_not_taken_on_user_active_mid_run() {
+        let mut w = World::new();
+        w.input_resets_idle = true;
+        let world = w.shared();
+        let s = script_on_error(
+            &format!(r#"{{"type":"move","x":10,"y":10}},{CLIP_AB}"#),
+            ERR_REGION,
+        );
+        let (r, images) = exec(&world, &policy(ENABLED), &mut StopSet::new(), &s);
+        let e = r.unwrap_err();
+        assert_eq!(e.kind, ErrorKind::UserActive, "{e}");
+        assert_eq!(e.action_index, Some(1));
+        assert!(e.to_json().get("error_shot").is_none(), "{e:?}");
+        assert!(images.written.is_empty());
+        assert_eq!(world.borrow().capture_calls, 0);
+    }
+
+    /// 2 つ目の操作 (screenshot) の直前にロックになった 14 では撮らない
+    #[test]
+    fn on_error_shot_not_taken_on_desktop_unavailable_mid_run() {
+        let mut w = World::new();
+        w.input_desktop_after_reads = Some((1, Ok(InputDesktop::Locked { name: None })));
+        let world = w.shared();
+        let s = script_on_error(
+            &format!(r#"{{"type":"click","x":10,"y":10}},{SHOT}"#),
+            ERR_REGION,
+        );
+        let (r, images) = exec(&world, &policy(ENABLED), &mut StopSet::new(), &s);
+        let e = r.unwrap_err();
+        assert_eq!(e.kind, ErrorKind::DesktopUnavailable, "{e}");
+        assert_eq!(e.action_index, Some(1));
+        assert!(e.to_json().get("error_shot").is_none(), "{e:?}");
+        assert!(images.written.is_empty());
+        assert_eq!(
+            world.borrow().input_desktop_reads,
+            2,
+            "開始時と撮影の直前だけ"
+        );
+    }
+
+    /// cursor_clipped の 6 (人の操作ではない) も撮らない (撮る前の停止の判定が同じずれを拾い直すので。D-158)
+    #[test]
+    fn on_error_shot_not_taken_on_cursor_clipped() {
+        let mut w = World::new();
+        w.clip_after_sends = vec![(0, Rect::new(0, 200, 500, 500))];
+        let world = w.shared();
+        let s = script_on_error(CLICK_THEN_WAIT, ERR_REGION);
+        let (r, images) = exec(&world, &policy(ENABLED), &mut StopSet::new(), &s);
+        let e = r.unwrap_err();
+        assert_eq!(e.kind, ErrorKind::Stopped, "{e}");
+        assert_eq!(e.reason, Some(reason::CURSOR_CLIPPED));
+        assert!(e.to_json().get("error_shot").is_none(), "{e:?}");
+        assert!(images.written.is_empty());
+        assert_eq!(world.borrow().capture_calls, 0);
+    }
+
+    /// 枠を出さない操作列 (撮影だけ) の失敗の後、撮る前の停止の判定で止められたら、撮らずに ok: false (6) を出し、
+    /// 前の呼び出しが残した枠を release(0) で消す (後始末を停止と同じにする。D-158)
+    #[test]
+    fn on_error_shot_stop_releases_frame_without_shown_frame() {
+        let world = World::new().shared();
+        let mut stops = StopSet::new();
+        // 2 つ目の撮影の窓を探した (見つからずに 12 で失敗した) 後の poll から止める
+        stops.push(Box::new(StopWhen(world.clone(), |w| {
+            w.find_window_calls >= 1
+        })));
+        let s = script_on_error(
+            &format!(
+                r#"{SHOT},{{"type":"screenshot","path":"b.png","window":{{"process":"notepad.exe"}}}}"#
+            ),
+            ERR_REGION,
+        );
+        let (r, images) = exec(&world, &notepad_only(), &mut stops, &s);
+        let e = r.unwrap_err();
+        assert_eq!(e.kind, ErrorKind::WindowNotFound, "{e}");
+        assert_eq!(e.action_index, Some(1));
+        let json = e.to_json();
+        let shot = &json["error_shot"];
+        assert_eq!(shot["ok"], false, "{json}");
+        assert_eq!(shot["code"], "stopped", "{json}");
+        assert_eq!(shot["exit_code"], 6, "{json}");
+        assert!(shot.get("hint").is_none(), "{json}");
+        assert_eq!(images.written.len(), 1, "操作列の SHOT だけ");
+        let w = world.borrow();
+        assert!(w.shows.is_empty(), "枠を新しく出さない");
+        assert_eq!(w.releases, vec![0], "残っている枠を消す");
+    }
+
+    /// 7 の失敗の後、撮る前の停止の判定で人のマウスの移動に当たれば、撮らずに ok: false (6)。元の error は 7 のまま。
+    /// 枠は残す時間 (linger) ではなく release(0) で解く
+    #[test]
+    fn on_error_shot_checks_stop_before_capture() {
+        // 失敗までのカーソルの読みの回数を、on_error の無い同じ実行で数える (次の読みが撮る前の停止の判定)
+        let world = on_error_world().shared();
+        let e = exec_opts(
+            &world,
+            &notepad_only(),
+            &mut StopSet::new(),
+            &script(CLICK_THEN_GUARDED),
+            &lead_opts(5000, false),
+        )
+        .unwrap_err();
+        assert_eq!(e.kind, ErrorKind::ForegroundGuard, "{e}");
+        let reads = world.borrow().cursor_reads;
+        assert_eq!(world.borrow().releases, vec![5000]);
+
+        let mut w = on_error_world();
+        w.cursor_moves_after_reads = vec![(reads, Point::new(3000, 2000))];
+        let world = w.shared();
+        let e = exec_opts(
+            &world,
+            &notepad_only(),
+            &mut StopSet::new(),
+            &script_on_error(CLICK_THEN_GUARDED, ERR_NOTEPAD),
+            &lead_opts(5000, false),
+        )
+        .unwrap_err();
+        assert_eq!(
+            e.kind,
+            ErrorKind::ForegroundGuard,
+            "元の失敗は変えない: {e}"
+        );
+        assert_eq!(e.action_index, Some(1));
+        let json = e.to_json();
+        let shot = &json["error_shot"];
+        assert_eq!(shot["ok"], false, "{json}");
+        assert_eq!(shot["code"], "stopped", "{json}");
+        assert_eq!(shot["exit_code"], 6, "{json}");
+        let w = world.borrow();
+        assert_eq!(w.capture_calls, 0, "撮らない");
+        assert_eq!(w.shows.len(), 1);
+        assert_eq!(w.releases, vec![0], "止められたので枠を残さない");
+    }
+
+    /// on_error の撮る矩形に deny の窓が見えていれば撮らずに ok: false (7)。元の error (code、message、hint) は変えない
+    #[test]
+    fn on_error_shot_refused_keeps_original_error() {
+        let make = || {
+            let mut w = World::new();
+            w.windows_at = vec![(Rect::new(1990, 1990, 50, 50), chrome())];
+            w.stack = vec![
+                notepad_cover(Rect::new(0, 0, 150, 400)),
+                stacked(terminal(), Rect::new(100, 100, 200, 200), false),
+            ];
+            w.shared()
+        };
+        let p = policy(&format!(
+            "{ENABLED}[allow]\nprocesses=[\"target\"]\n[deny]\nprocesses=[\"zed.exe\"]\n"
+        ));
+        let (r, _) = exec(
+            &make(),
+            &p,
+            &mut StopSet::new(),
+            &script(CLICK_THEN_GUARDED),
+        );
+        let base = r.unwrap_err();
+        let world = make();
+        let s = script_on_error(
+            CLICK_THEN_GUARDED,
+            r#"{"path":"err.png","region":{"x":0,"y":0,"w":400,"h":400}}"#,
+        );
+        let (r, images) = exec(&world, &p, &mut StopSet::new(), &s);
+        let e = r.unwrap_err();
+        assert_eq!(e.kind, ErrorKind::ForegroundGuard, "{e}");
+        assert_eq!(
+            (&e.message, e.action_index, e.reason, e.hint()),
+            (&base.message, base.action_index, base.reason, base.hint())
+        );
+        assert_eq!(e.to_json()["error"], base.to_json()["error"]);
+        let json = e.to_json();
+        let shot = &json["error_shot"];
+        assert_eq!(shot["ok"], false, "{json}");
+        assert_eq!(shot["code"], "foreground_guard", "{json}");
+        assert_eq!(shot["exit_code"], 7, "{json}");
+        assert!(
+            shot["message"].as_str().unwrap().contains("Zed.exe"),
+            "{json}"
+        );
+        assert!(shot.get("hint").is_none(), "{json}");
+        // 値があるときだけ rule、fix を写す (機密の窓の拒否は rule だけで fix は無い。D-077、D-079)
+        assert_eq!(shot["rule"], "deny.processes", "{json}");
+        assert!(shot.get("fix").is_none(), "{json}");
+        assert!(images.written.is_empty());
+        assert_eq!(world.borrow().capture_calls, 0);
+    }
+
+    /// 失敗した操作が on_error と同じ窓の撮影 (隠れの 7) なら撮らない (隠れの待ちを繰り返さない)
+    #[test]
+    fn on_error_shot_skipped_when_same_screenshot_failed() {
+        let make = || {
+            let np = top(0x20, "Notepad.exe", "a.txt - メモ帳");
+            let mut w = World::new();
+            w.default_window = Some(np.info.clone());
+            w.top = vec![np];
+            // メモ帳の矩形の中に許可外の窓が重なっている (隠れ)
+            w.windows_at = vec![(Rect::new(150, 150, 300, 300), chrome())];
+            w.shared()
+        };
+        let actions = r#"{"type":"wait","ms":10},{"type":"screenshot","path":"a.png","window":{"process":"notepad.exe"}}"#;
+        // on_error の無い同じ実行 (隠れの待ちは操作列の撮影の 1 回分)
+        let base_world = make();
+        let (r, _) = exec(
+            &base_world,
+            &notepad_only(),
+            &mut StopSet::new(),
+            &script(actions),
+        );
+        assert_eq!(r.unwrap_err().kind, ErrorKind::ForegroundGuard);
+
+        let world = make();
+        let s = script_on_error(actions, ERR_NOTEPAD);
+        let (r, images) = exec(&world, &notepad_only(), &mut StopSet::new(), &s);
+        let e = r.unwrap_err();
+        assert_eq!(e.kind, ErrorKind::ForegroundGuard, "{e}");
+        assert_eq!(e.action_index, Some(1));
+        assert!(e.to_json().get("error_shot").is_none(), "{e:?}");
+        assert!(images.written.is_empty());
+        let (w, b) = (world.borrow(), base_world.borrow());
+        assert_eq!(
+            (w.find_window_calls, w.now_ms),
+            (b.find_window_calls, b.now_ms),
+            "隠れの待ちを繰り返さない"
+        );
+    }
+
+    /// 成功では撮らず、結果の JSON に error_shot のキーが無い
+    #[test]
+    fn on_error_shot_not_taken_on_success() {
+        let world = World::new().shared();
+        let s = script_on_error(r#"{"type":"click","x":10,"y":10}"#, ERR_REGION);
+        let (r, images) = exec(&world, &policy(ENABLED), &mut StopSet::new(), &s);
+        let report = r.unwrap();
+        assert_eq!(report.error_shot, None);
+        let json = serde_json::to_value(&report).unwrap();
+        assert!(json.get("error_shot").is_none(), "{json}");
+        assert!(images.written.is_empty());
     }
 }
