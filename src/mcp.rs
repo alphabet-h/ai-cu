@@ -7386,21 +7386,38 @@ mod tests {
         let mut f = Fixture::new(MapEnv::default());
         let world = f.world.clone();
         let mut s = f.server(paths(&floor));
-        // 実行の途中 (200 ms 後) に取り消しが届く (開始前の取り消しは実行しないので cooldown の対象外)
+        // move の send (添字 0) の後、wait の途中に取り消しが届く (開始前の取り消しは実行しないので
+        // cooldown の対象外)。時間で入れると、負荷の重いときに実行前の取り消しとして扱われ
+        // cooldown が立たない (D-161)
         let inbox = s.inbox.clone();
-        let pusher = std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(200));
-            inbox.push(cancel(json!(1)));
-        });
+        world.borrow_mut().hooks_after_sends.push((
+            0,
+            SendHook(std::rc::Rc::new(move || inbox.push(cancel(json!(1))))),
+        ));
+        let r = s.handle_line(&call(
+            1,
+            "run",
+            json!({ "actions": [
+                { "type": "move", "x": 1, "y": 1 },
+                { "type": "wait", "ms": 3000 }
+            ] }),
+        ));
         assert!(
-            s.handle_line(&call(
-                1,
-                "run",
-                json!({ "actions": [{ "type": "wait", "ms": 3000 }] })
-            ))
-            .is_none()
+            r.is_none(),
+            "取り消しで応答しない: {r:?} / sent: {:?}",
+            world.borrow().sent
         );
-        pusher.join().unwrap();
+        {
+            let w = world.borrow();
+            // 取り消しは move の後に届いた (move の展開が変わればここで落ちる)
+            assert_eq!(w.sent.len(), 1, "move の束だけ: {:?}", w.sent);
+            assert_eq!(
+                w.sent[0],
+                vec![InputEvent::move_to(Point::new(1, 1))],
+                "{:?}",
+                w.sent
+            );
+        }
         world.borrow_mut().idle_ms = 100;
         assert_eq!(
             exit_code(&reply(&mut s, &call(2, "click", json!({ "x": 1, "y": 1 })))),
