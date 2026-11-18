@@ -50,6 +50,10 @@ class Denied(unittest.TestCase):
         "ai-cu resize notepad.exe --width 800 --height 600",
         "& $exe resize notepad.exe --width 800 --height 600",
         "python tools/client.py $cu resize notepad.exe --width 1 --height 1",
+        # clipboard は利用者のクリップボードを書き換える (D-157)。resize と同じく、変数の形は ACTIONS に要る
+        "ai-cu clipboard hello",
+        "& $exe clipboard -",
+        "python tools/client.py $cu clipboard x",
         # python の客 (docs/manual-check/mcp_client.py) の引数に ai-cu があれば、その起動として見る
         "python docs/manual-check/mcp_client.py target/debug/ai-cu.exe mcp -- docs/manual-check/mcp-requests.jsonl",
         "python docs/manual-check/mcp_client.py ai-cu mcp -- x.jsonl",
@@ -220,6 +224,8 @@ class ReleaseOptIn(unittest.TestCase):
         "target/release/ai-cu.exe --config=target/t.toml run a.json",
         "bash -c 'target/release/ai-cu.exe run a.json'",
         "target/release/ai-cu.exe key ctrl+s",
+        # 手順 38 (a) の形 (D-157)
+        r"printf '一行目\n二行目' | target/release/ai-cu.exe clipboard -",
         # MCP サーバー (D-055) と、python の客を通した release の起動 (手順 19)
         "target/release/ai-cu.exe mcp",
         "C:/src/ai-cu/target/release/ai-cu.exe mcp",

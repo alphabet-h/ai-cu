@@ -1306,8 +1306,6 @@ target/release/ai-cu.exe windows
 - [ ] 終了コード `0`。`clipboard[0]` が `{"action_index": 0, "chars": 8, "lines": 2, "history_excluded": true}` で、出力のどこにも「一行目」が無い (置いた文を出さない)
 - [ ] `windows` の `foreground` が準備で控えた端末のまま (前面を変えていない)
 
-開発セッションのガード hook に `clipboard` が入るまでは、hook が一手ずつの `clipboard` を未知の語として止める (D-157)。そのときは (a) を飛ばし、止まったことを記録して (b) に進む。
-
 (b) 置いて貼る: AI は次の操作列を `target/manual-check/s38-paste.json` に書いて打つ。
 
 ```json
@@ -1330,7 +1328,7 @@ target/release/ai-cu.exe text --window notepad.exe --window-title <題>
 target/release/ai-cu.exe clipboard ai-cu-busy-check
 ```
 - [ ] 終了コード `10`、`"code":"user_active"`。`clipboard` が無い。`hint` が置く順 (`[clipboard, click 欄, key ctrl+v]`) を言う
-- [ ] 人がメモ帳で Ctrl+V を押すと、(b) の 2 行がもう一度貼られる (`ai-cu-busy-check` が置かれていない)。(a) を飛ばしたときは、(c) も `run` の `{"type":"clipboard","text":"ai-cu-busy-check"}` だけの操作列で行う
+- [ ] 人がメモ帳で Ctrl+V を押すと、(b) の 2 行がもう一度貼られる (`ai-cu-busy-check` が置かれていない)
 
 (d) 履歴に出ない (人の目): 人が Win+V を押して履歴の一覧を見る。
 - [ ] (人の目) 準備の `対照の文` は一覧にあり、(a) と (b) で ai-cu が置いた `一行目` の文は一覧に無い
