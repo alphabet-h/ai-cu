@@ -54,6 +54,8 @@ class Denied(unittest.TestCase):
         "ai-cu clipboard hello",
         "& $exe clipboard -",
         "python tools/client.py $cu clipboard x",
+        # pixel は読み取り (D-162) だが、同じ行の実入力は止める
+        "ai-cu pixel 1,2; ai-cu click 1,2",
         # python の客 (docs/manual-check/mcp_client.py) の引数に ai-cu があれば、その起動として見る
         "python docs/manual-check/mcp_client.py target/debug/ai-cu.exe mcp -- docs/manual-check/mcp-requests.jsonl",
         "python docs/manual-check/mcp_client.py ai-cu mcp -- x.jsonl",
@@ -180,6 +182,10 @@ class Allowed(unittest.TestCase):
         "ai-cu tree --window notepad.exe",
         "cargo run -- tree --window notepad.exe --depth 3",
         "target/debug/ai-cu tree --window notepad.exe --all",
+        # pixel は点ごとの 1x1 を撮って色を読むだけで、入力を送らない (D-146、D-162)
+        "ai-cu pixel 100,200",
+        "cargo run -- pixel 100,200 300,400",
+        "target/debug/ai-cu pixel --config=target/t.toml -5,7",
         "ai-cu explain actions.json",
         "ai-cu completions powershell",
         "target/debug/ai-cu validate a.json",
@@ -201,6 +207,7 @@ class Allowed(unittest.TestCase):
         # 読み取り専用は release のパスでも opt-in に関係なく通る
         "./target/release/ai-cu.exe shot --out target/x.png --region 0,0,800,600",
         "out=$(target/release/ai-cu.exe windows)",
+        "target/release/ai-cu.exe pixel 100,200",
     ]
 
     def test_allowed(self):

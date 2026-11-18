@@ -1093,7 +1093,7 @@ target/release/ai-cu.exe text --window notepad.exe --type document
 ## 34. 点の色 (pixel、D-146)
 
 `pixel` は読むだけ (入力を送らない) で、撮影と同じ許可と守りを点ごとの 1x1 に掛ける。手順 0 の設定 (基本の層。allow に notepad、`capture_enabled` が true) のまま行い、断る側の確かめは `--config=` の上書き層 (deny を足すだけ。allow を広げない) を `target/manual-check/` に作って行う。
-`AI_CU_MANUAL_CHECK=1` のセッションで、release のパスを文字どおり書く (開発のシェルの `cargo run -- pixel` とデバッグビルドはガード hook が止める。D-146 の限界)。入力を送らないので GO は要らないが、(c) の窓の配置は人に頼む。終了コード 10 (人が操作中) なら 3 秒待って 1 回だけ打ち直す。点はメモ帳の `rect` の内側に取り、角と縁から数十ピクセル離す。全画面は撮らない。
+release のパスを文字どおり書く (ガード hook は CLI の `pixel` を `shot` と同じ読み取りとして通すので、CLI の項は `AI_CU_MANUAL_CHECK=1` が無くてもよい。(a) の MCP の項は release の `mcp` を起動するので、今までどおり `AI_CU_MANUAL_CHECK=1` のセッションで行う。D-162)。入力を送らないので GO は要らないが、(c) の窓の配置は人に頼む。終了コード 10 (人が操作中) なら 3 秒待って 1 回だけ打ち直す。点はメモ帳の `rect` の内側に取り、角と縁から数十ピクセル離す。全画面は撮らない。
 
 準備: 人がメモ帳を開き、何も入れずに置く。AI は `target/release/ai-cu.exe windows` でメモ帳の `rect` を読み、本文の内側の 2 点 P1、P2 (例: 本文の左寄りと右寄り。`find --window notepad.exe --type document` の `center` も使える) を決める。
 
