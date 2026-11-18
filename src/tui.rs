@@ -2525,7 +2525,25 @@ fn error_lines(e: &AppError, script: Option<&crate::script::Script>) -> Vec<Stri
     if let Some(fix) = e.fix() {
         lines.push(format!("直し方: {fix}"));
     }
+    if let Some(line) = error_shot_line(e) {
+        lines.push(line);
+    }
     lines
+}
+
+/// 失敗の結果の `error_shot` (操作列の on_error で撮った 1 枚。D-158) を 1 行にする。キーが無ければ None
+fn error_shot_line(e: &AppError) -> Option<String> {
+    let shot = e.progress.as_deref()?.get("error_shot")?;
+    let text = |key: &str| shot.get(key).and_then(|v| v.as_str()).unwrap_or("");
+    Some(if shot.get("ok").and_then(|v| v.as_bool()) == Some(true) {
+        format!("失敗のとき撮った → {}", text("path"))
+    } else {
+        format!(
+            "失敗のとき撮れなかった: [{}] {}",
+            text("code"),
+            text("message")
+        )
+    })
 }
 
 /// 検証の問題を結果の画面の行にする (上限あり。全件は `ai-cu validate`)。
@@ -2576,6 +2594,10 @@ fn confirm_lines(r: &PreflightReport) -> Vec<String> {
         ),
         format!("判定に使う設定 (保存済み): {}", r.layer_sources.join(", ")),
     ];
+    // on_error は失敗したときだけ撮るので、件数の行の撮影の枚数には数えない (D-158)
+    if let Some(on_error) = &r.script.on_error {
+        lines.insert(2, format!("失敗のとき撮る → {}", on_error.screenshot.path));
+    }
     let mut stop = format!(
         "停止: マウスを {} px 以上動かす / 最大 {} ms",
         r.mouse_threshold_px, r.max_duration_ms
@@ -6369,6 +6391,94 @@ mod tests {
             text.lines().any(|l| l.contains("[ ] clipboard")),
             "clipboard は出す\n{text}"
         );
+    }
+
+    /// on_error (D-158): 確認の画面に「失敗のとき撮る → <path>」を出し、件数の行の撮影の枚数には数えない。
+    /// on_error が無ければ出さない
+    #[test]
+    fn tui_confirm_shows_on_error_shot_without_counting_it() {
+        let cfg = Config::parse(&format!("version = 1\n{ENABLED}")).unwrap();
+        let policy = crate::policy::Policy::new(vec![
+            config::Layer::from_config(&cfg, "C:\\cfg\\config.toml").unwrap(),
+        ]);
+        let script = crate::script::Script::from_json(
+            r#"{"version":1,"actions":[{"type":"click","x":10,"y":10}],"on_error":{"screenshot":{"path":"C:\\out\\err.png","window":{"process":"notepad.exe"}}}}"#,
+        )
+        .unwrap();
+        let r = PreflightReport::build(
+            Path::new("C:\\scripts\\steps.json"),
+            script,
+            &policy,
+            Some(Rect::new(0, 0, 3840, 2160)),
+            vec![],
+        );
+        assert!(r.runnable(), "{:?}", r.validation.issues);
+        assert!(r.validation.on_error.is_some());
+        assert_eq!(r.screenshots, 0);
+        let lines = confirm_lines(&r).join("\n");
+        assert!(
+            lines.contains("失敗のとき撮る → C:\\out\\err.png"),
+            "{lines}"
+        );
+        assert!(lines.contains("撮影 0 枚"), "{lines}");
+        let mut a = app();
+        a.on_preflight(Ok(r));
+        let text = draw(&a, 140, 40);
+        assert!(has(&text, "失敗のとき撮る"), "{text}");
+        assert!(has(&text, "C:\\out\\err.png"), "{text}");
+        // on_error が無ければ出さない
+        let plain = report(r#"{"type":"click","x":10,"y":10}"#, ENABLED);
+        let lines = confirm_lines(&plain).join("\n");
+        assert!(!lines.contains("失敗のとき撮る"), "{lines}");
+    }
+
+    /// 失敗の結果の画面: error_shot が ok: true なら撮った path、ok: false なら code と message、無ければ出さない (D-158)
+    #[test]
+    fn tui_run_failure_shows_error_shot_line() {
+        let failed = || {
+            crate::error::AppError::new(crate::error::ErrorKind::ForegroundGuard, "前面が違う")
+                .at(1)
+        };
+        let taken = failed().with_progress(serde_json::json!({
+            "executed": 1,
+            "error_shot": {"ok": true, "action_index": 1, "path": "C:\\out\\err.png",
+                "x": 0, "y": 0, "width": 4, "height": 3, "scale": 1.0},
+        }));
+        let refused = failed().with_progress(serde_json::json!({
+            "executed": 1,
+            "error_shot": {"ok": false, "code": "stopped", "exit_code": 6,
+                "message": "マウスが動いた"},
+        }));
+        let none = failed().with_progress(serde_json::json!({"executed": 1}));
+        let shot_lines = |e: &crate::error::AppError| {
+            error_lines(e, None)
+                .into_iter()
+                .filter(|l| l.starts_with("失敗のとき"))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            shot_lines(&taken),
+            vec!["失敗のとき撮った → C:\\out\\err.png".to_string()]
+        );
+        assert_eq!(
+            shot_lines(&refused),
+            vec!["失敗のとき撮れなかった: [stopped] マウスが動いた".to_string()]
+        );
+        assert!(shot_lines(&none).is_empty());
+        assert!(shot_lines(&failed()).is_empty());
+        // 描画にも出る
+        let mut a = app();
+        a.on_preflight(Ok(report(
+            r#"{"type":"click","x":10,"y":10},{"type":"click","x":20,"y":20}"#,
+            ENABLED,
+        )));
+        a.update(&press(KeyCode::Char('y')));
+        a.set_self_window(Some(me()));
+        a.tick(RUN_COUNTDOWN_MS);
+        a.on_run_finished(Err(taken));
+        let text = draw(&a, 120, 32);
+        assert!(has(&text, "失敗のとき撮った"), "{text}");
+        assert!(has(&text, "C:\\out\\err.png"), "{text}");
     }
 
     #[test]
