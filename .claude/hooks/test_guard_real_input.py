@@ -2,9 +2,13 @@
 
 import json
 import os
+import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
+from unittest import mock
 
 sys.dont_write_bytecode = True  # __pycache__ を作らない (git に混ざるのを防ぐ)
 
@@ -227,6 +231,199 @@ class Allowed(unittest.TestCase):
             with self.subTest(cmd=cmd):
                 self.assertFalse(g.violation(cmd, environ={}), cmd)
                 self.assertIsNone(g.decide(event(cmd), environ={}))
+
+
+def _touch(path):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8"):
+        pass
+
+
+class PathsNamedAiCu(unittest.TestCase):
+    """1 段のコマンドで、python の引数の ai-cu という名前のフォルダの絶対パスは起動と見ない (D-165)。
+    隣に起動できるファイルがある、実在しない、相対、繋ぎがある、シェルの中、の形は今までどおり止める。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp(prefix="guard-d165-")
+        t = cls.tmp.replace("\\", "/")
+        cls.base, cls.side, cls.sidecmd, cls.sideps = (t + "/base", t + "/side", t + "/sidecmd", t + "/sideps")
+        for d in (cls.base, cls.side, cls.sidecmd, cls.sideps):
+            os.makedirs(d + "/ai-cu")
+        _touch(cls.side + "/ai-cu.exe")
+        _touch(cls.sidecmd + "/ai-cu.cmd")
+        _touch(cls.sideps + "/ai-cu.ps1")
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def allowed(self):
+        b = self.base
+        return [
+            f"python -B probe.py {b}/ai-cu {b}/ai-cu/target/debug/ai-cu.exe",
+            f"python -B probe.py {b}/ai-cu debug",
+            f'python probe.py "{b}/ai-cu" debug',
+            f"python probe.py {b}/ai-cu debug > out.log 2>&1",
+            f'python probe.py "{b.replace("/", chr(92))}\\ai-cu" debug',  # 引用符に囲んだ逆スラッシュ
+        ]
+
+    def denied(self):
+        b = self.base
+        return [
+            f"python probe.py {self.side}/ai-cu mcp",  # 隣に ai-cu.exe
+            f"python probe.py {self.sidecmd}/ai-cu mcp",
+            f"python probe.py {self.sideps}/ai-cu mcp",
+            f"python probe.py {b}/no-such/ai-cu mcp",  # 実在しない
+            f"python probe.py {b}/ai-cu target/debug/ai-cu.exe mcp -- x",  # フォルダの次の本物の起動
+            f"{b}/ai-cu run a.json",  # 頭には当てない
+            "python probe.py ./ai-cu mcp",  # 相対
+            "python probe.py ai-cu mcp",  # 素の名前
+            f"cd {b} && python probe.py {b}/ai-cu mcp",  # 繋ぎがある
+            f"cp x y; python probe.py {b}/ai-cu mcp",
+            f'bash -c "python probe.py {b}/ai-cu mcp"',  # シェルの中
+            f"python probe.py {b.replace('/', chr(92))}\\ai-cu mcp",  # Bash で引用符の無い逆スラッシュは消える
+            f"python probe.py {b}/ai-cu mcp > {b}/ai-cu.cmd",  # リダイレクトが隣を作る
+        ]
+
+    def test_allowed(self):
+        for cmd in self.allowed():
+            with self.subTest(cmd=cmd):
+                self.assertFalse(g.violation(cmd, environ={}), cmd)
+                self.assertIsNone(g.decide(event(cmd), environ={}))
+
+    def test_denied(self):
+        for cmd in self.denied():
+            with self.subTest(cmd=cmd):
+                self.assertTrue(g.violation(cmd, environ={}), cmd)
+
+    def test_backslash_unquoted_allowed_in_powershell(self):
+        cmd = f"python probe.py {self.base.replace('/', chr(92))}\\ai-cu debug"
+        self.assertIsNone(g.decide(event(cmd, tool="PowerShell"), environ={}))
+
+    def test_git_bash_drive_form(self):
+        m = re.match(r"^([A-Za-z]):(/.*)$", self.base)
+        if not m:
+            self.skipTest("一時の場所がドライブの形でない")
+        gb = "/" + m.group(1).lower() + m.group(2)
+        cmd = f"python probe.py {gb}/ai-cu debug"
+        self.assertIsNone(g.decide(event(cmd), environ={}), cmd)
+        # PowerShell では /d/x は今のドライブの \d\x なので直さない
+        self.assertIsNotNone(g.decide(event(cmd.replace(" debug", " mcp"), tool="PowerShell"), environ={}))
+
+    def test_fixed_exts_without_pathext(self):
+        with mock.patch.dict(os.environ, {"PATHEXT": ""}):
+            for d in (self.sidecmd, self.sideps):
+                cmd = f"python probe.py {d}/ai-cu mcp"
+                with self.subTest(cmd=cmd):
+                    self.assertTrue(g.violation(cmd, environ={}), cmd)
+
+
+class ManifestPath(unittest.TestCase):
+    """1 段のコマンドで、`cargo run --manifest-path <絶対パス>` が ai-cu でない別のクレートを指すなら、
+    その引数を ai-cu の引数と読まない (D-165)。読めない・ai-cu らしい・workspace・相対は止める。"""
+
+    MANIFESTS = {
+        "probe": '[package]\nname = "tomlprobe"\n',
+        "aicu": '[package]\nname = "ai-cu"\n',
+        "aicu_us": '[package]\nname = "ai_cu"\n',
+        "aicucli": '[package]\nname = "ai-cu-cli"\n',
+        "binnamed": '[package]\nname = "x"\n\n[[bin]]\nname = "ai-cu"\npath = "src/main.rs"\n',
+        "autobin": '[package]\nname = "x"\n',
+        "ws": '[workspace]\nmembers = []\n\n[package]\nname = "x"\n',
+        "broken": '[package\nname = "x"\n',
+        "noname": '[package]\nversion = "0.1.0"\n',
+        # ai-cu のライブラリを使う・ai-cu のソースを指すクレートは、別のクレートと見ない
+        "dep": '[package]\nname = "x"\n\n[dependencies]\nai_cu = { path = "../aicu" }\n',
+        "deprenamed": '[package]\nname = "x"\n\n[dependencies]\nfoo = { package = "ai-cu", path = "../aicu" }\n',
+        "devdep": '[package]\nname = "x"\n\n[target.\'cfg(windows)\'.dev-dependencies]\nai-cu = "0.2"\n',
+        "binoutside": '[package]\nname = "x"\n\n[[bin]]\nname = "foo"\npath = "../aicu/src/main.rs"\n',
+        "binabs": '[package]\nname = "x"\n\n[[bin]]\nname = "foo"\npath = "C:/elsewhere/main.rs"\n',
+        "bindriverel": '[package]\nname = "x"\n\n[[bin]]\nname = "foo"\npath = "C:main.rs"\n',
+        # 手元で中身を確かめられない依存 (path・git・workspace から継ぐ) と patch / replace は止める側
+        "pathdep": '[package]\nname = "x"\n\n[dependencies]\nfoo = { path = "vendor/foo" }\n',
+        "gitdep": '[package]\nname = "x"\n\n[dependencies]\nfoo = { git = "https://example.invalid/foo" }\n',
+        "wsdep": '[package]\nname = "x"\n\n[dependencies]\nfoo = { workspace = true }\n',
+        "patched": '[package]\nname = "x"\n\n[patch.crates-io]\nfoo = { version = "1" }\n',
+    }
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp(prefix="guard-d165m-")
+        cls.t = cls.tmp.replace("\\", "/")
+        for name, body in cls.MANIFESTS.items():
+            os.makedirs(os.path.join(cls.tmp, name))
+            with open(os.path.join(cls.tmp, name, "Cargo.toml"), "w", encoding="utf-8") as f:
+                f.write(body)
+        _touch(os.path.join(cls.tmp, "autobin", "src", "bin", "ai-cu.rs"))
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def m(self, name):
+        return f"{self.t}/{name}/Cargo.toml"
+
+    def allowed(self):
+        p = self.m("probe")
+        return [
+            f"cargo run -q --manifest-path {p} -- x.toml",
+            f"cargo run -q --manifest-path={p} -- click 1,2",
+            f"cargo -C {self.t} run --manifest-path {p} -- click 1,2",  # 絶対なので -C に左右されない
+            f"cargo run --manifest-path {p} --bin tomlprobe -- click 1,2",  # 今も通る (target が別のもの)
+            "cargo run -- shot --out x.png --region 0,0,10,10",  # `--` の前に位置引数が無い形は今までどおり
+        ]
+
+    def denied(self):
+        p = self.m("probe")
+        root = ROOT.replace("\\", "/")
+        out = [f"cargo run --manifest-path {self.m(n)} -- click 1,2" for n in self.MANIFESTS if n != "probe"]
+        return out + [
+            f"cargo run --manifest-path {self.t}/no-such/Cargo.toml -- click 1,2",
+            f"cargo run --manifest-path {root}/Cargo.toml -- click 1,2",
+            "cargo run --manifest-path probe/Cargo.toml -- click 1,2",  # 相対
+            f"cp x y && cargo run --manifest-path {p} -- click 1,2",  # 繋ぎがある
+            f'bash -c "cargo run --manifest-path {p} -- click 1,2"',  # シェルの中
+            f"cargo run --manifest-path {p} --bin ai-cu -- click 1,2",  # target の判定が先
+            # cargo run は最初の位置引数より後の語をすべてプログラムに渡す: 後ろのオプションは cargo のものではない
+            f"cargo run click 1,2 --manifest-path {p}",
+            f"cargo run click 1,2 --manifest-path={p}",
+            "cargo run click 1,2 --bin xtask",
+            "cargo run click 1,2 -p other",
+            # -p の値をくっつけた形と --package も target として読む
+            f"cargo run --manifest-path {p} -pai-cu -- click 1,2",
+            f"cargo run --manifest-path {p} -p=ai-cu -- click 1,2",
+            f"cargo run --manifest-path {p} --package ai-cu -- click 1,2",
+            # 位置引数が `--` より前にあれば、cargo は `--` ごと後ろをプログラムに渡す
+            "cargo run click 1,2 -- shot",
+            "cargo run -q click -- windows",
+        ]
+
+    def test_lone_cr_is_a_statement_break_in_powershell(self):
+        # PowerShell は単独の CR でも文を分けるので、1 段と数えない
+        p = self.m("probe")
+        for cmd in (f"cargo run --manifest-path {p}\rtarget/debug/ai-cu.exe run s.json",
+                    f"cargo run --manifest-path {p} -- x\rtarget/debug/ai-cu.exe run s.json"):
+            with self.subTest(cmd=cmd):
+                self.assertTrue(g.violation(cmd, environ={}, tool="PowerShell"), cmd)
+                self.assertIsNotNone(g.decide(event(cmd, tool="PowerShell"), environ={}))
+
+    def test_bin_dir_form_is_ai_cu(self):
+        d = os.path.join(self.tmp, "bindir")
+        os.makedirs(os.path.join(d, "src", "bin", "ai-cu"))
+        with open(os.path.join(d, "Cargo.toml"), "w", encoding="utf-8") as f:
+            f.write('[package]\nname = "x"\n')
+        self.assertTrue(g.violation(f"cargo run --manifest-path {self.m('bindir')} -- click 1,2", environ={}))
+
+    def test_allowed(self):
+        for cmd in self.allowed():
+            with self.subTest(cmd=cmd):
+                self.assertFalse(g.violation(cmd, environ={}), cmd)
+
+    def test_denied(self):
+        for cmd in self.denied():
+            with self.subTest(cmd=cmd):
+                self.assertTrue(g.violation(cmd, environ={}), cmd)
 
 
 class ReleaseOptIn(unittest.TestCase):
