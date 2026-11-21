@@ -40,6 +40,15 @@ class Denied(unittest.TestCase):
         "ai-cu somethingnew",  # 未知のサブコマンドは fail-safe で止める
         "ai-cu --config x.toml run a.json",  # 値付きオプションを前置しても、実入力は止める
         "ai-cu -v hotkey ctrl+c",
+        # `--config` の次の語は、読み取りの語でも設定のパスの値 (clap と同じ読み。D-164)
+        "ai-cu --config shot click 1,2",
+        "ai-cu --config pixel click 1,2",
+        "ai-cu --config tree run a.json",
+        "cargo run -- --config shot click 1,2",
+        "& $exe --config shot click 1,2",
+        "ai-cu --config validate config set allow.keys x",
+        "ai-cu config --config show set allow.keys x",
+        'ai-cu --config "" click 1,2',  # 空の値も 1 語 (直す前から止まる。退行の番人)
         # MCP サーバーは常駐して実入力を送る (D-055)。debug と cargo run からは止める
         "ai-cu mcp",
         "cargo run -- mcp",
@@ -193,6 +202,9 @@ class Allowed(unittest.TestCase):
         "ai-cu -c t.toml validate x.json",
         "ai-cu --config target/t.toml schema",
         "ai-cu --config=target/t.toml validate x.json",
+        # `--config` の値が読み取りの語と同じ字でも、正当な起動は通る (D-164)
+        "ai-cu --config shot",
+        "ai-cu --config shot shot --out x.png --region 0,0,10,10",
         "ai-cu validate --config t.toml x.json",
         "AI_CU_CONFIG=target/t.toml ai-cu validate x.json",
         "cargo run -- --config target/t.toml validate a.json",
@@ -270,6 +282,7 @@ class ReleaseOptIn(unittest.TestCase):
             "python docs/manual-check/mcp_client.py target/debug/ai-cu.exe mcp -- x.jsonl",
             "python docs/manual-check/mcp_client.py $cu mcp -- x.jsonl",
             "python docs/manual-check/mcp_client.py target/release/ai-cu.exe config set a b -- x.jsonl",
+            "target/release/ai-cu.exe --config show config set a b",  # D-164
         ):
             with self.subTest(cmd=cmd):
                 self.assertTrue(g.violation(cmd, environ=self.OPTED), cmd)

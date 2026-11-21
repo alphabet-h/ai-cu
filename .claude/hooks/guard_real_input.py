@@ -15,6 +15,8 @@ ai-cu は本物のマウスとキーボードを動かす。開発中に AI が�
 - 引数なしの起動は通す (端末が無ければ usage を出して終了する設計。CLAUDE.md 参照)
 - `config` は下位コマンドが読み取り (show / path / get / validate / list) のときだけ通す。
   設定ファイルを書き換える下位コマンドは、実機の設定を壊しうるので止める
+- `--config` の次の語は、読み取りの語と同じ字 (`--config shot click ...`) でも常に設定のパスの値として読む
+  (clap と同じ読み。D-164)
 
 通すもの (D-051)
 ----------------
@@ -79,6 +81,12 @@ CONFIG_READ = {"show", "path", "get", "validate", "list"}
 # `clipboard` は利用者のクリップボードに文字を置く (入力は送らないが、元の中身は戻らない。D-157)
 ACTIONS = {"run", "click", "dblclick", "double-click", "drag", "move", "type", "key", "scroll", "wait", "focus", "mcp", "close", "resize", "clipboard"}
 SAFE_FLAGS = {"--help", "-h", "--version", "-V", "--dry-run"}
+# サブコマンドの前に置ける値つきオプション (今は src/cli.rs の global な `--config` だけ) の写し。
+# clap と同じく、次の語は中身によらず (読み取りの語でも、空でも) 値として 1 語消費する (D-164)。
+# 手で揃える: src/cli.rs のテスト step_window_hint_targets_match_clap_definition (global な値つきオプションを
+# config だけに固定) が落ちたら、ここにも足す。そのテストが数えないもの (global でない最上位の値つきオプション、
+# `--config` の短い名前や別名) を足すときも、ここに足す
+VALUE_OPTS = {"--config"}
 
 # 次のコマンドをそのまま実行するだけの語。読み飛ばして、実際に始まる語を見る
 LAUNCHERS = {
@@ -225,8 +233,16 @@ def _skip_prefix(toks):
 def split_subcommand(args):
     """最初のサブコマンドとその後ろの引数を返す。オプションの値 (--config t.toml) をサブコマンドと取り違えない。"""
     after_opt = False
+    value_next = False
     for idx, a in enumerate(args):
         a = _unquote(a)
+        if value_next:  # `--config <値>` の値。空の語もここで 1 語として消費する (D-164)
+            value_next = False
+            continue
+        if a in VALUE_OPTS:
+            value_next = True
+            after_opt = False
+            continue
         if not a:
             continue
         if a.startswith("-"):

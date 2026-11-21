@@ -59,7 +59,7 @@ git で管理しない調査結果やメモは .dev/ (gitignore 済み) に、�
 
 ## 実装方針 (暫定。変えるときは docs/decisions.md に追記)
 
-- 単一バイナリ `ai-cu`。サブコマンドは `shot` (画面取得)、`run` (操作列の実行)、`validate` (事前検証)、`schema` (JSON の書式出力)、`config` (設定の表示) などを軸にする。オプションはサブコマンドの後ろか `--config=PATH` の形で渡す (ガード hook が値付きオプションの前置を解釈できる範囲は D-024)
+- 単一バイナリ `ai-cu`。サブコマンドは `shot` (画面取得)、`run` (操作列の実行)、`validate` (事前検証)、`schema` (JSON の書式出力)、`config` (設定の表示) などを軸にする。オプションはサブコマンドの後ろか `--config=PATH` の形で渡す (ガード hook が値付きオプションの前置を解釈できる範囲は D-024、D-164)
 - クレートはライブラリとバイナリの構成にする。`cargo init --bin --name ai-cu` で作り、`publish = false`、unsafe の lint を deny にする。`cargo init` が `.gitignore` に足す重複行は消す (docs/design-notes.md)
 - 座標系は物理ピクセル (スクリーンショットと同じ)。起動直後に Per-Monitor V2 の DPI 認識を宣言する。テストの実行ファイルは `main` を通らないので、テスト側でも宣言する。この PC は DPI 非対応だと主画面が 3072x1728 に見える (CLAUDE.local.md)
 - Win32 は `windows-sys` を使い、`unsafe` は薄い境界モジュールに閉じ込める (FFI の例外は `scripts/verify_frame.py` の ctypes。D-111)。`unsafe` ブロックには SAFETY コメントを付ける

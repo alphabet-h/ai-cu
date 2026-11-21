@@ -303,7 +303,7 @@
   - テストに、レビューで見つかった素通りと誤検出の全ケースと、`settings.json` の登録の整合 (スクリプトの実在、`Monitor` の網羅) を入れた
 - 根拠: 偶発の誤爆の多くは、直接の起動の周辺の書き方 (出力の取得、待ちの前置き、ループ) で起きる
 - 覆る条件: 正当なコマンドを止めて作業が進まなくなったとき。判定を直し、直した内容を判断ログに残す
-- 状態: 一部置換 (検証済みの release ビルドのパスからの起動は、実入力のサブコマンドでも通す。D-051)。READ_ONLY の基準 (入力も実キャプチャも呼ばない) は D-162 で「入力を送らない」に改めた (2026-11-19)
+- 状態: 一部置換 (検証済みの release ビルドのパスからの起動は、実入力のサブコマンドでも通す。D-051)。READ_ONLY の基準 (入力も実キャプチャも呼ばない) は D-162 で「入力を送らない」に改めた (2026-11-19)。値を取るオプション (`--config`) の次の語は D-164 で常に値として読む (2026-11-21)
 
 ### D-025 Git 運用の補足と、成果物の無視設定
 - 日付: 2026-10-06
@@ -1152,7 +1152,7 @@
 - 判断: A (○)
 - 根拠: `error.hint` の鍵は既に usage の JSON にあり、状況に合わせた hint は他の終了コードでも使っている。B は既存の呼び出し (README と guide の例、利用者のスクリプト) を壊す表面の変更。C は同じ名前に 2 つの役目 (対象と撮る対象) を持たせ、撮るつもりの呼び出しの意味が変わる。判定は src/cli.rs の純粋な関数 `usage_error` で、clap の誤りの種類が `MissingRequiredArgument` のときに限り、生の引数のサブコマンドの名前と `--window` / `--window-title` の有無を見る (clap の `Error` はどのサブコマンドで起きたかを公開の API で返さない。値の検証の失敗などでは既定の hint を残す)
 - 覆る条件: hint があっても取り違えが続く事例が出たら、B を表面の変更として利用者に聞き、guide にも 1 文足す (guide は D-060 の上限にちょうど達していて、足すと D-081 の覆る条件に当たるので今回は README だけ)。判定の名前の一覧と大域のオプションの飛ばし方が clap の定義とずれたらテストが落ちるので、そのとき直す
-- 状態: 採用 (2026-10-28)
+- 状態: 採用 (2026-10-28)。大域の値つきオプションの一覧は、ガード hook の `VALUE_OPTS` にも写しがある (D-164)。このテスト (`step_window_hint_targets_match_clap_definition`) が落ちたら hook も直す (2026-11-21)
 
 ### D-087 テストの一時の場所 (target/test-tmp) は、`unique_temp_dir` がプロセスの最初の呼び出しで 24 時間より古い項目を 2 秒まで消して、溜まり続けないようにする
 - 日付: 2026-10-28
@@ -2568,3 +2568,20 @@
 - 覆る条件: 文を足した後も同じ場面の 8 が報告され、呼び出し側が待って再試行しても通らないとき (B か C を、ダイアログの直後の判定の所要を測ってから検討する。1 秒をわずかに超えるだけと分かれば C)。条件付きの文でも内側の文と食い違うと読まれたとき (時間切れの種類を型で分ける)
 - 状態: 採用
 - 変えた所: src/run.rs (`PASSWORD_CHECK_TIMEOUT_NEXT` と `check_password` の時間切れの腕。テストは `password_focus_timeout_refuses_with_os_error` と `password_point_timeout_refuses_and_unknown_passes` に文の断言を足し、Tab の後の時間切れの `password_focus_timeout_after_tab_refuses_with_next_step` を足した)、docs/reference/safety.md (キーとマウスの項の時間切れの句)。対照: 定数を文に繋ぐ前に、この 3 本が message の断言で落ちる (exit 101) ことを見てから繋いだ
+
+### D-164 ガード hook は `--config` の次の語を、読み取りの語と同じ字でも常に値として読む (D-024 の細部)
+- 日付: 2026-11-21
+- 場面: ガード hook (`.claude/hooks/guard_real_input.py`) の `split_subcommand` は、語が読み取りの語 (`READ_ONLY`)・実入力の語 (`ACTIONS`)・`config` に当たると、直前が値を取るオプション (`--config`) でもサブコマンドとして返していた。本物の ai-cu (clap) は `--config` の次の語を必ず設定のパスとして読むので、判定が本物とずれていた。D-162 の回のコミットの自動のセキュリティレビューが指摘した。直す前に `guard_real_input.violation` を直に呼んで確かめると、opt-in の有無によらず次が通っていた
+  - 実入力のすり抜け (本物は click / run を実行する): `ai-cu --config shot click 1,2`、`ai-cu --config pixel click 1,2`、`ai-cu --config tree run a.json`、`cargo run -- --config shot click 1,2`、`& $exe --config shot click 1,2`
+  - hook の約束 (設定を書き換える下位コマンドは止める。D-024、D-051) のすり抜け: `ai-cu --config validate config set allow.keys x`、`ai-cu config --config show set allow.keys x`、opt-in のセッションで `target/release/ai-cu.exe --config show config set a b`。今の ai-cu の `config` には `set` が無く (src/cli.rs の `ConfigCmd` は Show・Path・Validate)、本物は usage のエラーで止まるので、将来書き換える下位コマンドが足されたときの備え
+- 選択肢: A 値を取るオプションの集合 (`VALUE_OPTS`) を hook に持ち、その次の語を中身によらず値として 1 語消費する / B どのオプションの次の語も、値とサブコマンドの両方の読みで判定し、どちらかが危なければ止める / C 直さない (偶発の誤爆を止めるシートベルトで、`--config <読み取りの語>` を偶然打つことは少ない)
+- 判断: A (◎)。`VALUE_OPTS = {"--config"}`
+  - 次の語は空 (引用符だけ) でも値として数える (空の語の読み飛ばしより先に判定する)。`ai-cu --config "" click 1,2` で click を値と読まない
+  - `-c` は入れない。ai-cu に `-c` は無く (clap が未知として断る)、入れると `ai-cu -c run shot` のような今止まっている形を緩めるだけ。既存の `ai-cu -c t.toml validate x.json` (Allowed) は今の読み方 (パスに見える語は値) で通ったまま
+  - 集合に無いオプション (`-v` など) の次の語の読み方は変えない。サブコマンドの前では clap が未知として断り、何も実行しない
+  - 直したのは `split_subcommand` の 1 か所で、`args_are_safe`・`release_args_ok`・変数の起動・python の客の経路は、どれもこの関数を通るので一緒に直る
+  - `VALUE_OPTS` は src/cli.rs の写しで、手で揃える。global な値つきオプションは src/cli.rs のテスト `step_window_hint_targets_match_clap_definition` が `config` だけに固定しているので、足せばそのテストが落ちる (D-086 の状態の行にも書いた)。そのテストが数えないもの (global でない最上位の値つきオプション、`--config` の短い名前や別名) は落ちないので、hook のコメントに足す場面を書いた
+- 根拠: hook の読みを clap の読みに揃えるのが、判定の食い違いを無くすいちばん小さい手。B は `-v shot …` のような正当でない形の扱いが変わるだけで守りは増えず、読みが 2 通りになって後の読み手が迷う。C は、すり抜けで止まらないのが実入力で、本物の ai-cu が実行する形なので採らない
+- 覆る条件: サブコマンドの前に置ける値つきオプションが増えたとき (`VALUE_OPTS` に足す)。clap の `--config` に省略可の値 (`num_args = 0..=1`) を付けたとき (次の語が値とは限らなくなる)。ai-cu が `-c` を別の意味で足したとき
+- 状態: 採用 (D-024 の値付きオプションの前置の扱いの細部)
+- 変えた所: `.claude/hooks/guard_real_input.py` (`VALUE_OPTS` と `split_subcommand`、総論の「何を止めるか」の一行)、`.claude/hooks/test_guard_real_input.py` (`Denied` に上の 7 形と空の値の 1 形、`ReleaseOptIn` の opt-in で広がらないことの確かめに release の 1 形、`Allowed` に `ai-cu --config shot` と `ai-cu --config shot shot --out x.png --region 0,0,10,10`)、CLAUDE.md (範囲の参照に D-164)、D-024 と D-086 の状態の行。対照: テストを先に足して hook を直す前に打ち、FAILED (failures=8。Denied の 7 と ReleaseOptIn の 1。空の値の形は直す前から止まる) を見てから直した。直した後は 18 件 OK
