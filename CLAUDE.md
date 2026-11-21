@@ -19,6 +19,7 @@ git で管理しない調査結果やメモは .dev/ (gitignore 済み) に、�
 主なモジュール: `script` (操作列の書式)、`config` (設定の書式、場所の解決、保存)、`policy` (allow / deny)、`validate`、`plan` (操作をバッチに展開)、`run` (実行器: 停止、ガード、後始末)、`estop`、`backend` (実装置と実行時ガード)、`tui`、`cli`。`build.rs` がビルド時に git を読んで版の印 (`build_info::VERSION`。`--version` と MCP の serverInfo) を埋める (D-069)。
 操作の種類は `script::ActionKind` のとおりで、`wait_for` (条件がそろうまで待つ。一手ずつの `wait-for` と MCP の道具 `wait_for` も) と、画面の画素の差で待つ操作列の `wait_stable` (落ち着くまで) と `wait_change` (変わるまで) まである (D-068、D-081。撮る前に落ち着きを待つ `screenshot.settle` と、一手ずつと MCP の `settle_ms: "auto"` も)。
 読み取りのサブコマンドと MCP の道具には、`find` と `text` の他に `tree` (要素の木を深さで切り、1 行 1 要素の字下げの文字列で返す。たどり方は `elements::walk_tree`) がある (D-084)。点の色を読む `pixel` (画面座標の点 1〜64 個の `#RRGGBB`) もあり、撮影と同じ許可と守りを点ごとの 1x1 に掛ける (`cli::pixel`。D-146)。
+常駐の MCP は前面の切り替わりを記録し、MCP だけの道具 `status` の `foreground.since_ms` と `foreground_history` で返す (記録は `foreground_log`、見張りのスレッドは `src/win32/foreground_hook.rs`。開発シェルでは立てない。D-166)。
 書く操作には、クリップボードに文字を置く `clipboard` (操作列、一手ずつ、MCP の道具。読む操作は無い) もあり、Win+V の履歴と同期から外す印を付けて置く (Win32 の境界は `src/win32/clipboard.rs`、口は trait `Desktop` の `set_clipboard_text`。D-157)。
 画面を変える操作の前には、画面の縁に枠を出し、枠が出ていなければ予告の間を待つ (D-093。設定は `[indicator]`、判断は実行器と trait `Indicator` (`src/device.rs`)、窓は `src/win32/overlay.rs`、実装置は `backend::RealIndicator`)。
 画面を変える操作を含む実行は、名前付きミューテックスで別の ai-cu と排他にする (D-113。判断は実行器と trait `InputLock` (`src/device.rs`)、錠は `src/win32/input_mutex.rs`、実装置は `backend::RealInputLock`)。

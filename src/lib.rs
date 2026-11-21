@@ -15,6 +15,7 @@ pub mod elements;
 pub mod error;
 pub mod estop;
 pub mod focus_helper;
+pub mod foreground_log;
 pub mod geometry;
 pub mod hint;
 pub mod image;

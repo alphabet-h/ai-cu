@@ -7,6 +7,7 @@ pub mod console;
 pub mod desktop;
 pub mod dpi;
 pub mod fixture_window;
+pub mod foreground_hook;
 pub mod input;
 pub mod input_mutex;
 pub mod known_folder;

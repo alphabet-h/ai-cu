@@ -705,3 +705,31 @@ fn mcp_child_pixel_in_dev_shell_is_refused() {
     assert!(matches!(exit, Some(9) | Some(14)), "{v}");
     assert!(v.get("pixels").is_none(), "色を返さない: {v}");
 }
+
+/// 前面の見張りの配線 (D-166): 子の MCP は開発シェルの変数つきなので見張りを立てず、`status` の
+/// `foreground_history` が null で `unreadable` に名前があり、標準エラーに立てられない旨の 1 行が出る。
+/// main が記録を Server に渡さないと、警告の行が出ないので見分けられる
+#[test]
+fn mcp_child_status_reports_dev_shell_foreground_history() {
+    let dir = temp_dir("mcp-status-fg");
+    let floor = dir.join("floor.toml");
+    std::fs::write(&floor, "version = 1\n").unwrap();
+    let input = format!(
+        "{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{{\"name\":\"status\",\"arguments\":{{}},{META}}}}}\n"
+    );
+    let floor_s = floor.display().to_string();
+    let (code, stdout, stderr) = run(&["mcp"], &[("AI_CU_DEV_FLOOR", &floor_s)], input.as_bytes());
+    assert_eq!(code, 0, "stderr={stderr}");
+    let lines = mcp_lines(&stdout);
+    assert_eq!(lines.len(), 1, "{stdout}");
+    assert_ne!(lines[0]["result"]["isError"], true, "{stdout}");
+    let v: serde_json::Value =
+        serde_json::from_str(lines[0]["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert!(v["foreground_history"].is_null(), "{v}");
+    let unreadable = v["unreadable"].as_array().expect("unreadable");
+    assert!(unreadable.iter().any(|u| u == "foreground_history"), "{v}");
+    assert!(
+        stderr.contains("前面の見張りを立てられない") && stderr.contains("開発シェル"),
+        "{stderr}"
+    );
+}

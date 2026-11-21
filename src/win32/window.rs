@@ -82,6 +82,16 @@ pub fn foreground_hwnd() -> usize {
     }
 }
 
+/// `hwnd` のルート (`GA_ROOT`) の窓の情報を、題名を読まずに返す。0 なら None。前面の切り替わりの記録 (D-166) が
+/// 使う (履歴の判定は題名を使わないので、題名は記録にも残らない)。消えた窓のハンドルなら pid 0 の情報になる
+pub fn root_info_untitled(hwnd: usize) -> Option<WindowInfo> {
+    if hwnd == 0 {
+        None
+    } else {
+        Some(info_untitled(root_of(hwnd as HWND)))
+    }
+}
+
 /// 座標の下のウィンドウのルート。
 pub fn root_at(p: Point) -> usize {
     // SAFETY: POINT を値で渡し、ハンドル (無ければ null) を受け取るだけ。
