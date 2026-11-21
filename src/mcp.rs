@@ -28,7 +28,7 @@ use crate::cli::{
     window_allowed, windows_cmd, with_policy,
 };
 use crate::config::{ConfigPaths, DefaultLocator, EnvLookup};
-use crate::device::{BackendError, FrameState, HeldInputs, Image, InputDesktop};
+use crate::device::{BackendError, FrameState, HeldInputs, Image, InputDesktop, WindowInfo};
 use crate::elements::{
     ELEMENT_NAME_MAX_CHARS, ElementQuery, TEXT_MAX_CHARS_DEFAULT, TEXT_MAX_CHARS_MAX,
     TREE_DEPTH_DEFAULT, TREE_DEPTH_MAX, TREE_LIMIT_DEFAULT, TREE_LIMIT_MAX, control_type_names,
@@ -36,12 +36,14 @@ use crate::elements::{
 };
 use crate::error::{AppError, ErrorKind, reason, stopped_by_user_json};
 use crate::estop::{StopReason, StopSource};
+use crate::foreground_log::{ForegroundLog, WatchState};
 use crate::geometry::{Point, Rect};
 use crate::hint::{Hint, Surface, hint};
 use crate::jsonrpc::{
     INVALID_PARAMS, INVALID_REQUEST, Incoming, METHOD_NOT_FOUND, Message, PARSE_ERROR, RpcError,
     UNSUPPORTED_PROTOCOL_VERSION, error_response, id_of, parse_line, parse_message, response,
 };
+use crate::policy::Policy;
 use crate::run::ImageWriter;
 use crate::runner::{DeviceFactory, load_policy, require_dpi, sentinel_paths};
 use crate::script::{
@@ -736,7 +738,7 @@ pub fn tools() -> Vec<Value> {
         tool(
             "status",
             "今の状態",
-            "実入力と撮影が今通るかの材料を読むだけで返す: 無操作 (idle_ms、min_idle_ms、user_active、retry_after_ms。ai-cu 自身の入力も数える)、人が止めた直後の待ち (cooldown)、押されたままのキー、画面のロックとセーバー (desktop)、停止の目印のファイル、前面のアプリと ai-cu を起動した側か、実入力を断る理由、操作の前の枠と予告の間の設定 (indicator の enabled、lead_ms、sound) と枠の状態 (indicator.frame)。user_active (10) や desktop_unavailable (14) で断られたら、再試行の前にこれを読む",
+            "実入力と撮影が今通るかの材料を読むだけで返す: 無操作 (idle_ms、min_idle_ms、user_active、retry_after_ms。ai-cu 自身の入力も数える)、人が止めた直後の待ち (cooldown)、押されたままのキー、画面のロックとセーバー (desktop)、停止の目印のファイル、前面のアプリと ai-cu を起動した側か、いつから前面か (foreground.since_ms) と、MCP が立ってからの切り替わり (foreground_history)、実入力を断る理由、操作の前の枠と予告の間の設定 (indicator の enabled、lead_ms、sound) と枠の状態 (indicator.frame)。user_active (10) や desktop_unavailable (14) で断られたら、再試行の前にこれを読む",
             empty_schema(),
             read_only(),
         ),
@@ -1270,6 +1272,11 @@ struct StatusFacts {
     stop_files: Vec<(String, bool)>,
     /// 前面: None は前面のウィンドウが無いか読めない。(process, allowed, is_host)
     foreground: Option<(String, bool, bool)>,
+    /// 今の前面がいつからか (D-166): (since_ms, since_start)。見張りが `Running` で、記録の最後の件が
+    /// 今の前面と同じときだけ値を持つ
+    since: Option<(u64, bool)>,
+    /// 前面の切り替わりの記録 (D-166)。None は見張りが無いか止まった (`unreadable` に名前)
+    history: Option<HistoryFacts>,
     /// 実入力を断る理由 (`{code, reason?, message}`)
     input_refused: Option<Value>,
     /// 読めなかった項目の名前
@@ -1278,6 +1285,73 @@ struct StatusFacts {
     indicator: (bool, u64, bool),
     /// 枠の状態 (D-103)。None は枠の装置を持たない
     frame: Option<FrameState>,
+}
+
+/// `status` の `foreground_history` の材料 (D-166)
+struct HistoryFacts {
+    /// 古い順
+    entries: Vec<HistoryEntry>,
+    /// 上限を超えて捨てた件数
+    dropped: u64,
+}
+
+/// `foreground_history` の 1 件 (D-166)
+struct HistoryEntry {
+    at_unix_ms: u64,
+    /// 読む時点からの経過 (単調な時計)
+    ago_ms: u64,
+    /// None は前面が無い件。組は `StatusFacts::foreground` と同じ (process, allowed, is_host)
+    window: Option<(String, bool, bool)>,
+    initial: bool,
+}
+
+/// 前面と履歴の窓の判定 (D-166): (allowed, is_host)。撮影か実入力のどちらかが有効 (`enabled`) で、
+/// 窓の許可を通り、起動した側でないときだけ allowed。`status` の前面と履歴の両方がここを通る
+fn window_flags(
+    policy: &Policy,
+    enabled: bool,
+    info: &WindowInfo,
+    host_pids: &[u32],
+) -> (bool, bool) {
+    let allowed = enabled && window_allowed(policy, info, host_pids);
+    let is_host = host_pids.contains(&info.pid);
+    (allowed, is_host)
+}
+
+/// 経過の ms (溢れは u64::MAX)
+fn duration_ms(d: std::time::Duration) -> u64 {
+    u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
+}
+
+/// 前面と履歴の件の窓の JSON (D-166)。プロセス名を伏せるのはここだけ (allowed が偽なら null)
+fn window_value(w: &(String, bool, bool)) -> Value {
+    let (process, allowed, is_host) = w;
+    json!({
+        "process": if *allowed { Some(process.as_str()) } else { None },
+        "allowed": allowed,
+        "is_host": is_host,
+    })
+}
+
+/// `status` の `foreground_history` (D-166)。古い順。前面が無い件は `none: true`
+fn history_value(h: &HistoryFacts) -> Value {
+    let entries: Vec<Value> = h
+        .entries
+        .iter()
+        .map(|e| {
+            let mut v = match &e.window {
+                Some(w) => window_value(w),
+                None => {
+                    json!({ "process": null, "allowed": false, "is_host": false, "none": true })
+                }
+            };
+            v["at_unix_ms"] = json!(e.at_unix_ms);
+            v["ago_ms"] = json!(e.ago_ms);
+            v["initial"] = json!(e.initial);
+            v
+        })
+        .collect();
+    json!({ "entries": entries, "truncated": h.dropped > 0, "dropped": h.dropped })
 }
 
 /// `status` の `indicator.frame` の 1 つ (純関数。D-103)。`error` は失敗の 2 つだけ、
@@ -1297,8 +1371,9 @@ fn frame_value(f: &FrameState) -> Value {
 /// `status` の読み方 (固定の文)。どの道具が断られるかは列挙せず、終了コードと guide の表に任せる
 fn status_note() -> String {
     format!(
-        "user_active が真なら、無操作を求める道具が 10 (user_active) で断られる (どれかは guide の終了コードの表の 10)。cooldown も真なら、次の実入力も無操作が足りるまで 10。retry_after_ms だけ待ってから status で確かめ直す (下限。人が触り続けると延びる。ai-cu 自身の操作の直後も user_active になる)。keys_held が空でなければ、{}。desktop.state が available でない、stop_files に present: true がある、input_refused がある (code の意味は guide の終了コードの表) ときは、待っても直らないので人間に頼む。unreadable の項目は読めなかった (null)。indicator.frame.state が start_failed か rebuild_failed なら枠は出ていない (予告の間は待つ。error が理由。start_failed は retry_in_ms 後の次の画面を変える操作で立て直し、retry_in_ms が null なら、時間切れで止まった枠のスレッドが片付くまで立て直さない (片付かなければ MCP の再接続で戻る))。not_started はこのプロセスがまだ枠を出していないだけ (画面を変える道具を呼んでいないか、enabled が false)",
-        crate::hint::MCP_KEYS_HELD_RETRY
+        "user_active が真なら、無操作を求める道具が 10 (user_active) で断られる (どれかは guide の終了コードの表の 10)。cooldown も真なら、次の実入力も無操作が足りるまで 10。retry_after_ms だけ待ってから status で確かめ直す (下限。人が触り続けると延びる。ai-cu 自身の操作の直後も user_active になる)。keys_held が空でなければ、{}。desktop.state が available でない、stop_files に present: true がある、input_refused がある (code の意味は guide の終了コードの表) ときは、待っても直らないので人間に頼む。unreadable の項目は読めなかった (null)。indicator.frame.state が start_failed か rebuild_failed なら枠は出ていない (予告の間は待つ。error が理由。start_failed は retry_in_ms 後の次の画面を変える操作で立て直し、retry_in_ms が null なら、時間切れで止まった枠のスレッドが片付くまで立て直さない (片付かなければ MCP の再接続で戻る))。not_started はこのプロセスがまだ枠を出していないだけ (画面を変える道具を呼んでいないか、enabled が false)。前面を保ったかは foreground.since_ms (since_start が真なら MCP の起動より前から。少なくともこの長さ)、どこへ移ったかは foreground_history (MCP が立ってからの切り替わり、古い順に {cap} 件まで。題名は出さず、許可の外は process が null。前面が無い間が 500 ms より短いと見落としうる)。foreground_history が null (unreadable に foreground_history) なら見張りが止まっていて、読み直しても戻らない (MCP の再接続で戻る)。foreground_history があって since_ms が null なら、記録が今の前面に追いついていないので、少し待ってもう一度読む",
+        crate::hint::MCP_KEYS_HELD_RETRY,
+        cap = crate::foreground_log::CAP,
     )
 }
 
@@ -1323,12 +1398,11 @@ fn status_value(f: StatusFacts) -> Value {
         .iter()
         .map(|(path, present)| json!({ "path": path, "present": present }))
         .collect();
-    let foreground = f.foreground.map(|(process, allowed, is_host)| {
-        json!({
-            "process": if allowed { Some(process) } else { None },
-            "allowed": allowed,
-            "is_host": is_host,
-        })
+    let foreground = f.foreground.as_ref().map(|w| {
+        let mut v = window_value(w);
+        v["since_ms"] = json!(f.since.map(|s| s.0));
+        v["since_start"] = json!(f.since.map(|s| s.1));
+        v
     });
     json!({
         "ok": true,
@@ -1341,6 +1415,7 @@ fn status_value(f: StatusFacts) -> Value {
         "desktop": desktop,
         "stop_files": stop_files,
         "foreground": foreground,
+        "foreground_history": f.history.as_ref().map(history_value),
         "input_refused": f.input_refused,
         "unreadable": f.unreadable,
         "indicator": {
@@ -1411,6 +1486,9 @@ pub struct Server<'a> {
     pub inbox: Arc<Inbox>,
     /// 実入力の道具を断る理由 (debug ビルド、ホストを特定できない。D-055)。読み取りの道具と dry_run は通す
     pub refuse_input: Option<AppError>,
+    /// 前面の切り替わりの記録 (D-166)。main が見張りと一緒に渡す。None なら `status` の
+    /// `foreground_history` は null で `unreadable` に名前
+    pub foreground_log: Option<Arc<ForegroundLog>>,
     /// 旧版の `initialize` が済んだか
     initialized: bool,
     /// 直前の実行を人か停止の仕組みが止めた。人が離れる (無操作) まで実入力の道具を断る
@@ -1439,6 +1517,7 @@ impl<'a> Server<'a> {
             host_pids,
             inbox,
             refuse_input: None,
+            foreground_log: None,
             initialized: false,
             cooldown: false,
         }
@@ -1721,11 +1800,56 @@ impl<'a> Server<'a> {
         // 撮影か実入力のどちらかが有効でなければ伏せる (閉じた床では check_window がどのウィンドウも通すため)
         let enabled = policy.check_action_kind(ActionKind::Screenshot).is_ok()
             || policy.check_action_kind(ActionKind::Click).is_ok();
-        let foreground = front.flatten().map(|info| {
-            let allowed = enabled && window_allowed(&policy, &info, &self.host_pids);
-            let is_host = self.host_pids.contains(&info.pid);
+        let front = front.flatten();
+        let front_hwnd = front.as_ref().map(|info| info.hwnd);
+        let foreground = front.map(|info| {
+            let (allowed, is_host) = window_flags(&policy, enabled, &info, &self.host_pids);
             (info.process, allowed, is_host)
         });
+        // 前面の切り替わりの記録 (D-166)。読む時点の設定で判定し、経過は 1 回取った今から測る
+        let now = Instant::now();
+        let snap = self.foreground_log.as_ref().map(|l| l.snapshot());
+        // 見張りが動いていて (`Running`)、最後の件が今の前面と同じときだけ。止まった (`Failed`) 後に
+        // 移って戻った回を「保った」と言わない。立ち上がり中 (`Starting`) と記録が無いときも null
+        let since = snap
+            .as_ref()
+            .and_then(|s| match (&s.state, s.entries.last(), front_hwnd) {
+                (WatchState::Running, Some(last), Some(h))
+                    if last.window.as_ref().map(|w| w.hwnd) == Some(h) =>
+                {
+                    Some((
+                        duration_ms(now.saturating_duration_since(last.at)),
+                        last.initial,
+                    ))
+                }
+                _ => None,
+            });
+        let history = match snap {
+            Some(s) if !matches!(s.state, WatchState::Failed(_)) => {
+                let entries = s
+                    .entries
+                    .iter()
+                    .map(|e| HistoryEntry {
+                        at_unix_ms: e.at_unix_ms,
+                        ago_ms: duration_ms(now.saturating_duration_since(e.at)),
+                        window: e.window.as_ref().map(|w| {
+                            let (allowed, is_host) =
+                                window_flags(&policy, enabled, w, &self.host_pids);
+                            (w.process.clone(), allowed, is_host)
+                        }),
+                        initial: e.initial,
+                    })
+                    .collect();
+                Some(HistoryFacts {
+                    entries,
+                    dropped: s.dropped,
+                })
+            }
+            _ => {
+                unreadable.push("foreground_history");
+                None
+            }
+        };
         let input_refused = match &self.refuse_input {
             Some(e) => Some(refusal_value(e)),
             None => require_dpi(&self.dpi).err().map(|e| refusal_value(&e)),
@@ -1738,6 +1862,8 @@ impl<'a> Server<'a> {
             desktop: input_desktop,
             stop_files,
             foreground,
+            since,
+            history,
             input_refused,
             unreadable,
             indicator: (
@@ -2504,8 +2630,9 @@ mod tests {
             }
         }
 
+        /// 本番の main と同じく前面の記録を持たせる (見張りが動いていて、まだ件の無い記録。D-166)
         fn server(&mut self, paths: ConfigPaths) -> Server<'_> {
-            Server::new(
+            let mut s = Server::new(
                 paths,
                 &self.env,
                 &self.locator,
@@ -2514,7 +2641,11 @@ mod tests {
                 Ok(()),
                 Vec::new(),
                 Arc::new(Inbox::default()),
-            )
+            );
+            let log = ForegroundLog::new();
+            log.set_state(WatchState::Running);
+            s.foreground_log = Some(Arc::new(log));
+            s
         }
     }
 
@@ -6178,14 +6309,14 @@ mod tests {
             let v = status_of(&mut s, 1);
             assert_eq!(
                 v["foreground"],
-                json!({ "process": "target.exe", "allowed": true, "is_host": false }),
+                json!({ "process": "target.exe", "allowed": true, "is_host": false, "since_ms": null, "since_start": null }),
                 "{v}"
             );
             world.borrow_mut().foreground = Some(window("other.exe", "OtherClass"));
             let v = status_of(&mut s, 2);
             assert_eq!(
                 v["foreground"],
-                json!({ "process": null, "allowed": false, "is_host": false }),
+                json!({ "process": null, "allowed": false, "is_host": false, "since_ms": null, "since_start": null }),
                 "{v}"
             );
             world.borrow_mut().foreground = Some(target.clone());
@@ -6193,7 +6324,7 @@ mod tests {
             let v = status_of(&mut s, 3);
             assert_eq!(
                 v["foreground"],
-                json!({ "process": null, "allowed": false, "is_host": true }),
+                json!({ "process": null, "allowed": false, "is_host": true, "since_ms": null, "since_start": null }),
                 "{v}"
             );
             s.host_pids = Vec::new();
@@ -6210,7 +6341,7 @@ mod tests {
             let v = status_of(&mut s, 5);
             assert_eq!(
                 v["foreground"],
-                json!({ "process": null, "allowed": false, "is_host": false }),
+                json!({ "process": null, "allowed": false, "is_host": false, "since_ms": null, "since_start": null }),
                 "{v}"
             );
         }
@@ -6226,6 +6357,8 @@ mod tests {
             desktop: Some(InputDesktop::Available),
             stop_files: Vec::new(),
             foreground: None,
+            since: None,
+            history: None,
             input_refused: None,
             unreadable: Vec::new(),
             indicator: (true, 3000, false),
@@ -6246,6 +6379,8 @@ mod tests {
             desktop: None,
             stop_files: Vec::new(),
             foreground: None,
+            since: None,
+            history: None,
             input_refused: None,
             unreadable: Vec::new(),
             indicator: (true, 3000, false),
@@ -6328,6 +6463,271 @@ mod tests {
             i64::from(ErrorKind::Config.exit_code()),
             "{r}"
         );
+    }
+
+    // --- 前面の切り替わりの記録 (D-166) ---
+
+    /// 窓ごとに hwnd・pid・題名を変える (題名は結果の他の所に出ない一意の語)
+    fn hist_win(process: &str, hwnd: usize, pid: u32, title: &str) -> WindowInfo {
+        let mut w = window(process, "TargetClass");
+        w.hwnd = hwnd;
+        w.pid = pid;
+        w.title = title.into();
+        w
+    }
+
+    fn win_a() -> WindowInfo {
+        hist_win("target.exe", 0x11, 11, "TITLE-SECRET-A")
+    }
+
+    fn win_b() -> WindowInfo {
+        hist_win("target.exe", 0x12, 12, "TITLE-SECRET-B")
+    }
+
+    /// 今より `ago_ms` 前の時刻 (起動の直後で引けなければ今)
+    fn before(ago_ms: u64) -> Instant {
+        let now = Instant::now();
+        now.checked_sub(std::time::Duration::from_millis(ago_ms))
+            .unwrap_or(now)
+    }
+
+    /// 件を古い順に入れてから状態を移した記録。件は (窓、何 ms 前、initial)
+    fn hist_log(
+        state: WatchState,
+        entries: Vec<(Option<WindowInfo>, u64, bool)>,
+    ) -> Arc<ForegroundLog> {
+        let log = ForegroundLog::new();
+        for (i, (w, ago, initial)) in entries.into_iter().enumerate() {
+            assert!(log.record(w, before(ago), 1_000 + i as u64, initial));
+        }
+        log.set_state(state);
+        Arc::new(log)
+    }
+
+    #[test]
+    fn status_foreground_since_ms_comes_from_last_matching_entry() {
+        let (floor, _) = status_floor(&unique_temp_dir("mcp-status-since"));
+        let mut f = Fixture::new(MapEnv::default());
+        f.world.borrow_mut().foreground = Some(win_b());
+        let mut s = f.server(paths(&floor));
+        s.foreground_log = Some(hist_log(
+            WatchState::Running,
+            vec![(Some(win_a()), 5_000, true), (Some(win_b()), 2_000, false)],
+        ));
+        let v = status_of(&mut s, 1);
+        assert!(v["foreground"]["since_ms"].is_u64(), "{v}");
+        assert_eq!(v["foreground"]["since_start"], false, "{v}");
+        assert_eq!(v["foreground"]["process"], "target.exe", "{v}");
+        let h = &v["foreground_history"];
+        let entries = h["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 2, "{v}");
+        assert_eq!(entries[0]["initial"], true, "{v}");
+        assert_eq!(entries[1]["initial"], false, "{v}");
+        assert_eq!(entries[0]["at_unix_ms"], 1_000, "{v}");
+        assert_eq!(entries[1]["at_unix_ms"], 1_001, "{v}");
+        assert!(
+            entries[0]["ago_ms"].as_u64().unwrap() >= entries[1]["ago_ms"].as_u64().unwrap(),
+            "古い順: {v}"
+        );
+        // since と ago_ms は同じ now と同じ件の時刻から出すので一致する
+        assert_eq!(v["foreground"]["since_ms"], entries[1]["ago_ms"], "{v}");
+        assert_eq!(h["truncated"], false, "{v}");
+        assert_eq!(h["dropped"], 0, "{v}");
+        assert_eq!(v["unreadable"], json!([]), "{v}");
+    }
+
+    #[test]
+    fn status_since_start_when_only_initial_entry() {
+        let (floor, _) = status_floor(&unique_temp_dir("mcp-status-since-start"));
+        let mut f = Fixture::new(MapEnv::default());
+        f.world.borrow_mut().foreground = Some(win_a());
+        let mut s = f.server(paths(&floor));
+        s.foreground_log = Some(hist_log(
+            WatchState::Running,
+            vec![(Some(win_a()), 3_000, true)],
+        ));
+        let v = status_of(&mut s, 1);
+        assert!(v["foreground"]["since_ms"].is_u64(), "{v}");
+        assert_eq!(v["foreground"]["since_start"], true, "{v}");
+    }
+
+    #[test]
+    fn status_since_null_when_last_entry_differs_from_foreground() {
+        let (floor, _) = status_floor(&unique_temp_dir("mcp-status-since-differs"));
+        let mut f = Fixture::new(MapEnv::default());
+        f.world.borrow_mut().foreground = Some(win_a());
+        let mut s = f.server(paths(&floor));
+        s.foreground_log = Some(hist_log(
+            WatchState::Running,
+            vec![(Some(win_a()), 5_000, true), (Some(win_b()), 2_000, false)],
+        ));
+        let v = status_of(&mut s, 1);
+        assert_eq!(v["foreground"]["since_ms"], Value::Null, "{v}");
+        assert_eq!(v["foreground"]["since_start"], Value::Null, "{v}");
+        assert_eq!(
+            v["foreground_history"]["entries"].as_array().unwrap().len(),
+            2,
+            "{v}"
+        );
+        assert_eq!(v["unreadable"], json!([]), "{v}");
+    }
+
+    #[test]
+    fn status_history_hides_process_of_not_allowed_and_host_windows_and_never_titles() {
+        let (floor, _) = status_floor(&unique_temp_dir("mcp-status-history-hide"));
+        let other = hist_win("other.exe", 0x13, 13, "TITLE-SECRET-OTHER");
+        let host = hist_win("target.exe", 0x14, 14, "TITLE-SECRET-HOST");
+        let mut f = Fixture::new(MapEnv::default());
+        f.world.borrow_mut().foreground = Some(win_a());
+        let mut s = f.server(paths(&floor));
+        s.host_pids = vec![host.pid];
+        s.foreground_log = Some(hist_log(
+            WatchState::Running,
+            vec![
+                (Some(win_a()), 6_000, true),
+                (Some(other), 4_000, false),
+                (Some(host), 2_000, false),
+            ],
+        ));
+        let r = reply(&mut s, &call(1, "status", json!({})));
+        let v = text_json(&r);
+        let e = &v["foreground_history"]["entries"];
+        assert_eq!(e[0]["process"], "target.exe", "{v}");
+        assert_eq!(e[0]["allowed"], true, "{v}");
+        assert_eq!(e[0]["is_host"], false, "{v}");
+        assert_eq!(e[1]["process"], Value::Null, "{v}");
+        assert_eq!(e[1]["allowed"], false, "{v}");
+        assert_eq!(e[1]["is_host"], false, "{v}");
+        assert_eq!(e[2]["process"], Value::Null, "{v}");
+        assert_eq!(e[2]["allowed"], false, "{v}");
+        assert_eq!(e[2]["is_host"], true, "{v}");
+        let whole = r.to_string();
+        for t in [
+            "TITLE-SECRET-A",
+            "TITLE-SECRET-OTHER",
+            "TITLE-SECRET-HOST",
+            "other.exe",
+        ] {
+            assert!(!whole.contains(t), "{t} が結果に出た: {whole}");
+        }
+    }
+
+    #[test]
+    fn status_history_process_null_when_capture_and_input_disabled() {
+        let off = floor_file(&unique_temp_dir("mcp-status-history-off"), "");
+        let mut f = Fixture::new(MapEnv::default());
+        f.world.borrow_mut().foreground = Some(win_b());
+        for p in [closed_paths(), paths(&off)] {
+            let mut s = f.server(p);
+            s.foreground_log = Some(hist_log(
+                WatchState::Running,
+                vec![(Some(win_a()), 5_000, true), (Some(win_b()), 2_000, false)],
+            ));
+            let v = status_of(&mut s, 1);
+            let entries = v["foreground_history"]["entries"].as_array().unwrap();
+            assert_eq!(entries.len(), 2, "{v}");
+            for e in entries {
+                assert_eq!(e["process"], Value::Null, "{v}");
+                assert_eq!(e["allowed"], false, "{v}");
+            }
+        }
+    }
+
+    #[test]
+    fn status_history_null_and_unreadable_without_log_or_failed_watch() {
+        let (floor, _) = status_floor(&unique_temp_dir("mcp-status-history-null"));
+        let mut f = Fixture::new(MapEnv::default());
+        f.world.borrow_mut().foreground = Some(win_a());
+        let failed = hist_log(
+            WatchState::Failed("見張りを止めた".into()),
+            vec![(Some(win_b()), 5_000, true), (Some(win_a()), 2_000, false)],
+        );
+        for log in [None, Some(failed)] {
+            let mut s = f.server(paths(&floor));
+            s.foreground_log = log;
+            let v = status_of(&mut s, 1);
+            assert_eq!(v["ok"], true, "{v}");
+            assert_eq!(v["foreground_history"], Value::Null, "{v}");
+            assert_eq!(v["unreadable"], json!(["foreground_history"]), "{v}");
+            // Failed では最後の件が今の前面と同じでも「保った」と言わない
+            assert_eq!(v["foreground"]["process"], "target.exe", "{v}");
+            assert_eq!(v["foreground"]["since_ms"], Value::Null, "{v}");
+            assert_eq!(v["foreground"]["since_start"], Value::Null, "{v}");
+            assert!(
+                v["note"].as_str().unwrap().contains("読み直しても戻らない"),
+                "{v}"
+            );
+        }
+    }
+
+    #[test]
+    fn status_history_truncated_when_log_overflows() {
+        let (floor, _) = status_floor(&unique_temp_dir("mcp-status-history-overflow"));
+        let cap = crate::foreground_log::CAP;
+        let mut f = Fixture::new(MapEnv::default());
+        f.world.borrow_mut().foreground = Some(win_a());
+        let mut s = f.server(paths(&floor));
+        let entries = (0..=cap)
+            .map(|i| {
+                let w = hist_win("target.exe", 0x100 + i, 100 + i as u32, "TITLE-SECRET-N");
+                (Some(w), (cap + 1 - i) as u64 * 10, i == 0)
+            })
+            .collect();
+        s.foreground_log = Some(hist_log(WatchState::Running, entries));
+        let v = status_of(&mut s, 1);
+        let h = &v["foreground_history"];
+        assert_eq!(h["truncated"], true, "{v}");
+        assert_eq!(h["dropped"], 1, "{v}");
+        assert_eq!(h["entries"].as_array().unwrap().len(), cap, "{v}");
+        // 先頭 (initial の件) が捨てられ、残りの先頭は 2 件目
+        assert_eq!(h["entries"][0]["initial"], false, "{v}");
+        assert_eq!(h["entries"][0]["at_unix_ms"], 1_001, "{v}");
+    }
+
+    #[test]
+    fn status_history_empty_while_starting() {
+        let (floor, _) = status_floor(&unique_temp_dir("mcp-status-history-starting"));
+        let mut f = Fixture::new(MapEnv::default());
+        f.world.borrow_mut().foreground = Some(win_a());
+        let mut s = f.server(paths(&floor));
+        s.foreground_log = Some(Arc::new(ForegroundLog::new()));
+        let v = status_of(&mut s, 1);
+        assert_eq!(
+            v["foreground_history"],
+            json!({ "entries": [], "truncated": false, "dropped": 0 }),
+            "{v}"
+        );
+        assert_eq!(v["unreadable"], json!([]), "{v}");
+        assert_eq!(v["foreground"]["since_ms"], Value::Null, "{v}");
+    }
+
+    #[test]
+    fn status_history_none_entry_has_none_flag() {
+        let (floor, _) = status_floor(&unique_temp_dir("mcp-status-history-none"));
+        let mut f = Fixture::new(MapEnv::default());
+        f.world.borrow_mut().foreground = None;
+        let mut s = f.server(paths(&floor));
+        s.foreground_log = Some(hist_log(
+            WatchState::Running,
+            vec![(Some(win_a()), 5_000, true), (None, 2_000, false)],
+        ));
+        let v = status_of(&mut s, 1);
+        let e = &v["foreground_history"]["entries"];
+        assert_eq!(e[0]["process"], "target.exe", "{v}");
+        assert!(
+            e[0].get("none").is_none(),
+            "窓のある件に none は付けない: {v}"
+        );
+        let none = &e[1];
+        assert_eq!(none["process"], Value::Null, "{v}");
+        assert_eq!(none["allowed"], false, "{v}");
+        assert_eq!(none["is_host"], false, "{v}");
+        assert_eq!(none["none"], true, "{v}");
+        assert_eq!(none["initial"], false, "{v}");
+        assert_eq!(none["at_unix_ms"], 1_001, "{v}");
+        assert!(none["ago_ms"].is_u64(), "{v}");
+        // 前面が無ければ foreground 自体が null のまま
+        assert_eq!(v["foreground"], Value::Null, "{v}");
     }
 
     #[test]
