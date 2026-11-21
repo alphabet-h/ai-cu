@@ -37,6 +37,9 @@ ai-cu は本物のマウスとキーボードを動かす。開発中に AI が�
 コマンド文字列に現れる直接の起動 (`out=$(ai-cu ...)`、`time ai-cu ...`、`cargo -q run -- ...`、
 `bash -c "..."`、サブシェル、ループの本体) と、python のスクリプトの引数に書かれた ai-cu のパス
 (`python docs/manual-check/mcp_client.py target/release/ai-cu.exe mcp -- ...`。D-055 の手順 19) を見る。
+python の引数のうち、ai-cu という名前のフォルダ (リポジトリの根など) の絶対パスは、繋ぎの無い 1 段のコマンドで、
+実在するフォルダで、隣に起動できるファイル (`<パス>.exe` など) が無いときだけ起動と見ない (フォルダは起動できない。
+相対のパス、繋ぎのあるコマンド、シェルの中の段では今までどおり止める。D-165)。
 スクリプトの中身や、コピーした実行ファイルの起動は文字列に現れないので見えない。MCP のクライアント
 (Claude Code の設定) からの起動も見えない (debug ビルドの `ai-cu mcp` は実入力の道具をバイナリ側で断る。D-055)。偶発の誤爆を止めるためのシートベルトであって、意図的な回避を止める
 境界ではない。バイナリ側の実行時ガード (環境変数 AI_CU_DEV_FORBID_REAL_INPUT。D-022) は残っているが、
@@ -122,6 +125,12 @@ PATHLIKE = re.compile(r"[./\\:\d]")
 AI_CU_IN_TEXT = re.compile(r"(?:^|[\s\"'\\/(`{=])ai-cu(?:\.exe)?(?=[\s\"')`};,|&]|$)", re.I)
 DYNAMIC_CALL = re.compile(r"(?<!&)&(?!&)\s*\([^)]{0,300}ai-cu", re.I)
 LINE_CONT = re.compile(r"(?:`|(?<=\s)\\)\r?\n")  # 行末の PowerShell の ` / bash の \
+# ai-cu という名前のフォルダの判定 (D-165)。拡張子の無い名前に OS やシェルが補いうる拡張子 (PATHEXT も足す)
+LAUNCH_EXTS = (".exe", ".com", ".bat", ".cmd", ".ps1")
+FD_DUP = re.compile(r"[0-9]?>&[0-9]")  # 2>&1 などの記述子の写し (段の繋ぎではない)
+REDIRECT_TARGET = re.compile(r">>?\s*(\"[^\"]*\"|'[^']*'|[^\s;&|<>]+)")
+DRIVE_ABS = re.compile(r"^[A-Za-z]:[\\/]")
+GIT_BASH_DRIVE = re.compile(r"^/([A-Za-z])(?=/|$)")
 
 TOOLS = ("Bash", "PowerShell", "Monitor")
 
@@ -324,13 +333,14 @@ def _cargo_run_args(rest):
     return prog if prog is not None else pos
 
 
-def invocations(command, depth=0):
+def invocations(command, depth=0, tool=None):
     """command 中の ai-cu 起動を (kind, args) で列挙する。kind: 'direct' | 'release' | 'wrapped'。
-    'release' は検証済みの release ビルドのパスからの起動 (D-051)。"""
+    'release' は検証済みの release ビルドのパスからの起動 (D-051)。tool は Bash / PowerShell などの道具の名前。"""
     found = []
     command = LINE_CONT.sub(" ", command or "")
     if depth == 0 and DYNAMIC_CALL.search(command):
         found.append(("wrapped", []))
+    relax = depth == 0 and _single_segment(command)  # シェルの中の段では緩めない (D-165)
     for seg in split_segments(command):
         toks = _tokens(seg)
         i = _skip_prefix(toks)
@@ -354,20 +364,72 @@ def invocations(command, depth=0):
             while payload and re.match(r"^[-/][A-Za-z]+$", _unquote(payload[0])):
                 payload.pop(0)  # -lc、-Command、/c など
             inner = " ".join(_unquote(t) for t in payload)
-            found.extend(invocations(inner, depth + 1))
+            found.extend(invocations(inner, depth + 1, tool))
         elif head in TEXT_WRAPPERS and AI_CU_IN_TEXT.search(seg):
             found.append(("wrapped", []))
         elif head in SCRIPT_RUNNERS:
-            found.extend(_script_runner_invocations(rest))
+            found.extend(_script_runner_invocations(rest, relax, tool))
     return found
 
 
-def _script_runner_invocations(rest):
+def _single_segment(command):
+    """繋ぎ (; && || | 改行 $( など) の無い 1 段のコマンドか (D-165)。`2>&1` のような記述子の写しは数えない。
+    1 段でも、リダイレクトの先が ai-cu の名前 (拡張子を除く) なら、起動の前に隣のファイルを作れるので偽。"""
+    text = FD_DUP.sub(" ", command)
+    if len([s for s in split_segments(text) if s.strip()]) != 1:
+        return False
+    for m in REDIRECT_TARGET.finditer(text):
+        if BIN_NAME.match(os.path.splitext(_basename(m.group(1)))[0]):
+            return False
+    return True
+
+
+def _absolute_local(tok, tool):
+    """ドライブつきの絶対パス (`X:/…` か `X:\\…`) ならそのパス、そうでなければ None (D-165)。
+    Git Bash の `/x/…` は PowerShell 以外で `X:/…` に直す。Bash では引用符の無い `\\` はエスケープとして消えるので、
+    引用符の無い逆スラッシュの語は見ない。UNC、ドライブ相対 (`X:foo`)、相対は None。"""
+    raw = tok.strip()
+    quoted = len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in "\"'"
+    if tool != "PowerShell" and "\\" in raw and not quoted:
+        return None
+    p = _unquote(raw)
+    if tool != "PowerShell":
+        p = GIT_BASH_DRIVE.sub(lambda m: m.group(1).upper() + ":", p, count=1)
+    return p if DRIVE_ABS.match(p) else None
+
+
+def _launch_exts():
+    """拡張子の無い名前に OS やシェルが補いうる拡張子: 固定の一覧と、このプロセスの PATHEXT の和 (D-165)。"""
+    exts = set(LAUNCH_EXTS)
+    for e in (os.environ.get("PATHEXT") or "").split(";"):
+        e = e.strip().lower()
+        if e.startswith("."):
+            exts.add(e)
+    return exts
+
+
+def _is_directory_not_binary(tok, tool):
+    """絶対パスが実在するフォルダで、隣に起動できるファイル (`<パス>.exe` など) が無いか (D-165)。
+    フォルダは起動できない。読めない・判定できないときは偽 (止める側)。"""
+    try:
+        p = _absolute_local(tok, tool)
+        if p is None or not os.path.isdir(p):
+            return False
+        base = p.rstrip("/\\")
+        return not any(os.path.exists(base + e) for e in _launch_exts())
+    except Exception:
+        return False
+
+
+def _script_runner_invocations(rest, relax=False, tool=None):
     """`python client.py <ai-cu のパス> <引数...>` の形: 引数の中の ai-cu のパスを起動として見る。
-    パスが変数 (`$cu mcp`) で、その後ろが実入力のサブコマンドなら、起動先が分からないので止める。"""
+    パスが変数 (`$cu mcp`) で、その後ろが実入力のサブコマンドなら、起動先が分からないので止める。
+    relax (1 段のコマンド) のときは、ai-cu という名前のフォルダの絶対パスを起動と見ずに次の語へ進む (D-165)。"""
     for idx, tok in enumerate(rest):
         raw = _unquote(tok)
         if BIN_NAME.match(_basename(tok)):
+            if relax and _is_directory_not_binary(tok, tool):
+                continue
             kind = "release" if _is_release_path(tok) else "direct"
             return [(kind, rest[idx + 1:])]
         if BARE_VAR.match(raw):
@@ -377,10 +439,10 @@ def _script_runner_invocations(rest):
     return []
 
 
-def violation(command, environ=None):
+def violation(command, environ=None, tool=None):
     """deny すべき起動があれば True。release ビルドの実入力は、opt-in したセッションでだけ通す。"""
     opted_in = manual_check_enabled(environ)
-    for kind, args in invocations(command):
+    for kind, args in invocations(command, tool=tool):
         if kind == "wrapped":
             return True
         if kind == "release" and opted_in:
@@ -397,7 +459,7 @@ def decide(event, environ=None):
     if event.get("tool_name") not in TOOLS:
         return None
     command = (event.get("tool_input") or {}).get("command") or ""
-    if not violation(command, environ):
+    if not violation(command, environ, event.get("tool_name")):
         return None
     return {
         "hookSpecificOutput": {

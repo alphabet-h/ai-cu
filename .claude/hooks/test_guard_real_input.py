@@ -2,9 +2,13 @@
 
 import json
 import os
+import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
+from unittest import mock
 
 sys.dont_write_bytecode = True  # __pycache__ を作らない (git に混ざるのを防ぐ)
 
@@ -227,6 +231,92 @@ class Allowed(unittest.TestCase):
             with self.subTest(cmd=cmd):
                 self.assertFalse(g.violation(cmd, environ={}), cmd)
                 self.assertIsNone(g.decide(event(cmd), environ={}))
+
+
+def _touch(path):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8"):
+        pass
+
+
+class PathsNamedAiCu(unittest.TestCase):
+    """1 段のコマンドで、python の引数の ai-cu という名前のフォルダの絶対パスは起動と見ない (D-165)。
+    隣に起動できるファイルがある、実在しない、相対、繋ぎがある、シェルの中、の形は今までどおり止める。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp(prefix="guard-d165-")
+        t = cls.tmp.replace("\\", "/")
+        cls.base, cls.side, cls.sidecmd, cls.sideps = (t + "/base", t + "/side", t + "/sidecmd", t + "/sideps")
+        for d in (cls.base, cls.side, cls.sidecmd, cls.sideps):
+            os.makedirs(d + "/ai-cu")
+        _touch(cls.side + "/ai-cu.exe")
+        _touch(cls.sidecmd + "/ai-cu.cmd")
+        _touch(cls.sideps + "/ai-cu.ps1")
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def allowed(self):
+        b = self.base
+        return [
+            f"python -B probe.py {b}/ai-cu {b}/ai-cu/target/debug/ai-cu.exe",
+            f"python -B probe.py {b}/ai-cu debug",
+            f'python probe.py "{b}/ai-cu" debug',
+            f"python probe.py {b}/ai-cu debug > out.log 2>&1",
+            f'python probe.py "{b.replace("/", chr(92))}\\ai-cu" debug',  # 引用符に囲んだ逆スラッシュ
+        ]
+
+    def denied(self):
+        b = self.base
+        return [
+            f"python probe.py {self.side}/ai-cu mcp",  # 隣に ai-cu.exe
+            f"python probe.py {self.sidecmd}/ai-cu mcp",
+            f"python probe.py {self.sideps}/ai-cu mcp",
+            f"python probe.py {b}/no-such/ai-cu mcp",  # 実在しない
+            f"python probe.py {b}/ai-cu target/debug/ai-cu.exe mcp -- x",  # フォルダの次の本物の起動
+            f"{b}/ai-cu run a.json",  # 頭には当てない
+            "python probe.py ./ai-cu mcp",  # 相対
+            "python probe.py ai-cu mcp",  # 素の名前
+            f"cd {b} && python probe.py {b}/ai-cu mcp",  # 繋ぎがある
+            f"cp x y; python probe.py {b}/ai-cu mcp",
+            f'bash -c "python probe.py {b}/ai-cu mcp"',  # シェルの中
+            f"python probe.py {b.replace('/', chr(92))}\\ai-cu mcp",  # Bash で引用符の無い逆スラッシュは消える
+            f"python probe.py {b}/ai-cu mcp > {b}/ai-cu.cmd",  # リダイレクトが隣を作る
+        ]
+
+    def test_allowed(self):
+        for cmd in self.allowed():
+            with self.subTest(cmd=cmd):
+                self.assertFalse(g.violation(cmd, environ={}), cmd)
+                self.assertIsNone(g.decide(event(cmd), environ={}))
+
+    def test_denied(self):
+        for cmd in self.denied():
+            with self.subTest(cmd=cmd):
+                self.assertTrue(g.violation(cmd, environ={}), cmd)
+
+    def test_backslash_unquoted_allowed_in_powershell(self):
+        cmd = f"python probe.py {self.base.replace('/', chr(92))}\\ai-cu debug"
+        self.assertIsNone(g.decide(event(cmd, tool="PowerShell"), environ={}))
+
+    def test_git_bash_drive_form(self):
+        m = re.match(r"^([A-Za-z]):(/.*)$", self.base)
+        if not m:
+            self.skipTest("一時の場所がドライブの形でない")
+        gb = "/" + m.group(1).lower() + m.group(2)
+        cmd = f"python probe.py {gb}/ai-cu debug"
+        self.assertIsNone(g.decide(event(cmd), environ={}), cmd)
+        # PowerShell では /d/x は今のドライブの \d\x なので直さない
+        self.assertIsNotNone(g.decide(event(cmd.replace(" debug", " mcp"), tool="PowerShell"), environ={}))
+
+    def test_fixed_exts_without_pathext(self):
+        with mock.patch.dict(os.environ, {"PATHEXT": ""}):
+            for d in (self.sidecmd, self.sideps):
+                cmd = f"python probe.py {d}/ai-cu mcp"
+                with self.subTest(cmd=cmd):
+                    self.assertTrue(g.violation(cmd, environ={}), cmd)
 
 
 class ReleaseOptIn(unittest.TestCase):
