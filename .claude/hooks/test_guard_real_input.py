@@ -339,6 +339,12 @@ class ManifestPath(unittest.TestCase):
         "devdep": '[package]\nname = "x"\n\n[target.\'cfg(windows)\'.dev-dependencies]\nai-cu = "0.2"\n',
         "binoutside": '[package]\nname = "x"\n\n[[bin]]\nname = "foo"\npath = "../aicu/src/main.rs"\n',
         "binabs": '[package]\nname = "x"\n\n[[bin]]\nname = "foo"\npath = "C:/elsewhere/main.rs"\n',
+        "bindriverel": '[package]\nname = "x"\n\n[[bin]]\nname = "foo"\npath = "C:main.rs"\n',
+        # 手元で中身を確かめられない依存 (path・git・workspace から継ぐ) と patch / replace は止める側
+        "pathdep": '[package]\nname = "x"\n\n[dependencies]\nfoo = { path = "vendor/foo" }\n',
+        "gitdep": '[package]\nname = "x"\n\n[dependencies]\nfoo = { git = "https://example.invalid/foo" }\n',
+        "wsdep": '[package]\nname = "x"\n\n[dependencies]\nfoo = { workspace = true }\n',
+        "patched": '[package]\nname = "x"\n\n[patch.crates-io]\nfoo = { version = "1" }\n',
     }
 
     @classmethod
@@ -365,6 +371,7 @@ class ManifestPath(unittest.TestCase):
             f"cargo run -q --manifest-path={p} -- click 1,2",
             f"cargo -C {self.t} run --manifest-path {p} -- click 1,2",  # 絶対なので -C に左右されない
             f"cargo run --manifest-path {p} --bin tomlprobe -- click 1,2",  # 今も通る (target が別のもの)
+            "cargo run -- shot --out x.png --region 0,0,10,10",  # `--` の前に位置引数が無い形は今までどおり
         ]
 
     def denied(self):
@@ -387,6 +394,9 @@ class ManifestPath(unittest.TestCase):
             f"cargo run --manifest-path {p} -pai-cu -- click 1,2",
             f"cargo run --manifest-path {p} -p=ai-cu -- click 1,2",
             f"cargo run --manifest-path {p} --package ai-cu -- click 1,2",
+            # 位置引数が `--` より前にあれば、cargo は `--` ごと後ろをプログラムに渡す
+            "cargo run click 1,2 -- shot",
+            "cargo run -q click -- windows",
         ]
 
     def test_lone_cr_is_a_statement_break_in_powershell(self):

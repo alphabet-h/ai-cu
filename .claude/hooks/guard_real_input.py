@@ -302,7 +302,11 @@ DEP_TABLES = ("dependencies", "dev-dependencies", "build-dependencies")
 
 
 def _uses_ai_cu(data):
-    """依存の表 (target.<cfg>. の下も) に、名前か `package` が ai-cu らしい依存があるか。ライブラリ経由で実入力を送れる。"""
+    """依存の表 (target.<cfg>. の下も) に、名前か `package` が ai-cu らしい依存があるか。ライブラリ経由で実入力を送れる。
+    手元で中身を確かめられない依存 (path・git・workspace から継ぐ。その先が ai-cu を取り込みうる) と、
+    `[patch]` / `[replace]` があるときも真 (止める側)。"""
+    if "patch" in data or "replace" in data:
+        return True
     tables = [data.get(k) for k in DEP_TABLES]
     for spec in (data.get("target") or {}).values():
         if isinstance(spec, dict):
@@ -311,7 +315,9 @@ def _uses_ai_cu(data):
         if not isinstance(table, dict):
             continue
         for key, dep in table.items():
-            if _names_ai_cu(key) or (isinstance(dep, dict) and _names_ai_cu(str(dep.get("package")))):
+            if _names_ai_cu(key):
+                return True
+            if isinstance(dep, dict) and (_names_ai_cu(str(dep.get("package"))) or {"path", "git", "workspace"} & set(dep)):
                 return True
     return False
 
@@ -323,7 +329,8 @@ def _points_outside(node):
         for k, v in node.items():
             if k == "path" and isinstance(v, str):
                 p = v.replace("\\", "/")
-                if DRIVE_ABS.match(p) or p.startswith("/") or ".." in p.split("/"):
+                # ドライブつき (`C:/x` もドライブ相対の `C:x` も)、根から (`/x`、UNC の `//x`)、`..` を含むものは外
+                if re.match(r"^[A-Za-z]:", p) or p.startswith("/") or ".." in p.split("/"):
                     return True
             elif _points_outside(v):
                 return True
@@ -373,14 +380,14 @@ def _cargo_run_args(rest, relax=False, tool=None):
     if i >= len(rest) or _unquote(rest[i]) not in ("run", "r"):
         return None
     opts = rest[i + 1:]
-    if "--" in opts:
-        k = opts.index("--")
-        opts, prog = opts[:k], opts[k + 1:]
-    else:
-        prog = None  # cargo は `--` が無くても残りをプログラムの引数として渡す
-    target, manifest, pos, j = None, None, [], 0
+    # cargo は `--` が無くても残りをプログラムの引数として渡す。`--` で分けるのは、その前に位置引数が無いときだけ
+    # (`cargo run click 1,2 -- shot` は `--` ごと click の引数になる。D-165)
+    target, manifest, pos, prog, j = None, None, [], None, 0
     while j < len(opts):
         t = _unquote(opts[j])
+        if t == "--":
+            prog = [_unquote(x) for x in opts[j + 1:]]
+            break
         if t == "--example" or t.startswith("--example="):
             return None  # example (フィクスチャウィンドウなど) であって、ai-cu ではない
         if t == "--manifest-path":
