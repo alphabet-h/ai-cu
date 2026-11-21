@@ -298,6 +298,40 @@ def _names_ai_cu(name):
     return re.search(r"ai[-_]?cu", (name or "").lower()) is not None
 
 
+DEP_TABLES = ("dependencies", "dev-dependencies", "build-dependencies")
+
+
+def _uses_ai_cu(data):
+    """依存の表 (target.<cfg>. の下も) に、名前か `package` が ai-cu らしい依存があるか。ライブラリ経由で実入力を送れる。"""
+    tables = [data.get(k) for k in DEP_TABLES]
+    for spec in (data.get("target") or {}).values():
+        if isinstance(spec, dict):
+            tables.extend(spec.get(k) for k in DEP_TABLES)
+    for table in tables:
+        if not isinstance(table, dict):
+            continue
+        for key, dep in table.items():
+            if _names_ai_cu(key) or (isinstance(dep, dict) and _names_ai_cu(str(dep.get("package")))):
+                return True
+    return False
+
+
+def _points_outside(node):
+    """manifest のどこかの `path` が、クレートのフォルダの外 (絶対、`..` を含む) を指すか。
+    外の ai-cu のソース (`[[bin]] path = "../ai-cu/src/main.rs"`) や依存を取り込めるので、別のクレートと見ない。"""
+    if isinstance(node, dict):
+        for k, v in node.items():
+            if k == "path" and isinstance(v, str):
+                p = v.replace("\\", "/")
+                if DRIVE_ABS.match(p) or p.startswith("/") or ".." in p.split("/"):
+                    return True
+            elif _points_outside(v):
+                return True
+    elif isinstance(node, list):
+        return any(_points_outside(x) for x in node)
+    return False
+
+
 def _manifest_is_other_crate(path):
     """絶対パスの Cargo.toml が、ai-cu でない別のクレートと読めるか (D-165)。
     読めない・壊れている・名前が無い・workspace・名前か [[bin]] か src/bin/ の項目が ai-cu らしいなら偽 (止める側)。"""
@@ -314,6 +348,8 @@ def _manifest_is_other_crate(path):
         for b in data.get("bin") or []:
             if not isinstance(b, dict) or _names_ai_cu(str(b.get("name"))):
                 return False
+        if _uses_ai_cu(data) or _points_outside(data):
+            return False
         bindir = os.path.join(os.path.dirname(path), "src", "bin")
         if os.path.isdir(bindir) and any(_names_ai_cu(os.path.splitext(n)[0]) for n in os.listdir(bindir)):
             return False  # cargo は src/bin/*.rs と src/bin/<名前>/main.rs を [[bin]] 無しで bin にする
@@ -359,13 +395,18 @@ def _cargo_run_args(rest, relax=False, tool=None):
         elif t.startswith(("--bin=", "--package=")):
             target = t.split("=", 1)[1]
             j += 1
+        elif t.startswith("-p") and len(t) > 2:  # `-pai-cu` と `-p=ai-cu` (cargo はどちらもパッケージと読む)
+            target = t[2:].removeprefix("=")
+            j += 1
         elif t in CARGO_RUN_VALUE:
             j += 2
         elif t.startswith("-"):
             j += 1
         else:
-            pos.append(t)
-            j += 1
+            # cargo run は最初の位置引数より後の語を、オプションの形でもすべてプログラムに渡す。
+            # 後ろの `--manifest-path` や `--bin` を cargo のものと読まない (D-165)
+            pos.extend(_unquote(x) for x in opts[j:])
+            break
     if target and not _names_ai_cu(target):
         return None  # 別のパッケージや bin (xtask、フィクスチャなど)。ai-cu-cli のような名前は ai-cu 扱いのまま
     if not target and relax and manifest:
@@ -417,6 +458,8 @@ def invocations(command, depth=0, tool=None):
 def _single_segment(command):
     """繋ぎ (; && || | 改行 $( など) の無い 1 段のコマンドか (D-165)。`2>&1` のような記述子の写しは数えない。
     1 段でも、リダイレクトの先が ai-cu の名前 (拡張子を除く) なら、起動の前に隣のファイルを作れるので偽。"""
+    if "\r" in command:  # PowerShell は単独の CR でも文を分ける (split_segments は分けない)
+        return False
     text = FD_DUP.sub(" ", command)
     if len([s for s in split_segments(text) if s.strip()]) != 1:
         return False

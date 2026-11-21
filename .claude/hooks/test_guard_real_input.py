@@ -333,6 +333,12 @@ class ManifestPath(unittest.TestCase):
         "ws": '[workspace]\nmembers = []\n\n[package]\nname = "x"\n',
         "broken": '[package\nname = "x"\n',
         "noname": '[package]\nversion = "0.1.0"\n',
+        # ai-cu のライブラリを使う・ai-cu のソースを指すクレートは、別のクレートと見ない
+        "dep": '[package]\nname = "x"\n\n[dependencies]\nai_cu = { path = "../aicu" }\n',
+        "deprenamed": '[package]\nname = "x"\n\n[dependencies]\nfoo = { package = "ai-cu", path = "../aicu" }\n',
+        "devdep": '[package]\nname = "x"\n\n[target.\'cfg(windows)\'.dev-dependencies]\nai-cu = "0.2"\n',
+        "binoutside": '[package]\nname = "x"\n\n[[bin]]\nname = "foo"\npath = "../aicu/src/main.rs"\n',
+        "binabs": '[package]\nname = "x"\n\n[[bin]]\nname = "foo"\npath = "C:/elsewhere/main.rs"\n',
     }
 
     @classmethod
@@ -372,7 +378,32 @@ class ManifestPath(unittest.TestCase):
             f"cp x y && cargo run --manifest-path {p} -- click 1,2",  # 繋ぎがある
             f'bash -c "cargo run --manifest-path {p} -- click 1,2"',  # シェルの中
             f"cargo run --manifest-path {p} --bin ai-cu -- click 1,2",  # target の判定が先
+            # cargo run は最初の位置引数より後の語をすべてプログラムに渡す: 後ろのオプションは cargo のものではない
+            f"cargo run click 1,2 --manifest-path {p}",
+            f"cargo run click 1,2 --manifest-path={p}",
+            "cargo run click 1,2 --bin xtask",
+            "cargo run click 1,2 -p other",
+            # -p の値をくっつけた形と --package も target として読む
+            f"cargo run --manifest-path {p} -pai-cu -- click 1,2",
+            f"cargo run --manifest-path {p} -p=ai-cu -- click 1,2",
+            f"cargo run --manifest-path {p} --package ai-cu -- click 1,2",
         ]
+
+    def test_lone_cr_is_a_statement_break_in_powershell(self):
+        # PowerShell は単独の CR でも文を分けるので、1 段と数えない
+        p = self.m("probe")
+        for cmd in (f"cargo run --manifest-path {p}\rtarget/debug/ai-cu.exe run s.json",
+                    f"cargo run --manifest-path {p} -- x\rtarget/debug/ai-cu.exe run s.json"):
+            with self.subTest(cmd=cmd):
+                self.assertTrue(g.violation(cmd, environ={}, tool="PowerShell"), cmd)
+                self.assertIsNotNone(g.decide(event(cmd, tool="PowerShell"), environ={}))
+
+    def test_bin_dir_form_is_ai_cu(self):
+        d = os.path.join(self.tmp, "bindir")
+        os.makedirs(os.path.join(d, "src", "bin", "ai-cu"))
+        with open(os.path.join(d, "Cargo.toml"), "w", encoding="utf-8") as f:
+            f.write('[package]\nname = "x"\n')
+        self.assertTrue(g.violation(f"cargo run --manifest-path {self.m('bindir')} -- click 1,2", environ={}))
 
     def test_allowed(self):
         for cmd in self.allowed():
