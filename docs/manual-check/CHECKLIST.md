@@ -1339,6 +1339,34 @@ target/release/ai-cu.exe clipboard ai-cu-busy-check
 
 結果が違ったときは、D-157 の実装を疑う: (b) で本文が 1 行 (改行が見えない) なら CRLF にそろえていない、(a) で `foreground` が変わったら置く窓 (message-only) の作り方を疑う、(c) で 0 なら無操作の判定が前面によって外れている、(d) で ai-cu の文が一覧に出たら履歴の印 (`CanIncludeInClipboardHistory` など) の登録か置き方を疑う。
 
+## 39. 前面の切り替わりの履歴 (status の foreground_history、D-166)
+
+常駐の MCP が前面の切り替わりを記録し、`status` の `foreground.since_ms` と `foreground_history` で返すこと、ロックを挟むと「前面なし」の件が入って `since_ms` が数え直されることを確かめる。入力は送らず、撮影もしない。読むのは MCP の `status` だけなので GO は要らないが、ロックを挟む (d) は人が行う。
+配置した release (`python scripts/install.py` の後) を、ai-cu を MCP として登録したセッションで `/mcp` から繋ぎ直してから行う (繋ぎ直す前の常駐の MCP は旧版のまま)。基本の層は手順 0 の設定 (allow に notepad) のまま。開発シェル (`AI_CU_DEV_FORBID_REAL_INPUT`) で起動した MCP は履歴を取らない (`foreground_history` が null) ので、その変数の無い端末から Claude Code を起動しておく。
+
+準備: 人が空の新しいメモ帳の窓を 1 つ開いておく。
+
+(a) 繋ぎ直した直後: AI が MCP の `status` を呼ぶ。
+- [ ] `foreground_history` が null でなく、`entries` の 1 件目の `initial` が true。`unreadable` に `foreground_history` が無い
+- [ ] `foreground` (端末) の `since_start` が true で、`since_ms` が数 (繋ぎ直してからの経過)
+- [ ] 結果のどこにも窓の題名が無い。許可の外の窓 (端末) の件は `process` が null で `is_host` が true
+
+(b) 前面を移して戻す: 人がメモ帳をクリックして前面にし、数秒置いてから端末をクリックして前面に戻す。AI が `status` を呼ぶ。
+- [ ] `entries` の末尾の 2 件が、メモ帳 (`process` が `notepad.exe`、`allowed` が true、`initial` が false) と端末の順。`ago_ms` がメモ帳の件のほうが大きい
+- [ ] `foreground.since_ms` が端末の件の `ago_ms` と同じで、`since_start` が false (前面に戻った時点から数え直している)
+
+(c) 読み直しで止まらない: AI が続けて `status` をもう 1 回呼ぶ。
+- [ ] `entries` の件数が (b) と同じ (前面が動いていなければ件が増えない)
+
+(d) 前面が無くなる移り (人): 人が Win+L で画面をロックし、10 秒ほど置いてから解除して端末を前面にする。AI が `status` を呼ぶ。
+- [ ] ロックの間の件が入っている (`none: true` の件か、ロックの画面のプロセスの件。どちらかを記録する)。その後に端末の件があり、`foreground.since_ms` は解除の後からの経過 (ロックの前から数えていない)
+
+後片付け: 人がメモ帳を保存せずに閉じる。
+
+記録する値: 使った release の版 (`target/release/ai-cu.exe --version`)、各回の `status` の `foreground` と `foreground_history` の JSON、(d) でロックの間に入った件の形。「実施の記録」の節のとおり、手元に日付つきで書く。
+
+結果が違ったときは、D-166 の実装を疑う: (a) で `foreground_history` が null なら、MCP が開発シェルから立ったか (標準エラーと `--log` に「前面の見張りを立てられない」の行がある)、見張りの配線を疑う。(b) でメモ帳の件が無ければフックかタイマーが記録していない。(b) で `since_ms` が数え直されていなければ、重複を落とす判定 (同じルートの窓) を疑う。(d) でロックの間の件が無く `since_ms` がロックの前から続いていれば、500 ms のタイマーの読み直しが効いていない (ロックの間も前面が null にならない環境なら、その旨を記録する)。
+
 ## 結果が違ったとき
 
 - 手順 1 で `dev_mode: true`: この端末に `AI_CU_DEV_FORBID_REAL_INPUT` がある。`Remove-Item Env:AI_CU_DEV_FORBID_REAL_INPUT` で外す
