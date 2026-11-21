@@ -958,6 +958,35 @@ impl InputLock for RealInputLock {
     }
 }
 
+/// 前面の見張りを立ててよいか (D-166)。履歴は窓のプロセス名を時間をかけて集めた一覧なので、窓の一覧の門
+/// (`Win32Desktop::listing_allowed`、D-074) と同じく開発シェルでは集めない。純粋な判定なので単体でテストする
+pub fn foreground_watch_allowed(env: &dyn EnvLookup) -> Result<(), String> {
+    if dev_forbid_active(env) {
+        return Err(format!(
+            "開発シェル ({}) では前面の履歴を取らない",
+            crate::config::ENV_DEV_FORBID
+        ));
+    }
+    Ok(())
+}
+
+/// 常駐の MCP の前面の見張りを立てる (D-166)。記録は必ず返し、見張りを立てられなければ記録の状態を `Failed` にして
+/// 理由を Err で返す (`status` は `foreground_history` を null にする)。開発シェルでは見張りを立てない。
+/// 起動の待ちはふつう数 ms、最大 1 秒
+pub fn start_foreground_watch() -> (
+    std::sync::Arc<crate::foreground_log::ForegroundLog>,
+    Result<win32::foreground_hook::ForegroundWatch, String>,
+) {
+    use crate::foreground_log::{ForegroundLog, WatchState};
+    let log = std::sync::Arc::new(ForegroundLog::new());
+    if let Err(e) = foreground_watch_allowed(&ProcessEnv) {
+        log.set_state(WatchState::Failed(e.clone()));
+        return (log, Err(e));
+    }
+    let watch = win32::foreground_hook::spawn(std::sync::Arc::clone(&log));
+    (log, watch)
+}
+
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
@@ -1472,6 +1501,20 @@ mod tests {
         ));
         assert!(focused_password_allowed(Some(0x10), &dev).is_ok());
         assert!(focused_password_allowed(None, &MapEnv::default()).is_ok());
+    }
+
+    /// 前面の見張りの門 (D-166): 開発シェルでは立てず、理由に変数の名前と「前面の履歴」が入る。変数が無ければ通す
+    #[test]
+    fn foreground_watch_refused_in_dev_shell() {
+        let dev = MapEnv::new(&[(ENV_DEV_FORBID, "1")]);
+        match foreground_watch_allowed(&dev) {
+            Err(m) => assert!(
+                m.contains(ENV_DEV_FORBID) && m.contains("前面の履歴"),
+                "{m}"
+            ),
+            Ok(()) => panic!("開発シェルで見張りを立てる"),
+        }
+        assert!(foreground_watch_allowed(&MapEnv::default()).is_ok());
     }
 
     /// focus の最下層 (D-050): 開発シェルでは探すことも前面にすることもしない。フィクスチャ専用は通す

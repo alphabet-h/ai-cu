@@ -33,6 +33,7 @@ use ai_cu::elements::{
 };
 use ai_cu::error::{AppError, ErrorKind};
 use ai_cu::estop::StopSet;
+use ai_cu::foreground_log::{ForegroundLog, WatchState};
 use ai_cu::geometry::{Point, Rect};
 use ai_cu::hint::{Hint, LEAD_USER_ACTIVE_HINT, Surface, hint};
 use ai_cu::image::{PngFileWriter, decode_png, frame_diff, hex_color, thumb};
@@ -46,6 +47,7 @@ use ai_cu::win32::fixture_window::{
     FIXTURE_PASSWORD_TEXT, FIXTURE_RGB, FixtureEvent, FixtureRegion, FixtureWindow,
     clip_cursor_for_test,
 };
+use ai_cu::win32::foreground_hook::{self, WatchOptions};
 use ai_cu::win32::input_mutex::InputMutex;
 use ai_cu::win32::overlay::{
     OVERLAY_CLASS, OverlayThread, OverlayWindow, overlay_shown_for_ms, overlay_windows,
@@ -4891,5 +4893,93 @@ fn fixture_real_clipboard_sets_text_with_history_exclusion() {
         f.win.events().is_empty(),
         "入力は送らない: {:?}",
         f.win.events()
+    );
+}
+
+/// 前面の見張り (D-166) を `opts` で立て、フィクスチャを前面にして、その窓の initial でない件が 2 秒以内に入るか
+/// を見る。`FIXTURE foreground_watch <label> …` の行を出し、止めた後の状態が `Failed` であることも確かめる。
+/// 入力は `activate` が前面にできなかったときのフィクスチャ内のクリックだけ
+fn assert_foreground_watch_sees_fixture(label: &str, name: &'static str, opts: WatchOptions) {
+    dpi::ensure_per_monitor_v2().expect("Per-Monitor V2 を宣言できない");
+    let log = Arc::new(ForegroundLog::new());
+    let watch = foreground_hook::spawn_with(Arc::clone(&log), opts).expect("見張りを立てられない");
+    let first = log.snapshot();
+    assert_eq!(first.state, WatchState::Running, "Ok の時点で Running");
+    assert!(
+        first.entries.first().is_some_and(|e| e.initial),
+        "Ok の時点で initial の件がある: {:?}",
+        first.entries
+    );
+    let f = Fixture::open(name);
+    let hwnd = f.win.hwnd();
+    // 前面化 (activate) にかかった時間と、その後に記録へ入るまでの時間を分けて数える。
+    // 2 秒の期限は activate が返ってから数え、ループの後にもう一度見直す
+    // (activate が遅いだけの回を「記録が入らない」と取り違えない)
+    let activate_start = Instant::now();
+    f.activate();
+    let activate_ms = activate_start.elapsed().as_millis();
+    let seen = |s: &ai_cu::foreground_log::Snapshot| {
+        s.entries
+            .iter()
+            .any(|e| !e.initial && e.window.as_ref().is_some_and(|w| w.hwnd == hwnd))
+    };
+    let start = Instant::now();
+    let mut fixture_seen_ms = None;
+    while start.elapsed() < Duration::from_secs(2) {
+        if seen(&log.snapshot()) {
+            fixture_seen_ms = Some(start.elapsed().as_millis());
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let snap = log.snapshot();
+    if fixture_seen_ms.is_none() && seen(&snap) {
+        fixture_seen_ms = Some(start.elapsed().as_millis());
+    }
+    let stopped = watch.stop();
+    let after = log.state();
+    println!(
+        "FIXTURE foreground_watch {label} state={:?} entries={} activate_ms={activate_ms} fixture_seen_ms={fixture_seen_ms:?} stopped={stopped} after={after:?}",
+        snap.state,
+        snap.entries.len()
+    );
+    assert!(
+        fixture_seen_ms.is_some(),
+        "2 秒以内にフィクスチャの件が入らない: {:?}",
+        snap.entries
+    );
+    assert_eq!(snap.state, WatchState::Running);
+    assert!(stopped, "stop が見張りを止めて join できない");
+    assert!(
+        matches!(after, WatchState::Failed(_)),
+        "止めた後は Failed: {after:?}"
+    );
+}
+
+/// フックだけ (タイマーなし) で、フィクスチャの前面化が記録に入る (D-166)
+#[test]
+#[ignore = "実機のフィクスチャ限定。cargo test -- --ignored --test-threads=1"]
+fn fixture_real_foreground_watch_hook_records_fixture_activation() {
+    assert_foreground_watch_sees_fixture(
+        "hook",
+        "fg-watch-hook",
+        WatchOptions {
+            hook: true,
+            poll: None,
+        },
+    );
+}
+
+/// タイマーだけ (フックなし) でも、読み直しでフィクスチャの前面化が記録に入る (D-166。前面が無くなる移りの補い)
+#[test]
+#[ignore = "実機のフィクスチャ限定。cargo test -- --ignored --test-threads=1"]
+fn fixture_real_foreground_watch_poll_records_without_hook() {
+    assert_foreground_watch_sees_fixture(
+        "poll",
+        "fg-watch-poll",
+        WatchOptions {
+            hook: false,
+            poll: Some(Duration::from_millis(500)),
+        },
     );
 }

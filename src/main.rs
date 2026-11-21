@@ -142,6 +142,15 @@ fn real_main() -> i32 {
                 host_pids,
                 inbox,
             );
+            // 前面の切り替わりの見張り (D-166)。立たなくても道具は止めず、status の foreground_history を null にする。
+            // watch は serve が返るまで持つ (Drop では止めない。プロセスの終わりまで記録する)
+            let (foreground_log, foreground_watch) = ai_cu::backend::start_foreground_watch();
+            server.foreground_log = Some(foreground_log);
+            if let Err(e) = &foreground_watch {
+                ai_cu::mcp::log(&format!(
+                    "前面の見張りを立てられない ({e})。status の foreground_history は null"
+                ));
+            }
             // 検証前の debug ビルドが MCP の経路 (hook に見えない) から実入力を送らないよう、release だけが送れる。
             // ホストを特定できないときも実入力は送らない (fail-closed)
             if cfg!(debug_assertions) {
