@@ -319,6 +319,72 @@ class PathsNamedAiCu(unittest.TestCase):
                     self.assertTrue(g.violation(cmd, environ={}), cmd)
 
 
+class ManifestPath(unittest.TestCase):
+    """1 段のコマンドで、`cargo run --manifest-path <絶対パス>` が ai-cu でない別のクレートを指すなら、
+    その引数を ai-cu の引数と読まない (D-165)。読めない・ai-cu らしい・workspace・相対は止める。"""
+
+    MANIFESTS = {
+        "probe": '[package]\nname = "tomlprobe"\n',
+        "aicu": '[package]\nname = "ai-cu"\n',
+        "aicu_us": '[package]\nname = "ai_cu"\n',
+        "aicucli": '[package]\nname = "ai-cu-cli"\n',
+        "binnamed": '[package]\nname = "x"\n\n[[bin]]\nname = "ai-cu"\npath = "src/main.rs"\n',
+        "autobin": '[package]\nname = "x"\n',
+        "ws": '[workspace]\nmembers = []\n\n[package]\nname = "x"\n',
+        "broken": '[package\nname = "x"\n',
+        "noname": '[package]\nversion = "0.1.0"\n',
+    }
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp(prefix="guard-d165m-")
+        cls.t = cls.tmp.replace("\\", "/")
+        for name, body in cls.MANIFESTS.items():
+            os.makedirs(os.path.join(cls.tmp, name))
+            with open(os.path.join(cls.tmp, name, "Cargo.toml"), "w", encoding="utf-8") as f:
+                f.write(body)
+        _touch(os.path.join(cls.tmp, "autobin", "src", "bin", "ai-cu.rs"))
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def m(self, name):
+        return f"{self.t}/{name}/Cargo.toml"
+
+    def allowed(self):
+        p = self.m("probe")
+        return [
+            f"cargo run -q --manifest-path {p} -- x.toml",
+            f"cargo run -q --manifest-path={p} -- click 1,2",
+            f"cargo -C {self.t} run --manifest-path {p} -- click 1,2",  # 絶対なので -C に左右されない
+            f"cargo run --manifest-path {p} --bin tomlprobe -- click 1,2",  # 今も通る (target が別のもの)
+        ]
+
+    def denied(self):
+        p = self.m("probe")
+        root = ROOT.replace("\\", "/")
+        out = [f"cargo run --manifest-path {self.m(n)} -- click 1,2" for n in self.MANIFESTS if n != "probe"]
+        return out + [
+            f"cargo run --manifest-path {self.t}/no-such/Cargo.toml -- click 1,2",
+            f"cargo run --manifest-path {root}/Cargo.toml -- click 1,2",
+            "cargo run --manifest-path probe/Cargo.toml -- click 1,2",  # 相対
+            f"cp x y && cargo run --manifest-path {p} -- click 1,2",  # 繋ぎがある
+            f'bash -c "cargo run --manifest-path {p} -- click 1,2"',  # シェルの中
+            f"cargo run --manifest-path {p} --bin ai-cu -- click 1,2",  # target の判定が先
+        ]
+
+    def test_allowed(self):
+        for cmd in self.allowed():
+            with self.subTest(cmd=cmd):
+                self.assertFalse(g.violation(cmd, environ={}), cmd)
+
+    def test_denied(self):
+        for cmd in self.denied():
+            with self.subTest(cmd=cmd):
+                self.assertTrue(g.violation(cmd, environ={}), cmd)
+
+
 class ReleaseOptIn(unittest.TestCase):
     """検証済みの release ビルドのパスからの実入力は、利用者が opt-in したセッションでだけ通す (D-051)。"""
 

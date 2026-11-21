@@ -40,6 +40,8 @@ ai-cu は本物のマウスとキーボードを動かす。開発中に AI が�
 python の引数のうち、ai-cu という名前のフォルダ (リポジトリの根など) の絶対パスは、繋ぎの無い 1 段のコマンドで、
 実在するフォルダで、隣に起動できるファイル (`<パス>.exe` など) が無いときだけ起動と見ない (フォルダは起動できない。
 相対のパス、繋ぎのあるコマンド、シェルの中の段では今までどおり止める。D-165)。
+同じ条件 (1 段、絶対のパス) で、`cargo run --manifest-path <M>` の M が ai-cu でない別のクレート (名前・[[bin]]・
+src/bin/ の項目のどれも ai-cu らしくなく、workspace でない) を指し、`-p` / `--bin` が無ければ、ai-cu の起動と見ない (D-165)。
 スクリプトの中身や、コピーした実行ファイルの起動は文字列に現れないので見えない。MCP のクライアント
 (Claude Code の設定) からの起動も見えない (debug ビルドの `ai-cu mcp` は実入力の道具をバイナリ側で断る。D-055)。偶発の誤爆を止めるためのシートベルトであって、意図的な回避を止める
 境界ではない。バイナリ側の実行時ガード (環境変数 AI_CU_DEV_FORBID_REAL_INPUT。D-022) は残っているが、
@@ -291,8 +293,38 @@ def release_args_ok(args):
     return True
 
 
-def _cargo_run_args(rest):
-    """`cargo [global opts] run ...` のプログラム引数。ai-cu の cargo run でなければ None。"""
+def _names_ai_cu(name):
+    """パッケージや bin の名前が ai-cu らしいか (ai-cu-cli や ai_cu も含める)。"""
+    return re.search(r"ai[-_]?cu", (name or "").lower()) is not None
+
+
+def _manifest_is_other_crate(path):
+    """絶対パスの Cargo.toml が、ai-cu でない別のクレートと読めるか (D-165)。
+    読めない・壊れている・名前が無い・workspace・名前か [[bin]] か src/bin/ の項目が ai-cu らしいなら偽 (止める側)。"""
+    try:
+        import tomllib  # Python 3.11 から。無ければ例外で偽 (止める側) になり、hook 全体は落ちない
+
+        with open(path, "rb") as f:
+            data = tomllib.load(f)
+        pkg = data.get("package")
+        if "workspace" in data or not isinstance(pkg, dict) or not isinstance(pkg.get("name"), str):
+            return False
+        if _names_ai_cu(pkg["name"]):
+            return False
+        for b in data.get("bin") or []:
+            if not isinstance(b, dict) or _names_ai_cu(str(b.get("name"))):
+                return False
+        bindir = os.path.join(os.path.dirname(path), "src", "bin")
+        if os.path.isdir(bindir) and any(_names_ai_cu(os.path.splitext(n)[0]) for n in os.listdir(bindir)):
+            return False  # cargo は src/bin/*.rs と src/bin/<名前>/main.rs を [[bin]] 無しで bin にする
+        return True
+    except Exception:
+        return False
+
+
+def _cargo_run_args(rest, relax=False, tool=None):
+    """`cargo [global opts] run ...` のプログラム引数。ai-cu の cargo run でなければ None。
+    relax (1 段のコマンド) で `--manifest-path` が別のクレートの絶対パスなら None (D-165)。"""
     i = 0
     while i < len(rest):
         t = _unquote(rest[i])
@@ -310,12 +342,18 @@ def _cargo_run_args(rest):
         opts, prog = opts[:k], opts[k + 1:]
     else:
         prog = None  # cargo は `--` が無くても残りをプログラムの引数として渡す
-    target, pos, j = None, [], 0
+    target, manifest, pos, j = None, None, [], 0
     while j < len(opts):
         t = _unquote(opts[j])
         if t == "--example" or t.startswith("--example="):
             return None  # example (フィクスチャウィンドウなど) であって、ai-cu ではない
-        if t in ("-p", "--package", "--bin"):
+        if t == "--manifest-path":
+            manifest = opts[j + 1] if j + 1 < len(opts) else None
+            j += 2
+        elif t.startswith("--manifest-path="):
+            manifest = opts[j].strip().split("=", 1)[1]
+            j += 1
+        elif t in ("-p", "--package", "--bin"):
             target = _unquote(opts[j + 1]) if j + 1 < len(opts) else None
             j += 2
         elif t.startswith(("--bin=", "--package=")):
@@ -328,8 +366,12 @@ def _cargo_run_args(rest):
         else:
             pos.append(t)
             j += 1
-    if target and not re.search(r"ai[-_]?cu", target.lower()):
+    if target and not _names_ai_cu(target):
         return None  # 別のパッケージや bin (xtask、フィクスチャなど)。ai-cu-cli のような名前は ai-cu 扱いのまま
+    if not target and relax and manifest:
+        local = _absolute_local(manifest, tool)  # 絶対の確かめは manifest の判定の外で先に行う
+        if local is not None and _manifest_is_other_crate(local):
+            return None  # 作業領域の使い捨てのクレートなど、ai-cu でない別のクレート (D-165)
     return prog if prog is not None else pos
 
 
@@ -356,7 +398,7 @@ def invocations(command, depth=0, tool=None):
             if sub in ACTIONS:  # `$a -join ','` などは通す
                 found.append(("wrapped", []))
         elif head == "cargo":
-            args = _cargo_run_args(rest)
+            args = _cargo_run_args(rest, relax, tool)
             if args is not None:
                 found.append(("direct", args))
         elif head in SHELLS and depth < 3:
